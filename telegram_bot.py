@@ -22,11 +22,12 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
+    CallbackQueryHandler,
     filters,
     ContextTypes,
 )
@@ -303,6 +304,15 @@ def _lock_for(key: tuple[int, int]) -> asyncio.Lock:
         lock = asyncio.Lock()
         chat_locks[key] = lock
     return lock
+
+
+# Реестр отменяемых ожидающих запросов: queue_id -> asyncio.Event.
+# Когда запрос ждёт освобождения lock'а топика, в реестре лежит его event.
+# Callback "cancel_queue:<queue_id>" выставляет event, ожидающая корутина видит
+# это и выходит, не захватывая lock и не вызывая claude.
+# Когда запрос уже начал выполняться (lock захвачен) — его id удаляется из реестра;
+# попытка отменить в этот момент отвечает пользователю «используй /stop».
+pending_queue: dict[str, asyncio.Event] = {}
 
 
 # ---------- Отправка в топик ----------
@@ -782,18 +792,67 @@ async def _process_prompt(
             extra_lines.append(f"[Прикреплён файл: {p}]")
     meta_block = "\n".join(extra_lines)
 
-    # Проверяем, занят ли lock
+    # Проверяем, занят ли lock. Если занят — сообщаем «в очереди» с кнопкой «Отменить».
     lock = _lock_for(key)
+    queue_msg = None
+    queue_id: str | None = None
+    cancel_event: asyncio.Event | None = None
     if lock.locked():
+        queue_id = uuid.uuid4().hex[:12]
+        cancel_event = asyncio.Event()
+        pending_queue[queue_id] = cancel_event
         try:
-            await send_to_topic(
+            kb = InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ Отменить", callback_data=f"cancel_queue:{queue_id}")
+            ]])
+            queue_msg = await send_to_topic(
                 chat, thread_id,
                 "⏳ В очереди — текущий запрос ещё выполняется.",
+                reply_markup=kb,
             )
         except Exception:
-            pass
+            queue_msg = None
 
-    async with lock:
+    # Ожидание lock'а с возможностью отмены.
+    if cancel_event is not None:
+        acquire_task = asyncio.create_task(lock.acquire())
+        cancel_task = asyncio.create_task(cancel_event.wait())
+        try:
+            await asyncio.wait(
+                {acquire_task, cancel_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+        finally:
+            cancel_task.cancel()
+        if cancel_event.is_set():
+            # Отменено. Если lock успел захватиться — освободим.
+            if acquire_task.done() and not acquire_task.cancelled():
+                try:
+                    lock.release()
+                except RuntimeError:
+                    pass
+            else:
+                acquire_task.cancel()
+            pending_queue.pop(queue_id, None)
+            if queue_msg is not None:
+                try:
+                    await queue_msg.edit_text("❌ Отменено пользователем")
+                except Exception:
+                    pass
+            logger.info("queued request cancelled: key=%s queue_id=%s", key, queue_id)
+            return
+        # Дождались lock'а.
+        pending_queue.pop(queue_id, None)
+        # Снимем кнопку «Отменить» — запрос стартует.
+        if queue_msg is not None:
+            try:
+                await queue_msg.edit_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+    else:
+        await lock.acquire()
+
+    try:
         logger.info("lock acquired: key=%s", key)
         # Получаем актуальные session/cwd уже под локом (вдруг /reset сработал)
         session_id, cwd = get_session(*key)
@@ -855,6 +914,11 @@ async def _process_prompt(
 
         logger.info("lock released: key=%s ok=%s files=%d",
                     key, ok, len(file_markers))
+    finally:
+        try:
+            lock.release()
+        except RuntimeError:
+            pass
 
 
 async def _run_spawn(update: Update, user_text: str) -> None:
@@ -988,6 +1052,36 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await _process_prompt(update, caption, attachments=[path])
 
 
+async def on_cancel_queue(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обработка нажатия кнопки «❌ Отменить» на сообщении «в очереди»."""
+    query = update.callback_query
+    if query is None:
+        return
+    data = query.data or ""
+    if not data.startswith("cancel_queue:"):
+        return
+    queue_id = data.split(":", 1)[1]
+    event = pending_queue.get(queue_id)
+    if event is None:
+        # Уже не в очереди: либо стартовал, либо уже отменён ранее.
+        try:
+            await query.answer("Уже выполняется — используй /stop", show_alert=True)
+        except Exception:
+            pass
+        # На всякий случай снимем кнопку, чтобы не нажималась повторно.
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        return
+    event.set()
+    try:
+        await query.answer("Отменено")
+    except Exception:
+        pass
+    # Само сообщение редактируется в ожидающей корутине (в «❌ Отменено пользователем»).
+
+
 async def unauthorized_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     if user is not None:
@@ -1034,6 +1128,7 @@ def main() -> None:
     app.add_handler(MessageHandler(allowed & filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(allowed & filters.Document.ALL, handle_document))
     app.add_handler(MessageHandler(allowed & filters.TEXT & ~filters.COMMAND, handle_text))
+    app.add_handler(CallbackQueryHandler(on_cancel_queue, pattern=r"^cancel_queue:"))
 
     app.add_handler(MessageHandler(~allowed, unauthorized_handler))
 
