@@ -1,0 +1,31 @@
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+
+# IDE
+.idea/
+.vscode/
+.DS_Store
+
+# Project
+temp/
+models/
+.claude/
+
+# State / DB
+bot_state.db
+*.db
+*.sqlite
+*.sqlite3
+
+# Logs
+*.log

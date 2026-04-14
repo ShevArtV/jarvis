@@ -1,0 +1,18 @@
+[Unit]
+Description=Jarvis Telegram Bot (claude CLI wrapper)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/projects/jarvis
+ExecStart=%h/projects/jarvis/venv/bin/python %h/projects/jarvis/telegram_bot.py
+Restart=always
+RestartSec=5
+# PATH нужен, чтобы найти `claude` (обычно в ~/.local/bin)
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
