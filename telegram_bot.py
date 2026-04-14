@@ -1014,7 +1014,10 @@ def main() -> None:
 
     init_db()
 
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
+    # concurrent_updates=True: без этого PTB обрабатывает апдейты последовательно,
+    # и per-key asyncio.Lock не даёт параллельности между разными топиками —
+    # второй топик ждёт, пока освободится воркер PTB, а не сам lock.
+    app = Application.builder().token(TELEGRAM_TOKEN).concurrent_updates(True).build()
 
     allowed = filters.User(user_id=ALLOWED_USER_IDS)
 
