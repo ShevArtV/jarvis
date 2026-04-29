@@ -136,6 +136,7 @@ def _tool_summary(part: dict[str, Any]) -> str:
 
 class OpenCodeEngine:
     name = "opencode"
+    bin_path = OPENCODE_BIN
 
     def new_session_id(self) -> str:
         return f"{_PLACEHOLDER_PREFIX}{uuid.uuid4()}"

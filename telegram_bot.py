@@ -7,9 +7,9 @@
 - Внутри ключа вызовы сериализуются через asyncio.Lock; разные ключи работают параллельно.
 - Используется stream-json: промежуточные сообщения (tool_use/exec, рассуждения)
   показываются пользователю.
-- Движок выбирается переменной JARVIS_ENGINE=claude|codex|opencode (дефолт — claude).
-  Смена движка требует перезапуска; существующие сессии с другим движком
-  автоматически сбрасываются (cwd сохраняется).
+- Движок выбирается per-topic: env JARVIS_ENGINE задаёт дефолт для новых топиков,
+  команда /engine — переключает движок текущего топика (новый session_id, cwd
+  сохраняется; контекст прежнего движка не переносится).
 """
 
 import os
@@ -37,13 +37,20 @@ from telegram.ext import (
 )
 
 from config import TELEGRAM_TOKEN, ALLOWED_USER_IDS, BASE_DIR
-from engines import get_engine
+from engines import (
+    SUPPORTED_ENGINES,
+    Engine,
+    default_engine_name,
+    get_engine_by_name,
+)
 from engines.process_control import terminate_process_tree
 
 # ---------- Константы ----------
 
-# Движок (claude | codex | opencode) выбирается через env и фиксируется на всё время работы процесса.
-ENGINE = get_engine()
+# Движок per-topic: env JARVIS_ENGINE — дефолт для новых топиков; существующие
+# топики хранят свой engine в БД и переключаются командой /engine.
+DEFAULT_ENGINE_NAME = default_engine_name()
+DEFAULT_ENGINE = get_engine_by_name(DEFAULT_ENGINE_NAME)
 
 # Дефолтный cwd для топиков без явного /bind. Имя переменной историческое (CLAUDE_CWD),
 # для обратной совместимости: задаёт дефолт для любого движка.
@@ -197,16 +204,12 @@ def load_message_context(chat_id: int, message_id: int) -> dict | None:
 
 # ---------- Сессии ----------
 
-def _current_engine_name() -> str:
-    return ENGINE.name
+def get_session(chat_id: int, thread_id: int) -> tuple[str, str | None, str]:
+    """Возвращает (session_id, cwd, engine_name) для топика.
 
-
-def get_session(chat_id: int, thread_id: int) -> tuple[str, str | None]:
-    """Возвращает (session_id, cwd) для текущего движка (ENGINE).
-
-    Если в БД лежит сессия от другого движка — автоматически пересоздаём запись
-    с новым id текущего движка (cwd сохраняется). Это даёт бесшовный UX при
-    смене JARVIS_ENGINE: старые id не пытаются резюмироваться «чужим» CLI.
+    Если записи нет — создаёт новую под дефолтный движок (DEFAULT_ENGINE).
+    Engine хранится per-topic; при смене JARVIS_ENGINE существующие топики
+    продолжают работать со своим движком, переключение — через /engine.
     """
     now = datetime.utcnow().isoformat()
     with _db() as conn:
@@ -217,45 +220,67 @@ def get_session(chat_id: int, thread_id: int) -> tuple[str, str | None]:
         ).fetchone()
         if row:
             session_id, cwd, engine_in_db = row
-            if engine_in_db == _current_engine_name():
-                return session_id, cwd
-            # Engine mismatch — пересоздаём запись с новым id для текущего движка.
-            new_id = ENGINE.new_session_id()
-            conn.execute(
-                "UPDATE sessions SET session_id = ?, engine = ?, updated_at = ? "
-                "WHERE chat_id = ? AND thread_id = ?",
-                (new_id, _current_engine_name(), now, chat_id, thread_id),
-            )
-            logger.info(
-                "engine mismatch for key=(%s,%s): was %r, now %r; created fresh session %s",
-                chat_id, thread_id, engine_in_db, _current_engine_name(), new_id,
-            )
-            return new_id, cwd
-        new_id = ENGINE.new_session_id()
+            return session_id, cwd, engine_in_db
+        new_id = DEFAULT_ENGINE.new_session_id()
         conn.execute(
             "INSERT INTO sessions(chat_id, thread_id, session_id, cwd, engine, updated_at) "
             "VALUES (?, ?, ?, NULL, ?, ?)",
-            (chat_id, thread_id, new_id, _current_engine_name(), now),
+            (chat_id, thread_id, new_id, DEFAULT_ENGINE_NAME, now),
         )
-        return new_id, None
+        return new_id, None, DEFAULT_ENGINE_NAME
 
 
-def update_session_id(chat_id: int, thread_id: int, new_session_id: str) -> None:
-    """Обновляет session_id в БД. Используется codex-движком: при первом запуске
-    он отдаёт реальный thread_id в stream'е, opencode — session id; мы
-    подменяем наш placeholder."""
+def update_session_id(
+    chat_id: int, thread_id: int, expected_engine: str, new_session_id: str,
+) -> None:
+    """Обновляет session_id, только если в БД для топика всё ещё лежит
+    `expected_engine`. Используется codex/opencode-движком: при первом запуске
+    они отдают реальный id в stream'е, мы подменяем placeholder. Условие
+    `engine = expected_engine` защищает от race с командой /engine: если
+    пользователь успел переключиться на другой движок, старый стрим не должен
+    перезаписывать новый id."""
     with _db() as conn:
         conn.execute(
             "UPDATE sessions SET session_id = ?, updated_at = ? "
             "WHERE chat_id = ? AND thread_id = ? AND engine = ?",
             (new_session_id, datetime.utcnow().isoformat(),
-             chat_id, thread_id, _current_engine_name()),
+             chat_id, thread_id, expected_engine),
         )
 
 
-def reset_session(chat_id: int, thread_id: int) -> tuple[str, str | None]:
-    """Новый id для текущего движка; cwd сохраняется. Если записи нет — создаётся."""
-    new_id = ENGINE.new_session_id()
+def reset_session(chat_id: int, thread_id: int) -> tuple[str, str | None, str]:
+    """Новый id для движка топика; cwd и engine сохраняются. Если записи
+    нет — создаётся под DEFAULT_ENGINE."""
+    now = datetime.utcnow().isoformat()
+    with _db() as conn:
+        row = conn.execute(
+            "SELECT cwd, engine FROM sessions WHERE chat_id = ? AND thread_id = ?",
+            (chat_id, thread_id),
+        ).fetchone()
+        if row:
+            cwd, engine_name = row
+        else:
+            cwd, engine_name = None, DEFAULT_ENGINE_NAME
+        engine = get_engine_by_name(engine_name)
+        new_id = engine.new_session_id()
+        conn.execute(
+            "INSERT INTO sessions(chat_id, thread_id, session_id, cwd, engine, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(chat_id, thread_id) DO UPDATE SET "
+            "session_id=excluded.session_id, updated_at=excluded.updated_at",
+            (chat_id, thread_id, new_id, cwd, engine_name, now),
+        )
+    return new_id, cwd, engine_name
+
+
+def set_engine(chat_id: int, thread_id: int, new_engine_name: str) -> tuple[str, str | None]:
+    """Меняет движок топика: создаёт новый session_id под новый движок, cwd
+    сохраняется. Если записи не было — создаётся. Возвращает (session_id, cwd).
+
+    Engine-проверка (поддерживается ли имя) — на стороне get_engine_by_name."""
+    new_engine = get_engine_by_name(new_engine_name)
+    new_id = new_engine.new_session_id()
+    now = datetime.utcnow().isoformat()
     with _db() as conn:
         row = conn.execute(
             "SELECT cwd FROM sessions WHERE chat_id = ? AND thread_id = ?",
@@ -267,14 +292,13 @@ def reset_session(chat_id: int, thread_id: int) -> tuple[str, str | None]:
             "VALUES (?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(chat_id, thread_id) DO UPDATE SET "
             "session_id=excluded.session_id, engine=excluded.engine, updated_at=excluded.updated_at",
-            (chat_id, thread_id, new_id, cwd, _current_engine_name(),
-             datetime.utcnow().isoformat()),
+            (chat_id, thread_id, new_id, cwd, new_engine.name, now),
         )
     return new_id, cwd
 
 
 def set_cwd(chat_id: int, thread_id: int, cwd: str) -> None:
-    """Создаёт запись, если её нет (session_id — новый id для текущего движка),
+    """Создаёт запись, если её нет (session_id — новый id для дефолтного движка),
     либо обновляет cwd."""
     now = datetime.utcnow().isoformat()
     with _db() as conn:
@@ -291,8 +315,8 @@ def set_cwd(chat_id: int, thread_id: int, cwd: str) -> None:
             conn.execute(
                 "INSERT INTO sessions(chat_id, thread_id, session_id, cwd, engine, updated_at) "
                 "VALUES (?, ?, ?, ?, ?, ?)",
-                (chat_id, thread_id, ENGINE.new_session_id(), cwd,
-                 _current_engine_name(), now),
+                (chat_id, thread_id, DEFAULT_ENGINE.new_session_id(), cwd,
+                 DEFAULT_ENGINE_NAME, now),
             )
 
 
@@ -578,6 +602,7 @@ async def send_claude_reply(
 # ---------- Вызов LLM CLI (stream) ----------
 
 async def call_llm_stream(
+    engine: Engine,
     session_id: str,
     prompt: str,
     key: tuple[int, int],
@@ -585,13 +610,13 @@ async def call_llm_stream(
     on_intermediate,
     spawn_id: str | None = None,
 ) -> tuple[bool, str, str | None]:
-    """Обёртка над ENGINE.call_stream. Обновляет session_id в БД, если движок
-    вернул изменённый id (актуально для codex — он сам назначает thread_id при
-    первом запуске). Для spawn'а id в БД не сохраняется.
+    """Обёртка над engine.call_stream. Обновляет session_id в БД, если движок
+    вернул изменённый id (актуально для codex/opencode — они сами назначают
+    реальный id при первом запуске). Для spawn'а id в БД не сохраняется.
 
     Возвращает (ok, final_text, session_id_after).
     """
-    ok, final_text, sid_after = await ENGINE.call_stream(
+    ok, final_text, sid_after = await engine.call_stream(
         session_id=session_id,
         prompt=prompt,
         key=key,
@@ -604,10 +629,10 @@ async def call_llm_stream(
     # Для постоянной сессии (не spawn) — если движок отдал новый id, сохраняем.
     if spawn_id is None and sid_after and sid_after != session_id:
         try:
-            update_session_id(key[0], key[1], sid_after)
+            update_session_id(key[0], key[1], engine.name, sid_after)
             logger.info(
-                "session_id updated by engine for key=%s: %s -> %s",
-                key, session_id, sid_after,
+                "session_id updated by engine=%s for key=%s: %s -> %s",
+                engine.name, key, session_id, sid_after,
             )
         except Exception:
             logger.exception("failed to persist new session_id from engine")
@@ -634,16 +659,18 @@ def _build_reply_context_prefix(ctx: dict) -> str:
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     key = _key(update)
-    session_id, cwd = get_session(*key)
+    session_id, cwd, engine_name = get_session(*key)
     effective = cwd or CLAUDE_CWD
     text = (
-        f"Привет! Я Jarvis — Telegram-обёртка над {ENGINE.name} CLI.\n\n"
-        f"Этот топик привязан к сессии `{session_id}`\n"
+        f"Привет! Я Jarvis — Telegram-обёртка над LLM CLI.\n\n"
+        f"Движок этого топика: `{engine_name}` (дефолт: `{DEFAULT_ENGINE_NAME}`)\n"
+        f"session-id: `{session_id}`\n"
         f"Рабочая директория: `{effective}`" + (" (дефолт)" if not cwd else "") + "\n\n"
         "Команды:\n"
+        "/engine [name] — показать/переключить движок (claude|codex|opencode)\n"
         "/new, /reset — новая сессия (cwd сохраняется)\n"
         "/stop — прервать текущий запрос (сессия сохраняется)\n"
-        "/session — показать session-id и cwd\n"
+        "/session — показать session-id, cwd и движок\n"
         "/bind <path> — привязать топик к директории\n"
         "/unbind — сбросить привязку к дефолту\n"
         "/where — эффективный cwd"
@@ -658,11 +685,12 @@ async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if proc is not None:
         await terminate_process_tree(proc)
         logger.info("reset: killed active proc for key=%s", key)
-    new_id, cwd = reset_session(*key)
+    new_id, cwd, engine_name = reset_session(*key)
     effective = cwd or CLAUDE_CWD
-    logger.info("reset: key=%s new_session=%s cwd=%s", key, new_id, effective)
+    logger.info("reset: key=%s engine=%s new_session=%s cwd=%s",
+                key, engine_name, new_id, effective)
     await update.message.reply_text(
-        f"Сессия сброшена, новый id: {new_id}\nCwd: {effective}"
+        f"Сессия сброшена ({engine_name}), новый id: {new_id}\nCwd: {effective}"
     )
 
 
@@ -692,21 +720,87 @@ async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     pid = proc.pid
     await terminate_process_tree(proc)
-    # Достаём session_id из БД и чистим pidfile, чтобы следующий запрос не упёрся в "session in use".
-    session_id, _ = get_session(*key)
-    ENGINE.clear_stale_session_pidfile(session_id)
+    # Достаём session_id и engine из БД, чистим pidfile, чтобы следующий запрос
+    # не упёрся в "session in use".
+    session_id, _, engine_name = get_session(*key)
+    engine = get_engine_by_name(engine_name)
+    engine.clear_stale_session_pidfile(session_id)
     active_procs.pop(key, None)
     logger.info("stop: killed proc pid=%s for key=%s, cleaned pidfile for %s (engine=%s)",
-                pid, key, session_id, ENGINE.name)
+                pid, key, session_id, engine_name)
     await update.message.reply_text("⛔ Текущий запрос прерван. Сессия сохранена.")
 
 
 async def cmd_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     key = _key(update)
-    session_id, cwd = get_session(*key)
+    session_id, cwd, engine_name = get_session(*key)
     effective = cwd or CLAUDE_CWD
     await update.message.reply_text(
-        f"session-id: {session_id}\ncwd: {effective}" + (" (дефолт)" if not cwd else "")
+        f"engine: {engine_name}\nsession-id: {session_id}\ncwd: {effective}"
+        + (" (дефолт)" if not cwd else "")
+    )
+
+
+async def cmd_engine(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/engine — показать движок топика; /engine <name> — переключить.
+
+    Переключение: kill активного процесса, новый session_id под новый движок,
+    cwd сохраняется. Контекст прежнего диалога не переносится.
+    """
+    key = _key(update)
+    args = context.args or []
+    available = ", ".join(SUPPORTED_ENGINES)
+
+    if not args:
+        session_id, _, engine_name = get_session(*key)
+        await update.message.reply_text(
+            f"Движок этого топика: {engine_name}\n"
+            f"session-id: {session_id}\n"
+            f"Доступны: {available}\n"
+            f"Дефолт (для новых топиков): {DEFAULT_ENGINE_NAME}\n\n"
+            f"Переключить: /engine <{available.replace(', ', '|')}>"
+        )
+        return
+
+    target = args[0].strip().lower()
+    if target not in SUPPORTED_ENGINES:
+        await update.message.reply_text(
+            f"Неизвестный движок: {target!r}. Доступны: {available}."
+        )
+        return
+
+    _, _, current_engine = get_session(*key)
+    if target == current_engine:
+        await update.message.reply_text(
+            f"Этот топик уже на движке `{target}`. /new — если нужна свежая сессия."
+        )
+        return
+
+    target_engine = get_engine_by_name(target)
+    if shutil.which(target_engine.bin_path) is None:
+        await update.message.reply_text(
+            f"⚠️ Бинарь `{target_engine.bin_path}` не найден в PATH. "
+            f"Установи {target!r} CLI или задай путь через "
+            f"{target.upper()}_BIN, перезапусти бота."
+        )
+        return
+
+    # Прерываем активный процесс прежнего движка, если он есть.
+    proc = active_procs.get(key)
+    if proc is not None:
+        await terminate_process_tree(proc)
+        active_procs.pop(key, None)
+        logger.info("engine switch: killed active proc for key=%s", key)
+
+    new_id, cwd = set_engine(key[0], key[1], target)
+    effective = cwd or CLAUDE_CWD
+    logger.info("engine switched for key=%s: %s -> %s (new sid=%s)",
+                key, current_engine, target, new_id)
+    await update.message.reply_text(
+        f"🔁 Движок переключён: {current_engine} → {target}\n"
+        f"Новая сессия: {new_id}\n"
+        f"Cwd сохранён: {effective}\n"
+        "Контекст прежнего диалога не переносится."
     )
 
 
@@ -744,7 +838,7 @@ async def cmd_unbind(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 async def cmd_where(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     key = _key(update)
-    _, cwd = get_session(*key)
+    _, cwd, _ = get_session(*key)
     effective = cwd or CLAUDE_CWD
     await update.message.reply_text(
         f"cwd: {effective}" + (" (дефолт)" if not cwd else " (bound)")
@@ -836,8 +930,10 @@ async def _process_prompt(
 
     try:
         logger.info("lock acquired: key=%s", key)
-        # Получаем актуальные session/cwd уже под локом (вдруг /reset сработал)
-        session_id, cwd = get_session(*key)
+        # Получаем актуальные session/cwd/engine уже под локом (вдруг /reset
+        # или /engine сработал, пока мы стояли в очереди).
+        session_id, cwd, engine_name = get_session(*key)
+        engine = get_engine_by_name(engine_name)
         effective_cwd = cwd or CLAUDE_CWD
 
         prompt_parts = [_system_prefix(effective_cwd)]
@@ -882,10 +978,10 @@ async def _process_prompt(
 
         try:
             ok, final_text, _sid_after = await call_llm_stream(
-                session_id, prompt, key, cwd, on_intermediate,
+                engine, session_id, prompt, key, cwd, on_intermediate,
             )
         except Exception as exc:
-            logger.exception("llm call crashed: key=%s engine=%s", key, ENGINE.name)
+            logger.exception("llm call crashed: key=%s engine=%s", key, engine.name)
             ok, final_text = False, f"Внутренняя ошибка: {exc}"
 
         # Удалить индикатор (если можем) и отправить финал
@@ -896,14 +992,14 @@ async def _process_prompt(
                 pass
 
         if not ok and not final_text.strip():
-            logger.info("llm call stopped without final reply: key=%s engine=%s", key, ENGINE.name)
+            logger.info("llm call stopped without final reply: key=%s engine=%s", key, engine.name)
             return
 
         # Извлекаем маркеры файлов и отправляем их отдельными документами.
         cleaned_text, file_markers = extract_file_markers(final_text)
         if not cleaned_text.strip():
             cleaned_text = "(пустой ответ)" if not file_markers else "(см. вложения)"
-        meta = {"type": "claude_response", "engine": ENGINE.name}
+        meta = {"type": "claude_response", "engine": engine.name}
         try:
             await send_claude_reply(chat, thread_id, cleaned_text, meta)
         except Exception:
@@ -912,7 +1008,7 @@ async def _process_prompt(
             await deliver_file_markers(chat, thread_id, file_markers)
 
         logger.info("lock released: key=%s ok=%s files=%d engine=%s",
-                    key, ok, len(file_markers), ENGINE.name)
+                    key, ok, len(file_markers), engine.name)
     finally:
         try:
             lock.release()
@@ -921,8 +1017,9 @@ async def _process_prompt(
 
 
 async def _run_spawn(update: Update, user_text: str) -> None:
-    """Одноразовая параллельная claude-сессия. Не использует lock топика,
-    не сохраняет session_id в БД. Все сообщения помечаются префиксом [#xxxx]."""
+    """Одноразовая параллельная сессия. Не использует lock топика,
+    не сохраняет session_id в БД. Движок наследуется от топика. Все
+    сообщения помечаются префиксом [#xxxx]."""
     key = _key(update)
     chat = update.effective_chat
     thread_id = key[1]
@@ -930,10 +1027,11 @@ async def _run_spawn(update: Update, user_text: str) -> None:
     spawn_id = secrets.token_hex(2)  # 4 hex-символа
     prefix = f"[#{spawn_id}] "
 
-    # cwd наследуется из топика (но session_id новый, в БД не сохраняется).
-    _, cwd = get_session(*key)
+    # cwd и engine наследуются из топика; session_id новый и в БД не сохраняется.
+    _, cwd, engine_name = get_session(*key)
+    engine = get_engine_by_name(engine_name)
     effective_cwd = cwd or CLAUDE_CWD
-    session_id = str(uuid.uuid4())
+    session_id = engine.new_session_id()
 
     prompt = (
         _system_prefix(effective_cwd)
@@ -976,11 +1074,11 @@ async def _run_spawn(update: Update, user_text: str) -> None:
 
     try:
         ok, final_text, _sid_after = await call_llm_stream(
-            session_id, prompt, key, cwd, on_intermediate, spawn_id=spawn_id,
+            engine, session_id, prompt, key, cwd, on_intermediate, spawn_id=spawn_id,
         )
     except Exception as exc:
         logger.exception("spawn crashed: key=%s spawn=%s engine=%s",
-                         key, spawn_id, ENGINE.name)
+                         key, spawn_id, engine.name)
         ok, final_text = False, f"Внутренняя ошибка: {exc}"
 
     if indicator is not None:
@@ -991,7 +1089,7 @@ async def _run_spawn(update: Update, user_text: str) -> None:
 
     if not ok and not final_text.strip():
         logger.info("spawn stopped without final reply: key=%s spawn=%s engine=%s",
-                    key, spawn_id, ENGINE.name)
+                    key, spawn_id, engine.name)
         return
 
     cleaned_text, file_markers = extract_file_markers(final_text)
@@ -1116,7 +1214,7 @@ async def unauthorized_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 # ---------- main ----------
 
 def main() -> None:
-    print(f"=== Jarvis Telegram Bot (per-topic session, engine={ENGINE.name}) ===")
+    print(f"=== Jarvis Telegram Bot (per-topic engine, default={DEFAULT_ENGINE_NAME}) ===")
 
     if not TELEGRAM_TOKEN:
         raise RuntimeError("TELEGRAM_TOKEN не задан. См. .env.example.")
@@ -1138,6 +1236,7 @@ def main() -> None:
     app.add_handler(CommandHandler("stop", cmd_stop, filters=allowed))
     app.add_handler(CommandHandler("spawn", cmd_spawn, filters=allowed))
     app.add_handler(CommandHandler("session", cmd_session, filters=allowed))
+    app.add_handler(CommandHandler("engine", cmd_engine, filters=allowed))
     app.add_handler(CommandHandler("bind", cmd_bind, filters=allowed))
     app.add_handler(CommandHandler("unbind", cmd_unbind, filters=allowed))
     app.add_handler(CommandHandler("where", cmd_where, filters=allowed))
@@ -1150,8 +1249,8 @@ def main() -> None:
     app.add_handler(MessageHandler(~allowed, unauthorized_handler))
 
     logger.info("Whitelisted user_ids: %s", sorted(ALLOWED_USER_IDS))
-    logger.info("Engine: %s  default cwd=%s", ENGINE.name, CLAUDE_CWD)
-    print(f"Бот запущен (engine={ENGINE.name}). Жду сообщения в Telegram...")
+    logger.info("Default engine: %s  default cwd=%s", DEFAULT_ENGINE_NAME, CLAUDE_CWD)
+    print(f"Бот запущен (default engine={DEFAULT_ENGINE_NAME}). Жду сообщения в Telegram...")
     app.run_polling()
 
 

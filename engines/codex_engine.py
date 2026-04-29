@@ -64,6 +64,7 @@ def _codex_sessions_root() -> Path:
 
 class CodexEngine:
     name = "codex"
+    bin_path = CODEX_BIN
 
     # --- Session helpers ---
 

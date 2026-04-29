@@ -44,6 +44,7 @@ def _sessions_dir_for(cwd: str) -> Path:
 
 class ClaudeEngine:
     name = "claude"
+    bin_path = CLAUDE_BIN
 
     # --- Session filesystem helpers ---
 

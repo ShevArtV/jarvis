@@ -7,8 +7,9 @@
 - подчистить stale lock'и своего CLI (для claude — pidfile, для codex — нет смысла);
 - сгенерировать новый session_id (UUID).
 
-`get_engine()` — фабрика: читает env JARVIS_ENGINE (claude|codex|opencode),
-возвращает singleton.
+Движок per-topic: `default_engine_name()` читает env JARVIS_ENGINE и используется
+как дефолт для новых топиков. `get_engine_by_name(name)` возвращает singleton
+адаптера; `get_engine()` — adapter дефолта.
 """
 
 from __future__ import annotations
@@ -20,29 +21,18 @@ from typing import Protocol, Awaitable, Callable
 ENGINE_CLAUDE = "claude"
 ENGINE_CODEX = "codex"
 ENGINE_OPENCODE = "opencode"
-SUPPORTED_ENGINES = {ENGINE_CLAUDE, ENGINE_CODEX, ENGINE_OPENCODE}
+SUPPORTED_ENGINES = (ENGINE_CLAUDE, ENGINE_CODEX, ENGINE_OPENCODE)
 
 
 class Engine(Protocol):
     """Интерфейс адаптера движка. Все методы строго asyncio-safe, где применимо."""
 
-    name: str  # "claude" | "codex" | "opencode"
+    name: str       # "claude" | "codex" | "opencode"
+    bin_path: str   # путь/имя бинаря CLI (для shutil.which)
 
-    def new_session_id(self) -> str:
-        """Вернуть новый id для сессии.
-
-        claude — случайный UUID; codex/opencode — placeholder, настоящий id
-        вернётся из stream при первом запуске.
-        """
-        ...
-
-    def session_exists(self, session_id: str, cwd: str) -> bool:
-        """True — если на диске есть follow-up файл этой сессии, можно резюмировать."""
-        ...
-
-    def clear_stale_session_pidfile(self, session_id: str) -> None:
-        """Убрать stale-lock своего CLI (если актуально). Для codex — no-op."""
-        ...
+    def new_session_id(self) -> str: ...
+    def session_exists(self, session_id: str, cwd: str) -> bool: ...
+    def clear_stale_session_pidfile(self, session_id: str) -> None: ...
 
     async def call_stream(
         self,
@@ -54,40 +44,46 @@ class Engine(Protocol):
         active_procs: dict,
         spawn_procs: dict,
         spawn_id: str | None = None,
-    ) -> tuple[bool, str, str | None]:
-        """Запустить CLI, стримить события, собрать финальный текст.
-
-        Возвращает (ok, final_text, session_id_after).
-        `session_id_after`: для codex/opencode это реальный id, полученный из
-        stream (если сессия только что создана — отличается от переданного
-        placeholder); для claude равен входному `session_id`.
-        """
-        ...
+    ) -> tuple[bool, str, str | None]: ...
 
 
-def get_engine() -> Engine:
-    """Возвращает адаптер согласно JARVIS_ENGINE. Дефолт — claude.
+_CACHE: dict[str, Engine] = {}
 
-    Кэшируется в модуле (singleton): повторный вызов вернёт тот же объект.
-    """
-    global _CACHED
-    try:
-        return _CACHED
-    except NameError:
-        pass
+
+def default_engine_name() -> str:
+    """Имя дефолтного движка из env (для новых топиков). Дефолт — claude."""
     raw = (os.environ.get("JARVIS_ENGINE") or ENGINE_CLAUDE).strip().lower()
     if raw not in SUPPORTED_ENGINES:
         raise RuntimeError(
             f"JARVIS_ENGINE={raw!r} не поддерживается. "
-            f"Допустимо: {sorted(SUPPORTED_ENGINES)}"
+            f"Допустимо: {list(SUPPORTED_ENGINES)}"
         )
-    if raw == ENGINE_CLAUDE:
+    return raw
+
+
+def get_engine_by_name(name: str) -> Engine:
+    """Singleton-кэш адаптера по имени. Бросает RuntimeError для неизвестного имени."""
+    name = name.strip().lower()
+    if name not in SUPPORTED_ENGINES:
+        raise RuntimeError(
+            f"Engine {name!r} не поддерживается. Допустимо: {list(SUPPORTED_ENGINES)}"
+        )
+    cached = _CACHE.get(name)
+    if cached is not None:
+        return cached
+    if name == ENGINE_CLAUDE:
         from engines.claude_engine import ClaudeEngine
-        _CACHED = ClaudeEngine()
-    elif raw == ENGINE_CODEX:
+        eng: Engine = ClaudeEngine()
+    elif name == ENGINE_CODEX:
         from engines.codex_engine import CodexEngine
-        _CACHED = CodexEngine()
+        eng = CodexEngine()
     else:
         from engines.opencode_engine import OpenCodeEngine
-        _CACHED = OpenCodeEngine()
-    return _CACHED
+        eng = OpenCodeEngine()
+    _CACHE[name] = eng
+    return eng
+
+
+def get_engine() -> Engine:
+    """Адаптер дефолтного движка (для новых топиков)."""
+    return get_engine_by_name(default_engine_name())
