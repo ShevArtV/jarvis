@@ -1,28 +1,32 @@
 #!/usr/bin/env python3
-"""Jarvis — тонкая Telegram-обёртка над `claude` CLI.
+"""Jarvis — тонкая Telegram-обёртка над LLM-CLI (claude, codex или opencode).
 
-Модель: «один топик Telegram = один проект = одна постоянная claude-сессия».
+Модель: «один топик Telegram = один проект = одна постоянная LLM-сессия».
 - Ключ сессии — (chat_id, message_thread_id). В не-форумных чатах thread_id=0.
 - Каждый топик может быть привязан к своей рабочей директории (cwd) командой /bind.
 - Внутри ключа вызовы сериализуются через asyncio.Lock; разные ключи работают параллельно.
-- Используется stream-json: промежуточные сообщения (tool_use, рассуждения) показываются пользователю.
+- Используется stream-json: промежуточные сообщения (tool_use/exec, рассуждения)
+  показываются пользователю.
+- Движок выбирается переменной JARVIS_ENGINE=claude|codex|opencode (дефолт — claude).
+  Смена движка требует перезапуска; существующие сессии с другим движком
+  автоматически сбрасываются (cwd сохраняется).
 """
 
 import os
 import re
 import json
+import shutil
 import uuid
 import secrets
 import sqlite3
 import asyncio
 import logging
 import tempfile
-import subprocess
-import time
 from datetime import datetime
-from pathlib import Path
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.constants import ParseMode
+from telegram.error import BadRequest
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -33,32 +37,27 @@ from telegram.ext import (
 )
 
 from config import TELEGRAM_TOKEN, ALLOWED_USER_IDS, BASE_DIR
+from engines import get_engine
+from engines.process_control import terminate_process_tree
 
 # ---------- Константы ----------
 
-CLAUDE_BIN = os.environ.get("CLAUDE_BIN", "claude")
-# Дефолтный cwd для топиков без явного /bind.
+# Движок (claude | codex | opencode) выбирается через env и фиксируется на всё время работы процесса.
+ENGINE = get_engine()
+
+# Дефолтный cwd для топиков без явного /bind. Имя переменной историческое (CLAUDE_CWD),
+# для обратной совместимости: задаёт дефолт для любого движка.
 CLAUDE_CWD = os.environ.get("CLAUDE_CWD", "/home/shevartv")
-CLAUDE_TIMEOUT = int(os.environ.get("CLAUDE_TIMEOUT", "3600"))
 
 MSG_LIMIT = 3500           # порог отправки ответа как документ
 TG_HARD_LIMIT = 4096       # жёсткий лимит Telegram
-INTERMEDIATE_MIN_INTERVAL = 2.0  # сек между апдейтами промежуточного сообщения
 TG_FILE_LIMIT_MB = 50      # Telegram Bot API лимит на sendDocument
 
-# Маркер для отправки файлов из claude-сессии: [[FILE: /abs/path]] или [[FILE: /path | подпись]].
+# Маркер для отправки файлов из LLM-сессии: [[FILE: /abs/path]] или [[FILE: /path | подпись]].
 # Должен стоять на отдельной строке (но допускаются пробелы вокруг).
 FILE_MARKER_RE = re.compile(
     r"^[ \t]*\[\[FILE:\s*(?P<path>[^|\]\n]+?)(?:\s*\|\s*(?P<caption>[^\]\n]+?))?\s*\]\][ \t]*$",
     re.MULTILINE,
-)
-
-APPEND_SYSTEM_PROMPT = (
-    "Если нужно отправить пользователю файл (скриншот, собранный пакет, "
-    "сгенерированный документ и т.п.) — выведи отдельной строкой маркер "
-    "[[FILE: /абсолютный/путь]] (опционально с подписью через '|': "
-    "[[FILE: /путь | подпись]]). Бот автоматически отправит файл в Telegram. "
-    "Используй только для файлов в пределах cwd сессии или явно указанных пользователем."
 )
 
 DB_PATH = os.path.join(BASE_DIR, "bot_state.db")
@@ -90,12 +89,30 @@ def _db() -> sqlite3.Connection:
     return conn
 
 
+def _backup_db_once() -> None:
+    """Перед первой миграцией схемы — однократный бэкап bot_state.db.
+    Имя содержит дату, поэтому «одна копия в сутки» защищает и от повторных перезаписей.
+    """
+    if not os.path.exists(DB_PATH):
+        return
+    stamp = datetime.utcnow().strftime("%Y%m%d")
+    bak_path = f"{DB_PATH}.bak-{stamp}"
+    if os.path.exists(bak_path):
+        return
+    try:
+        shutil.copy2(DB_PATH, bak_path)
+        logger.info("bot_state.db backed up to %s", bak_path)
+    except OSError as exc:
+        logger.warning("failed to backup bot_state.db: %s", exc)
+
+
 def init_db() -> None:
     with _db() as conn:
         # Миграция: если sessions существует со старым PK (chat_id) без колонок thread_id/cwd —
         # пересоздаём таблицу и переносим данные (thread_id=0).
         cols = [r[1] for r in conn.execute("PRAGMA table_info(sessions)").fetchall()]
         if cols and "thread_id" not in cols:
+            _backup_db_once()
             logger.info("migrating sessions table: adding thread_id/cwd, new PK (chat_id, thread_id)")
             conn.execute("ALTER TABLE sessions RENAME TO sessions_old")
             conn.execute(
@@ -105,14 +122,15 @@ def init_db() -> None:
                     thread_id INTEGER NOT NULL DEFAULT 0,
                     session_id TEXT NOT NULL,
                     cwd TEXT,
+                    engine TEXT NOT NULL DEFAULT 'claude',
                     updated_at TEXT NOT NULL,
                     PRIMARY KEY (chat_id, thread_id)
                 )
                 """
             )
             conn.execute(
-                "INSERT INTO sessions(chat_id, thread_id, session_id, cwd, updated_at) "
-                "SELECT chat_id, 0, session_id, NULL, updated_at FROM sessions_old"
+                "INSERT INTO sessions(chat_id, thread_id, session_id, cwd, engine, updated_at) "
+                "SELECT chat_id, 0, session_id, NULL, 'claude', updated_at FROM sessions_old"
             )
             conn.execute("DROP TABLE sessions_old")
             logger.info("sessions migration done")
@@ -124,11 +142,20 @@ def init_db() -> None:
                     thread_id INTEGER NOT NULL DEFAULT 0,
                     session_id TEXT NOT NULL,
                     cwd TEXT,
+                    engine TEXT NOT NULL DEFAULT 'claude',
                     updated_at TEXT NOT NULL,
                     PRIMARY KEY (chat_id, thread_id)
                 )
                 """
             )
+            # Idempotent миграция: добавляем engine в существующую таблицу, если её нет.
+            cols_now = [r[1] for r in conn.execute("PRAGMA table_info(sessions)").fetchall()]
+            if cols_now and "engine" not in cols_now:
+                _backup_db_once()
+                logger.info("adding 'engine' column to sessions (default='claude')")
+                conn.execute(
+                    "ALTER TABLE sessions ADD COLUMN engine TEXT NOT NULL DEFAULT 'claude'"
+                )
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS messages (
@@ -170,27 +197,65 @@ def load_message_context(chat_id: int, message_id: int) -> dict | None:
 
 # ---------- Сессии ----------
 
+def _current_engine_name() -> str:
+    return ENGINE.name
+
+
 def get_session(chat_id: int, thread_id: int) -> tuple[str, str | None]:
-    """Возвращает (session_id, cwd). Если записи нет — создаёт новую с UUID и cwd=NULL."""
+    """Возвращает (session_id, cwd) для текущего движка (ENGINE).
+
+    Если в БД лежит сессия от другого движка — автоматически пересоздаём запись
+    с новым id текущего движка (cwd сохраняется). Это даёт бесшовный UX при
+    смене JARVIS_ENGINE: старые id не пытаются резюмироваться «чужим» CLI.
+    """
+    now = datetime.utcnow().isoformat()
     with _db() as conn:
         row = conn.execute(
-            "SELECT session_id, cwd FROM sessions WHERE chat_id = ? AND thread_id = ?",
+            "SELECT session_id, cwd, engine FROM sessions "
+            "WHERE chat_id = ? AND thread_id = ?",
             (chat_id, thread_id),
         ).fetchone()
         if row:
-            return row[0], row[1]
-        new_id = str(uuid.uuid4())
+            session_id, cwd, engine_in_db = row
+            if engine_in_db == _current_engine_name():
+                return session_id, cwd
+            # Engine mismatch — пересоздаём запись с новым id для текущего движка.
+            new_id = ENGINE.new_session_id()
+            conn.execute(
+                "UPDATE sessions SET session_id = ?, engine = ?, updated_at = ? "
+                "WHERE chat_id = ? AND thread_id = ?",
+                (new_id, _current_engine_name(), now, chat_id, thread_id),
+            )
+            logger.info(
+                "engine mismatch for key=(%s,%s): was %r, now %r; created fresh session %s",
+                chat_id, thread_id, engine_in_db, _current_engine_name(), new_id,
+            )
+            return new_id, cwd
+        new_id = ENGINE.new_session_id()
         conn.execute(
-            "INSERT INTO sessions(chat_id, thread_id, session_id, cwd, updated_at) "
-            "VALUES (?, ?, ?, NULL, ?)",
-            (chat_id, thread_id, new_id, datetime.utcnow().isoformat()),
+            "INSERT INTO sessions(chat_id, thread_id, session_id, cwd, engine, updated_at) "
+            "VALUES (?, ?, ?, NULL, ?, ?)",
+            (chat_id, thread_id, new_id, _current_engine_name(), now),
         )
         return new_id, None
 
 
+def update_session_id(chat_id: int, thread_id: int, new_session_id: str) -> None:
+    """Обновляет session_id в БД. Используется codex-движком: при первом запуске
+    он отдаёт реальный thread_id в stream'е, opencode — session id; мы
+    подменяем наш placeholder."""
+    with _db() as conn:
+        conn.execute(
+            "UPDATE sessions SET session_id = ?, updated_at = ? "
+            "WHERE chat_id = ? AND thread_id = ? AND engine = ?",
+            (new_session_id, datetime.utcnow().isoformat(),
+             chat_id, thread_id, _current_engine_name()),
+        )
+
+
 def reset_session(chat_id: int, thread_id: int) -> tuple[str, str | None]:
-    """Новый UUID; cwd сохраняется. Если записи нет — создаётся."""
-    new_id = str(uuid.uuid4())
+    """Новый id для текущего движка; cwd сохраняется. Если записи нет — создаётся."""
+    new_id = ENGINE.new_session_id()
     with _db() as conn:
         row = conn.execute(
             "SELECT cwd FROM sessions WHERE chat_id = ? AND thread_id = ?",
@@ -198,17 +263,19 @@ def reset_session(chat_id: int, thread_id: int) -> tuple[str, str | None]:
         ).fetchone()
         cwd = row[0] if row else None
         conn.execute(
-            "INSERT INTO sessions(chat_id, thread_id, session_id, cwd, updated_at) "
-            "VALUES (?, ?, ?, ?, ?) "
+            "INSERT INTO sessions(chat_id, thread_id, session_id, cwd, engine, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(chat_id, thread_id) DO UPDATE SET "
-            "session_id=excluded.session_id, updated_at=excluded.updated_at",
-            (chat_id, thread_id, new_id, cwd, datetime.utcnow().isoformat()),
+            "session_id=excluded.session_id, engine=excluded.engine, updated_at=excluded.updated_at",
+            (chat_id, thread_id, new_id, cwd, _current_engine_name(),
+             datetime.utcnow().isoformat()),
         )
     return new_id, cwd
 
 
 def set_cwd(chat_id: int, thread_id: int, cwd: str) -> None:
-    """Создаёт запись, если её нет (session_id — новый UUID), либо обновляет cwd."""
+    """Создаёт запись, если её нет (session_id — новый id для текущего движка),
+    либо обновляет cwd."""
     now = datetime.utcnow().isoformat()
     with _db() as conn:
         row = conn.execute(
@@ -222,9 +289,10 @@ def set_cwd(chat_id: int, thread_id: int, cwd: str) -> None:
             )
         else:
             conn.execute(
-                "INSERT INTO sessions(chat_id, thread_id, session_id, cwd, updated_at) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (chat_id, thread_id, str(uuid.uuid4()), cwd, now),
+                "INSERT INTO sessions(chat_id, thread_id, session_id, cwd, engine, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (chat_id, thread_id, ENGINE.new_session_id(), cwd,
+                 _current_engine_name(), now),
             )
 
 
@@ -234,50 +302,6 @@ def clear_cwd(chat_id: int, thread_id: int) -> None:
             "UPDATE sessions SET cwd = NULL, updated_at = ? WHERE chat_id = ? AND thread_id = ?",
             (datetime.utcnow().isoformat(), chat_id, thread_id),
         )
-
-
-# ---------- Claude sessions dir / pidfile / resume ----------
-
-def _sessions_dir_for(cwd: str) -> Path:
-    """~/.claude/projects/<encoded-cwd>/  (Claude CLI кодирует путь заменой / на -)."""
-    encoded = cwd.replace("/", "-")
-    return Path.home() / ".claude" / "projects" / encoded
-
-
-def _session_exists(session_id: str, cwd: str) -> bool:
-    return (_sessions_dir_for(cwd) / f"{session_id}.jsonl").exists()
-
-
-def _clear_stale_session_pidfile(session_id: str) -> None:
-    """Claude CLI хранит лок-файлы в ~/.claude/sessions/<pid>.json с полем sessionId.
-    Если процесс мёртв — удаляем файл, чтобы --resume не упёрся в 'session in use'."""
-    sessions_dir = Path.home() / ".claude" / "sessions"
-    if not sessions_dir.is_dir():
-        return
-    for p in sessions_dir.glob("*.json"):
-        try:
-            data = json.loads(p.read_text())
-        except Exception:
-            continue
-        if data.get("sessionId") != session_id:
-            continue
-        pid = data.get("pid")
-        alive = False
-        if isinstance(pid, int):
-            try:
-                os.kill(pid, 0)
-                alive = True
-            except ProcessLookupError:
-                alive = False
-            except PermissionError:
-                alive = True  # чужой, не трогаем
-        if not alive:
-            try:
-                p.unlink()
-                logger.info("removed stale session lock %s (pid=%s sid=%s)",
-                            p, pid, session_id)
-            except OSError:
-                pass
 
 
 # ---------- Ключ per-topic ----------
@@ -315,7 +339,107 @@ def _lock_for(key: tuple[int, int]) -> asyncio.Lock:
 pending_queue: dict[str, asyncio.Event] = {}
 
 
+# ---------- Markdown → HTML для Telegram ----------
+
+def _html_escape(s: str) -> str:
+    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+# ```lang\n...\n```  (multiline) или ```...```
+_FENCE_RE = re.compile(r"```([A-Za-z0-9_+\-]*)\n?(.*?)```", re.DOTALL)
+_INLINE_CODE_RE = re.compile(r"`([^`\n]+)`")
+_BOLD_RE = re.compile(r"\*\*(.+?)\*\*", re.DOTALL)
+_ITALIC_RE = re.compile(r"(?<![\*A-Za-z0-9])\*(?!\s)(.+?)(?<!\s)\*(?![\*A-Za-z0-9])", re.DOTALL)
+
+
+def md_to_html(text: str) -> str:
+    """Конвертирует упрощённый markdown от claude в HTML, понятный Telegram.
+    Поддерживает: ```code blocks``` (с языком), `inline`, **bold**, *italic*.
+    Всё, что вне кода, экранируется (<, >, &); внутри кода — тоже."""
+    placeholders: list[str] = []
+
+    def _stash(html: str) -> str:
+        placeholders.append(html)
+        return f"\x00PH{len(placeholders) - 1}\x00"
+
+    def _fence(m: re.Match) -> str:
+        lang = m.group(1) or ""
+        body = m.group(2)
+        body_esc = _html_escape(body)
+        if lang:
+            return _stash(f'<pre><code class="language-{_html_escape(lang)}">{body_esc}</code></pre>')
+        return _stash(f"<pre><code>{body_esc}</code></pre>")
+
+    def _inline(m: re.Match) -> str:
+        return _stash(f"<code>{_html_escape(m.group(1))}</code>")
+
+    text = _FENCE_RE.sub(_fence, text)
+    text = _INLINE_CODE_RE.sub(_inline, text)
+    text = _html_escape(text)
+    text = _BOLD_RE.sub(lambda m: f"<b>{m.group(1)}</b>", text)
+    text = _ITALIC_RE.sub(lambda m: f"<i>{m.group(1)}</i>", text)
+
+    def _restore(m: re.Match) -> str:
+        return placeholders[int(m.group(1))]
+
+    return re.sub(r"\x00PH(\d+)\x00", _restore, text)
+
+
+def split_html_for_telegram(html: str, limit: int = TG_HARD_LIMIT) -> list[str]:
+    """Бьёт HTML на куски ≤ limit, не разрывая открытые <pre>/<code>.
+    Стратегия: режем по \\n, если внутри куска остался незакрытый <pre><code> —
+    закрываем в конце куска и переоткрываем в начале следующего."""
+    if len(html) <= limit:
+        return [html]
+    # Делим по строкам.
+    lines = html.split("\n")
+    chunks: list[str] = []
+    cur = ""
+    for line in lines:
+        candidate = (cur + "\n" + line) if cur else line
+        if len(candidate) <= limit:
+            cur = candidate
+            continue
+        if cur:
+            chunks.append(cur)
+        # Если сама строка длиннее лимита — режем грубо по символам.
+        while len(line) > limit:
+            chunks.append(line[:limit])
+            line = line[limit:]
+        cur = line
+    if cur:
+        chunks.append(cur)
+    # Балансируем <pre><code> между чанками.
+    balanced: list[str] = []
+    open_pre = False
+    for ch in chunks:
+        prefix = "<pre><code>" if open_pre else ""
+        body = prefix + ch
+        # Простой подсчёт: count open vs close <pre>.
+        opens = body.count("<pre>")
+        closes = body.count("</pre>")
+        if opens > closes:
+            body += "</code></pre>"
+            open_pre = True
+        else:
+            open_pre = False
+        balanced.append(body)
+    return balanced
+
+
 # ---------- Отправка в топик ----------
+
+async def _send_with_html_fallback(send_func, text: str, **kwargs):
+    """Шлёт text как HTML; при ошибке парсинга — повторяет без parse_mode (plain)."""
+    try:
+        return await send_func(text=text, parse_mode=ParseMode.HTML, **kwargs)
+    except BadRequest as exc:
+        if "parse" in str(exc).lower() or "entit" in str(exc).lower():
+            logger.warning("HTML parse failed, falling back to plain: %s", exc)
+            kwargs.pop("parse_mode", None)
+            return await send_func(text=text, **kwargs)
+        raise
+
 
 async def send_to_topic(chat, thread_id: int, text: str, **kwargs):
     if thread_id:
@@ -403,17 +527,29 @@ async def deliver_file_markers(
 
 async def send_claude_reply(
     chat, thread_id: int, text: str, meta: dict, filename_prefix: str = "reply",
+    html_prefix: str = "",
 ):
-    """Короткий текст — send_message; длинный — как .md вложение в тот же топик."""
+    """Короткий текст — send_message с HTML-форматированием; длинный — .md вложение.
+    `html_prefix` (например '[#xxxx] ') добавляется как уже готовый HTML-фрагмент
+    перед сконвертированным телом."""
     if len(text) <= MSG_LIMIT:
-        sent = await send_to_topic(chat, thread_id, text[:TG_HARD_LIMIT])
+        html_body = html_prefix + md_to_html(text)
+        chunks = split_html_for_telegram(html_body, TG_HARD_LIMIT)
+        send_kwargs = {}
+        if thread_id:
+            send_kwargs["message_thread_id"] = thread_id
+        sent = None
+        for chunk in chunks:
+            sent = await _send_with_html_fallback(chat.send_message, chunk, **send_kwargs)
         try:
-            save_message_context(chat.id, sent.message_id, meta)
+            if sent is not None:
+                save_message_context(chat.id, sent.message_id, meta)
         except Exception:
             logger.exception("save_message_context failed")
         return sent
 
-    preview = text[:200].rstrip() + "...\n\nполный ответ во вложении"
+    plain_prefix = re.sub(r"<[^>]+>", "", html_prefix) if html_prefix else ""
+    preview = plain_prefix + text[:200].rstrip() + "...\n\nполный ответ во вложении"
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".md", delete=False, encoding="utf-8", dir=MEDIA_DIR,
     ) as f:
@@ -439,172 +575,43 @@ async def send_claude_reply(
             pass
 
 
-# ---------- Вызов claude (stream-json) ----------
+# ---------- Вызов LLM CLI (stream) ----------
 
-async def call_claude_stream(
+async def call_llm_stream(
     session_id: str,
     prompt: str,
     key: tuple[int, int],
     cwd: str | None,
     on_intermediate,
     spawn_id: str | None = None,
-) -> tuple[bool, str]:
-    """Запускает claude с stream-json, парсит события.
-    Возвращает (ok, final_text). Промежуточные события отдаёт в on_intermediate(text).
+) -> tuple[bool, str, str | None]:
+    """Обёртка над ENGINE.call_stream. Обновляет session_id в БД, если движок
+    вернул изменённый id (актуально для codex — он сам назначает thread_id при
+    первом запуске). Для spawn'а id в БД не сохраняется.
 
-    Если spawn_id задан — это одноразовая параллельная сессия (всегда new session),
-    процесс регистрируется в spawn_procs[(chat, thread, spawn_id)], а не в active_procs."""
-    effective_cwd = cwd or CLAUDE_CWD
-
-    is_spawn = spawn_id is not None
-    if is_spawn:
-        # Одноразовая сессия: всегда new, без resume.
-        session_flags = ["--session-id", session_id]
-        resume_mode = False
-    else:
-        resume_mode = _session_exists(session_id, effective_cwd)
-        if resume_mode:
-            _clear_stale_session_pidfile(session_id)
-            session_flags = ["--resume", session_id]
-        else:
-            session_flags = ["--session-id", session_id]
-
-    cmd = [
-        CLAUDE_BIN, "--print",
-        "--permission-mode", "bypassPermissions",
-        "--input-format", "text",
-        "--output-format", "stream-json",
-        "--verbose",
-        "--append-system-prompt", APPEND_SYSTEM_PROMPT,
-        *session_flags,
-        prompt,
-    ]
-
-    logger.info(
-        "claude start: key=%s session=%s mode=%s cwd=%s prompt_len=%d spawn_id=%s",
-        key, session_id, "resume" if resume_mode else "new", effective_cwd, len(prompt),
-        spawn_id,
+    Возвращает (ok, final_text, session_id_after).
+    """
+    ok, final_text, sid_after = await ENGINE.call_stream(
+        session_id=session_id,
+        prompt=prompt,
+        key=key,
+        cwd=cwd,
+        on_intermediate=on_intermediate,
+        active_procs=active_procs,
+        spawn_procs=spawn_procs,
+        spawn_id=spawn_id,
     )
-
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=effective_cwd,
-            limit=10 * 1024 * 1024,
-        )
-    except FileNotFoundError:
-        return False, f"`{CLAUDE_BIN}` не найден в PATH."
-
-    if is_spawn:
-        spawn_procs[(key[0], key[1], spawn_id)] = proc
-    else:
-        active_procs[key] = proc
-
-    final_text = ""
-    buffer_intermediate: list[str] = []
-    last_push = 0.0
-
-    async def flush_intermediate(force: bool = False) -> None:
-        nonlocal last_push
-        if not buffer_intermediate:
-            return
-        now = time.monotonic()
-        if not force and (now - last_push) < INTERMEDIATE_MIN_INTERVAL:
-            return
-        text = "\n".join(buffer_intermediate)
-        buffer_intermediate.clear()
-        last_push = now
+    # Для постоянной сессии (не spawn) — если движок отдал новый id, сохраняем.
+    if spawn_id is None and sid_after and sid_after != session_id:
         try:
-            await on_intermediate(text)
+            update_session_id(key[0], key[1], sid_after)
+            logger.info(
+                "session_id updated by engine for key=%s: %s -> %s",
+                key, session_id, sid_after,
+            )
         except Exception:
-            logger.exception("on_intermediate failed")
-
-    async def read_stream():
-        nonlocal final_text
-        assert proc.stdout is not None
-        while True:
-            line = await proc.stdout.readline()
-            if not line:
-                break
-            raw = line.decode("utf-8", errors="replace").strip()
-            if not raw:
-                continue
-            try:
-                ev = json.loads(raw)
-            except json.JSONDecodeError:
-                continue
-            etype = ev.get("type")
-            if etype == "assistant":
-                msg = ev.get("message", {}) or {}
-                for block in msg.get("content", []) or []:
-                    btype = block.get("type")
-                    if btype == "text":
-                        txt = (block.get("text") or "").strip()
-                        if txt:
-                            buffer_intermediate.append(txt[:800])
-                    elif btype == "tool_use":
-                        name = block.get("name", "?")
-                        inp = block.get("input") or {}
-                        summary = ""
-                        if isinstance(inp, dict):
-                            for k in ("command", "file_path", "path", "pattern", "url", "description"):
-                                if k in inp and inp[k]:
-                                    s = str(inp[k])
-                                    summary = f" {k}={s[:120]}"
-                                    break
-                        buffer_intermediate.append(f"🔧 {name}{summary}")
-                await flush_intermediate()
-            elif etype == "result":
-                r = ev.get("result")
-                if isinstance(r, str):
-                    final_text = r
-
-    try:
-        try:
-            await asyncio.wait_for(read_stream(), timeout=CLAUDE_TIMEOUT)
-        except asyncio.TimeoutError:
-            try:
-                proc.kill()
-            except ProcessLookupError:
-                pass
-            await proc.wait()
-            return False, f"Timeout: claude не ответил за {CLAUDE_TIMEOUT}с."
-        await proc.wait()
-    except asyncio.CancelledError:
-        try:
-            proc.kill()
-        except ProcessLookupError:
-            pass
-        raise
-    finally:
-        await flush_intermediate(force=True)
-        if is_spawn:
-            skey = (key[0], key[1], spawn_id)
-            if spawn_procs.get(skey) is proc:
-                spawn_procs.pop(skey, None)
-        else:
-            if active_procs.get(key) is proc:
-                active_procs.pop(key, None)
-
-    stderr_text = ""
-    if proc.stderr is not None:
-        try:
-            stderr_b = await proc.stderr.read()
-            stderr_text = stderr_b.decode("utf-8", errors="replace")
-        except Exception:
-            pass
-
-    if proc.returncode != 0:
-        logger.warning("claude rc=%s stderr=%s", proc.returncode, stderr_text[:500])
-        if not final_text:
-            return False, f"Ошибка claude (rc={proc.returncode}): {stderr_text[:1500] or '(пусто)'}"
-
-    logger.info("claude done: key=%s rc=%s final_len=%d", key, proc.returncode, len(final_text))
-    if not final_text.strip():
-        return False, "claude вернул пустой ответ." + (f"\n{stderr_text[:500]}" if stderr_text else "")
-    return True, final_text
+            logger.exception("failed to persist new session_id from engine")
+    return ok, final_text, sid_after
 
 
 # ---------- Reply-to контекст ----------
@@ -630,7 +637,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     session_id, cwd = get_session(*key)
     effective = cwd or CLAUDE_CWD
     text = (
-        "Привет! Я Jarvis — Telegram-обёртка над claude CLI.\n\n"
+        f"Привет! Я Jarvis — Telegram-обёртка над {ENGINE.name} CLI.\n\n"
         f"Этот топик привязан к сессии `{session_id}`\n"
         f"Рабочая директория: `{effective}`" + (" (дефолт)" if not cwd else "") + "\n\n"
         "Команды:\n"
@@ -649,10 +656,7 @@ async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # Прерываем активный процесс
     proc = active_procs.get(key)
     if proc is not None:
-        try:
-            proc.kill()
-        except ProcessLookupError:
-            pass
+        await terminate_process_tree(proc)
         logger.info("reset: killed active proc for key=%s", key)
     new_id, cwd = reset_session(*key)
     effective = cwd or CLAUDE_CWD
@@ -673,18 +677,7 @@ async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if sproc is None or sproc.returncode is not None:
             await update.message.reply_text(f"Spawn [#{spawn_id}] не найден или уже завершён.")
             return
-        try:
-            sproc.terminate()
-            try:
-                await asyncio.wait_for(sproc.wait(), timeout=2)
-            except asyncio.TimeoutError:
-                sproc.kill()
-                try:
-                    await asyncio.wait_for(sproc.wait(), timeout=2)
-                except asyncio.TimeoutError:
-                    pass
-        except ProcessLookupError:
-            pass
+        await terminate_process_tree(sproc)
         spawn_procs.pop(skey, None)
         await update.message.reply_text(f"⛔ Spawn [#{spawn_id}] прерван.")
         return
@@ -698,24 +691,13 @@ async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
     pid = proc.pid
-    try:
-        proc.terminate()
-        try:
-            await asyncio.wait_for(proc.wait(), timeout=2)
-        except asyncio.TimeoutError:
-            proc.kill()
-            try:
-                await asyncio.wait_for(proc.wait(), timeout=2)
-            except asyncio.TimeoutError:
-                pass
-    except ProcessLookupError:
-        pass
+    await terminate_process_tree(proc)
     # Достаём session_id из БД и чистим pidfile, чтобы следующий запрос не упёрся в "session in use".
     session_id, _ = get_session(*key)
-    _clear_stale_session_pidfile(session_id)
+    ENGINE.clear_stale_session_pidfile(session_id)
     active_procs.pop(key, None)
-    logger.info("stop: killed proc pid=%s for key=%s, cleaned pidfile for %s",
-                pid, key, session_id)
+    logger.info("stop: killed proc pid=%s for key=%s, cleaned pidfile for %s (engine=%s)",
+                pid, key, session_id, ENGINE.name)
     await update.message.reply_text("⛔ Текущий запрос прерван. Сессия сохранена.")
 
 
@@ -874,23 +856,36 @@ async def _process_prompt(
         async def on_intermediate(text: str) -> None:
             nonlocal indicator
             preview = text[-TG_HARD_LIMIT + 20:]
+            html_preview = md_to_html(preview)
             if indicator is not None:
                 try:
-                    await indicator.edit_text(preview)
+                    await indicator.edit_text(html_preview, parse_mode=ParseMode.HTML)
                     return
+                except BadRequest as exc:
+                    if "parse" in str(exc).lower() or "entit" in str(exc).lower():
+                        try:
+                            await indicator.edit_text(preview)
+                            return
+                        except Exception:
+                            indicator = None
+                    else:
+                        indicator = None
                 except Exception:
                     indicator = None
             try:
-                indicator = await send_to_topic(chat, thread_id, preview)
+                indicator = await _send_with_html_fallback(
+                    chat.send_message, html_preview,
+                    **({"message_thread_id": thread_id} if thread_id else {}),
+                )
             except Exception:
                 pass
 
         try:
-            ok, final_text = await call_claude_stream(
+            ok, final_text, _sid_after = await call_llm_stream(
                 session_id, prompt, key, cwd, on_intermediate,
             )
         except Exception as exc:
-            logger.exception("claude call crashed: key=%s", key)
+            logger.exception("llm call crashed: key=%s engine=%s", key, ENGINE.name)
             ok, final_text = False, f"Внутренняя ошибка: {exc}"
 
         # Удалить индикатор (если можем) и отправить финал
@@ -900,20 +895,24 @@ async def _process_prompt(
             except Exception:
                 pass
 
+        if not ok and not final_text.strip():
+            logger.info("llm call stopped without final reply: key=%s engine=%s", key, ENGINE.name)
+            return
+
         # Извлекаем маркеры файлов и отправляем их отдельными документами.
         cleaned_text, file_markers = extract_file_markers(final_text)
         if not cleaned_text.strip():
             cleaned_text = "(пустой ответ)" if not file_markers else "(см. вложения)"
-        meta = {"type": "claude_response"}
+        meta = {"type": "claude_response", "engine": ENGINE.name}
         try:
             await send_claude_reply(chat, thread_id, cleaned_text, meta)
         except Exception:
-            logger.exception("failed to send claude reply: key=%s", key)
+            logger.exception("failed to send llm reply: key=%s", key)
         if file_markers:
             await deliver_file_markers(chat, thread_id, file_markers)
 
-        logger.info("lock released: key=%s ok=%s files=%d",
-                    key, ok, len(file_markers))
+        logger.info("lock released: key=%s ok=%s files=%d engine=%s",
+                    key, ok, len(file_markers), ENGINE.name)
     finally:
         try:
             lock.release()
@@ -950,24 +949,38 @@ async def _run_spawn(update: Update, user_text: str) -> None:
     async def on_intermediate(text: str) -> None:
         nonlocal indicator
         body = text[-(TG_HARD_LIMIT - len(prefix) - 20):]
-        msg = prefix + body
+        html_msg = _html_escape(prefix) + md_to_html(body)
+        plain_msg = prefix + body
         if indicator is not None:
             try:
-                await indicator.edit_text(msg)
+                await indicator.edit_text(html_msg, parse_mode=ParseMode.HTML)
                 return
+            except BadRequest as exc:
+                if "parse" in str(exc).lower() or "entit" in str(exc).lower():
+                    try:
+                        await indicator.edit_text(plain_msg)
+                        return
+                    except Exception:
+                        indicator = None
+                else:
+                    indicator = None
             except Exception:
                 indicator = None
         try:
-            indicator = await send_to_topic(chat, thread_id, msg)
+            indicator = await _send_with_html_fallback(
+                chat.send_message, html_msg,
+                **({"message_thread_id": thread_id} if thread_id else {}),
+            )
         except Exception:
             pass
 
     try:
-        ok, final_text = await call_claude_stream(
+        ok, final_text, _sid_after = await call_llm_stream(
             session_id, prompt, key, cwd, on_intermediate, spawn_id=spawn_id,
         )
     except Exception as exc:
-        logger.exception("spawn crashed: key=%s spawn=%s", key, spawn_id)
+        logger.exception("spawn crashed: key=%s spawn=%s engine=%s",
+                         key, spawn_id, ENGINE.name)
         ok, final_text = False, f"Внутренняя ошибка: {exc}"
 
     if indicator is not None:
@@ -976,16 +989,20 @@ async def _run_spawn(update: Update, user_text: str) -> None:
         except Exception:
             pass
 
+    if not ok and not final_text.strip():
+        logger.info("spawn stopped without final reply: key=%s spawn=%s engine=%s",
+                    key, spawn_id, ENGINE.name)
+        return
+
     cleaned_text, file_markers = extract_file_markers(final_text)
     if not cleaned_text.strip():
         cleaned_text = "(пустой ответ)" if not file_markers else "(см. вложения)"
-    # Префиксуем финальный ответ
-    final_with_prefix = prefix + cleaned_text
     meta = {"type": "claude_response", "spawn_id": spawn_id}
     try:
         await send_claude_reply(
-            chat, thread_id, final_with_prefix, meta,
+            chat, thread_id, cleaned_text, meta,
             filename_prefix=f"spawn_{spawn_id}",
+            html_prefix=_html_escape(prefix),
         )
     except Exception:
         logger.exception("failed to send spawn reply: key=%s spawn=%s", key, spawn_id)
@@ -1099,7 +1116,7 @@ async def unauthorized_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 # ---------- main ----------
 
 def main() -> None:
-    print("=== Jarvis Telegram Bot (per-topic claude session) ===")
+    print(f"=== Jarvis Telegram Bot (per-topic session, engine={ENGINE.name}) ===")
 
     if not TELEGRAM_TOKEN:
         raise RuntimeError("TELEGRAM_TOKEN не задан. См. .env.example.")
@@ -1133,8 +1150,8 @@ def main() -> None:
     app.add_handler(MessageHandler(~allowed, unauthorized_handler))
 
     logger.info("Whitelisted user_ids: %s", sorted(ALLOWED_USER_IDS))
-    logger.info("Claude binary: %s  default cwd=%s", CLAUDE_BIN, CLAUDE_CWD)
-    print("Бот запущен. Жду сообщения в Telegram...")
+    logger.info("Engine: %s  default cwd=%s", ENGINE.name, CLAUDE_CWD)
+    print(f"Бот запущен (engine={ENGINE.name}). Жду сообщения в Telegram...")
     app.run_polling()
 
 

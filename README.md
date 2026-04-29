@@ -1,12 +1,13 @@
 # Jarvis
 
-Тонкая обёртка Telegram-бота над `claude` CLI. Один чат = одна непрерывная Claude-сессия.
-Пишешь в Telegram — получаешь ответ от Claude, как если бы запускал `claude` в терминале.
+Тонкая обёртка Telegram-бота над LLM CLI (`claude`, `codex` или `opencode`). Один топик = одна непрерывная сессия.
+Пишешь в Telegram — получаешь ответ, как если бы запускал CLI в терминале.
 
 ## Что умеет
 
-- Передаёт любые текстовые запросы в `claude --print --session-id <uuid>`.
-- Запоминает `session-id` на каждый чат — контекст диалога сохраняется.
+- Передаёт любые текстовые запросы в выбранный движок (`claude`, OpenAI `codex` или `opencode`).
+- Запоминает session-id на каждый топик — контекст диалога сохраняется.
+- Движок выбирается переменной `JARVIS_ENGINE=claude|codex|opencode` (дефолт — claude).
 - `/new` или `/reset` — начать новую сессию.
 - `/session` — показать текущий session-id.
 - Длинные ответы (> 3500 символов) присылаются как `.md`-файл с коротким превью.
@@ -39,9 +40,42 @@ claude -p "hello"   # проверка, что авторизация работ
 
 ### Переменные окружения (опционально)
 
+- `JARVIS_ENGINE` — `claude` (дефолт), `codex` или `opencode`. Выбирает движок; фиксируется
+  на всё время жизни процесса. При смене движка старые сессии другого движка
+  автоматически пересоздаются (cwd сохраняется).
 - `CLAUDE_BIN` — путь к бинарю claude (по умолчанию `claude`).
-- `CLAUDE_CWD` — рабочий каталог для `claude` (по умолчанию `$HOME`).
-- `CLAUDE_TIMEOUT` — таймаут одного вызова, секунд (по умолчанию `600`).
+- `CODEX_BIN` — путь к бинарю codex (по умолчанию `codex`).
+- `OPENCODE_BIN` — путь к бинарю opencode (по умолчанию `opencode`).
+- `CLAUDE_CWD` — дефолтный рабочий каталог (общий для всех движков).
+- `CLAUDE_TIMEOUT` — таймаут claude, секунд (по умолчанию `3600`).
+- `CODEX_TIMEOUT` — таймаут codex, секунд (по умолчанию `3600`).
+- `OPENCODE_TIMEOUT` — таймаут opencode, секунд (по умолчанию `3600`).
+- `OPENCODE_MODEL`, `OPENCODE_AGENT`, `OPENCODE_VARIANT` — опциональные параметры
+  для `opencode run`; если не заданы, используются настройки самого opencode.
+
+### Переход на Codex CLI
+
+1. `npm i -g @openai/codex`, затем `codex login` (ChatGPT) или `export OPENAI_API_KEY=...`.
+2. Синхронизировать пользовательские правила и память в `~/.codex/AGENTS.md`:
+   ```bash
+   ./venv/bin/python scripts/sync_codex_knowledge.py
+   ```
+   Скрипт идемпотентен, запускается перед стартом бота или вручную.
+3. Добавить в `.env`: `JARVIS_ENGINE=codex`.
+4. `systemctl --user restart jarvis-bot.service`.
+
+### Переход на opencode
+
+1. Убедиться, что `opencode` установлен и авторизован:
+   ```bash
+   opencode --version
+   opencode auth list
+   ```
+2. При необходимости задать модель/агента через opencode config или env:
+   `OPENCODE_MODEL=provider/model`, `OPENCODE_AGENT=build`.
+3. Добавить в `.env`: `JARVIS_ENGINE=opencode`. Если `opencode` установлен через nvm
+   и не виден systemd-сервису, также задать `OPENCODE_BIN=/полный/путь/к/opencode`.
+4. `systemctl --user restart jarvis-bot.service`.
 
 ## Запуск вручную
 
@@ -81,8 +115,10 @@ journalctl --user -u jarvis-bot -f
 
 ## Известные ограничения
 
-- Session-id генерируется ботом и передаётся через `--session-id`; если удалить каталог
+- Session-id у `claude` генерируется ботом и передаётся через `--session-id`; если удалить каталог
   `~/.claude/projects/...` или история будет повреждена, сессия «забудет» контекст.
+- У `codex` и `opencode` настоящий id создаёт сам CLI; до первого ответа в БД лежит
+  временный placeholder, затем бот заменяет его на реальный id.
 - `claude` запускается с `--permission-mode bypassPermissions`, чтобы не зависать
   на подтверждениях tool-use. Это значит, что агент может делать в `CLAUDE_CWD`
   всё, что умеет. Ограничивай каталог по необходимости.

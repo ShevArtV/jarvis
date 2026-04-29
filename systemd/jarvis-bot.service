@@ -1,15 +1,22 @@
 [Unit]
-Description=Jarvis Telegram Bot (claude CLI wrapper)
+Description=Jarvis Telegram Bot (LLM CLI wrapper — claude, codex or opencode)
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
 WorkingDirectory=%h/projects/jarvis
+# Движок выбирается через JARVIS_ENGINE (claude|codex|opencode). Перезадай в override.conf
+# (`systemctl --user edit jarvis-bot.service`) или через .env проекта.
+#
+# Для codex: раскомментируй ExecStartPre, чтобы перед каждым стартом
+# обновлять ~/.codex/AGENTS.md из claude-настроек и ~/knowledge/.
+# ExecStartPre=%h/projects/jarvis/venv/bin/python %h/projects/jarvis/scripts/sync_codex_knowledge.py
 ExecStart=%h/projects/jarvis/venv/bin/python %h/projects/jarvis/telegram_bot.py
 Restart=always
 RestartSec=5
-# PATH нужен, чтобы найти `claude` (обычно в ~/.local/bin)
+# PATH нужен, чтобы найти `claude`/`codex`/`opencode` (обычно в ~/.local/bin, ~/.nvm/...).
+# Для codex/opencode через nvm путь задай явно в override.conf или расширь Environment=PATH.
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 StandardOutput=journal
 StandardError=journal
