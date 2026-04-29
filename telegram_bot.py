@@ -24,7 +24,15 @@ import logging
 import tempfile
 from datetime import datetime
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import (
+    BotCommand,
+    BotCommandScopeAllGroupChats,
+    BotCommandScopeAllPrivateChats,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    MenuButtonCommands,
+    Update,
+)
 from telegram.constants import ParseMode
 from telegram.error import BadRequest
 from telegram.ext import (
@@ -163,6 +171,15 @@ def init_db() -> None:
                 conn.execute(
                     "ALTER TABLE sessions ADD COLUMN engine TEXT NOT NULL DEFAULT 'claude'"
                 )
+            # Idempotent миграция: pending_summary — резюме предыдущей сессии другого
+            # движка, ждущее доставки в первый prompt после /engine с переносом.
+            cols_now = [r[1] for r in conn.execute("PRAGMA table_info(sessions)").fetchall()]
+            if cols_now and "pending_summary" not in cols_now:
+                _backup_db_once()
+                logger.info("adding 'pending_summary' column to sessions")
+                conn.execute(
+                    "ALTER TABLE sessions ADD COLUMN pending_summary TEXT"
+                )
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS messages (
@@ -295,6 +312,36 @@ def set_engine(chat_id: int, thread_id: int, new_engine_name: str) -> tuple[str,
             (chat_id, thread_id, new_id, cwd, new_engine.name, now),
         )
     return new_id, cwd
+
+
+def set_pending_summary(chat_id: int, thread_id: int, summary: str) -> None:
+    """Сохраняет резюме предыдущей сессии — будет доставлено в первый prompt
+    после переключения движка."""
+    with _db() as conn:
+        conn.execute(
+            "UPDATE sessions SET pending_summary = ?, updated_at = ? "
+            "WHERE chat_id = ? AND thread_id = ?",
+            (summary, datetime.utcnow().isoformat(), chat_id, thread_id),
+        )
+
+
+def pop_pending_summary(chat_id: int, thread_id: int) -> str | None:
+    """Atomically: вернуть pending_summary и очистить его. Возвращает None,
+    если резюме нет."""
+    with _db() as conn:
+        row = conn.execute(
+            "SELECT pending_summary FROM sessions WHERE chat_id = ? AND thread_id = ?",
+            (chat_id, thread_id),
+        ).fetchone()
+        if not row or not row[0]:
+            return None
+        summary = row[0]
+        conn.execute(
+            "UPDATE sessions SET pending_summary = NULL, updated_at = ? "
+            "WHERE chat_id = ? AND thread_id = ?",
+            (datetime.utcnow().isoformat(), chat_id, thread_id),
+        )
+        return summary
 
 
 def set_cwd(chat_id: int, thread_id: int, cwd: str) -> None:
@@ -741,51 +788,59 @@ async def cmd_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     )
 
 
-async def cmd_engine(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/engine — показать движок топика; /engine <name> — переключить.
+def _engine_keyboard(current_engine: str) -> InlineKeyboardMarkup:
+    """Inline-клавиатура с кнопками выбора движка. Текущий помечается ✓."""
+    row = []
+    for name in SUPPORTED_ENGINES:
+        label = f"✓ {name}" if name == current_engine else name
+        row.append(InlineKeyboardButton(label, callback_data=f"engine_select:{name}"))
+    return InlineKeyboardMarkup([row])
 
-    Переключение: kill активного процесса, новый session_id под новый движок,
-    cwd сохраняется. Контекст прежнего диалога не переносится.
-    """
-    key = _key(update)
-    args = context.args or []
+
+def _carry_keyboard(old_engine: str, new_engine: str) -> InlineKeyboardMarkup:
+    """Inline-клавиатура «перенести контекст?». callback_data короткие
+    (Telegram-лимит 64 байта), движки трёхбуквенно: c/o/k для claude/codex/opencode? нет —
+    оставим полные имена, длина с запасом."""
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton(
+            "✅ Да, с резюме",
+            callback_data=f"engine_carry:{old_engine}:{new_engine}:y",
+        ),
+        InlineKeyboardButton(
+            "🚫 Нет, чисто",
+            callback_data=f"engine_carry:{old_engine}:{new_engine}:n",
+        ),
+    ]])
+
+
+def _engine_precheck(key: tuple[int, int], target: str) -> tuple[bool, str, str | None]:
+    """Проверяет переключение ДО действий. Возвращает (ok, message, current_engine).
+    current_engine != None даже при ok=False (если запись в БД есть)."""
     available = ", ".join(SUPPORTED_ENGINES)
-
-    if not args:
-        session_id, _, engine_name = get_session(*key)
-        await update.message.reply_text(
-            f"Движок этого топика: {engine_name}\n"
-            f"session-id: {session_id}\n"
-            f"Доступны: {available}\n"
-            f"Дефолт (для новых топиков): {DEFAULT_ENGINE_NAME}\n\n"
-            f"Переключить: /engine <{available.replace(', ', '|')}>"
-        )
-        return
-
-    target = args[0].strip().lower()
     if target not in SUPPORTED_ENGINES:
-        await update.message.reply_text(
-            f"Неизвестный движок: {target!r}. Доступны: {available}."
-        )
-        return
+        return False, f"Неизвестный движок: {target!r}. Доступны: {available}.", None
 
     _, _, current_engine = get_session(*key)
     if target == current_engine:
-        await update.message.reply_text(
+        return False, (
             f"Этот топик уже на движке `{target}`. /new — если нужна свежая сессия."
-        )
-        return
+        ), current_engine
 
     target_engine = get_engine_by_name(target)
     if shutil.which(target_engine.bin_path) is None:
-        await update.message.reply_text(
+        return False, (
             f"⚠️ Бинарь `{target_engine.bin_path}` не найден в PATH. "
             f"Установи {target!r} CLI или задай путь через "
             f"{target.upper()}_BIN, перезапусти бота."
-        )
-        return
+        ), current_engine
 
-    # Прерываем активный процесс прежнего движка, если он есть.
+    return True, "", current_engine
+
+
+async def _do_engine_switch(key: tuple[int, int], target: str) -> str:
+    """Финальное действие переключения (без pre-check, который уже сделан вызывающим).
+    Прерывает активный процесс, создаёт новый session_id, возвращает текст ответа."""
+    _, _, current_engine = get_session(*key)
     proc = active_procs.get(key)
     if proc is not None:
         await terminate_process_tree(proc)
@@ -796,12 +851,234 @@ async def cmd_engine(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     effective = cwd or CLAUDE_CWD
     logger.info("engine switched for key=%s: %s -> %s (new sid=%s)",
                 key, current_engine, target, new_id)
-    await update.message.reply_text(
+    return (
         f"🔁 Движок переключён: {current_engine} → {target}\n"
         f"Новая сессия: {new_id}\n"
-        f"Cwd сохранён: {effective}\n"
-        "Контекст прежнего диалога не переносится."
+        f"Cwd сохранён: {effective}"
     )
+
+
+async def _do_engine_handoff(
+    key: tuple[int, int],
+    old_engine_name: str,
+    new_engine_name: str,
+    progress_edit,
+) -> str:
+    """Сценарий «с переносом»: 1) lock топика, 2) попросить старый движок
+    выдать summary, 3) сохранить в pending_summary, 4) переключить движок.
+    `progress_edit(text)` — async-функция для обновления карточки в чате."""
+    chat_id, thread_id = key
+    old_engine = get_engine_by_name(old_engine_name)
+    old_session_id, cwd, _ = get_session(*key)
+    effective_cwd = cwd or CLAUDE_CWD
+
+    summary_prompt = (
+        _system_prefix(effective_cwd)
+        + "\n\n---\n\n"
+        "Сделай краткое резюме нашего диалога для передачи другому LLM-агенту, "
+        "который продолжит разговор вместо тебя. Включи: 1) цель/задачу, "
+        "2) текущий статус и ключевые решения, 3) что уже выяснено или сделано, "
+        "4) открытые вопросы и следующий шаг. До 2000 символов. Без преамбул "
+        "и заключений — только сам summary, чтобы агент сразу понял контекст."
+    )
+
+    lock = _lock_for(key)
+    if lock.locked():
+        return (
+            "⚠️ Топик занят активным запросом. Дождись завершения или /stop, "
+            "потом повтори переключение."
+        )
+
+    await lock.acquire()
+    try:
+        await progress_edit(f"🧠 Снимаю резюме сессии у {old_engine_name}...")
+
+        async def on_intermediate(_text: str) -> None:
+            # промежуточные сообщения от старого движка не показываем —
+            # пользователь и так знает, что мы снимаем резюме.
+            pass
+
+        try:
+            ok, summary_text, _sid_after = await call_llm_stream(
+                old_engine, old_session_id, summary_prompt, key, cwd, on_intermediate,
+            )
+        except Exception as exc:
+            logger.exception("handoff summary call crashed: key=%s engine=%s",
+                             key, old_engine_name)
+            return f"❌ Ошибка при снятии резюме: {exc}\nПереключение отменено."
+
+        if not ok or not summary_text.strip():
+            return (
+                f"❌ {old_engine_name} не вернул резюме. Переключение отменено. "
+                "Можешь попробовать без переноса контекста."
+            )
+
+        # cleaned: вырежем file-маркеры (если случайно попали), не нужны в саммари.
+        cleaned, _ = extract_file_markers(summary_text)
+        cleaned = cleaned.strip() or summary_text.strip()
+        # Безопасный лимит — Telegram-сообщения тут не ограничивают, но сильно
+        # длинный summary раздует первый prompt. 4000 символов с запасом.
+        cleaned = cleaned[:4000]
+
+        # Переключаем движок и сохраняем pending_summary.
+        await progress_edit("🔁 Переключаю движок...")
+        switch_text = await _do_engine_switch(key, new_engine_name)
+        set_pending_summary(chat_id, thread_id, cleaned)
+        logger.info("handoff: stored pending_summary for key=%s (%d chars)",
+                    key, len(cleaned))
+
+        preview = cleaned[:200].rstrip()
+        if len(cleaned) > 200:
+            preview += "..."
+        return (
+            f"{switch_text}\n\n"
+            f"📝 Резюме от {old_engine_name} сохранено и будет передано в первое "
+            f"твоё сообщение новому движку.\n\n"
+            f"<i>preview:</i>\n<code>{_html_escape(preview)}</code>"
+        )
+    finally:
+        try:
+            lock.release()
+        except RuntimeError:
+            pass
+
+
+async def cmd_engine(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/engine — показать движок топика с кнопками переключения;
+    /engine <name> — переключить без переноса контекста (старое поведение
+    при текстовом аргументе)."""
+    key = _key(update)
+    args = context.args or []
+
+    if not args:
+        session_id, _, engine_name = get_session(*key)
+        await update.message.reply_text(
+            f"Движок этого топика: {engine_name}\n"
+            f"session-id: {session_id}\n"
+            f"Дефолт (для новых топиков): {DEFAULT_ENGINE_NAME}\n\n"
+            "Выбери новый движок ниже или введи /engine <name>.",
+            reply_markup=_engine_keyboard(engine_name),
+        )
+        return
+
+    target = args[0].strip().lower()
+    ok, msg, _ = _engine_precheck(key, target)
+    if not ok:
+        await update.message.reply_text(msg)
+        return
+    text = await _do_engine_switch(key, target)
+    await update.message.reply_text(text + "\nКонтекст прежнего диалога не переносится.")
+
+
+async def on_engine_select(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Callback от inline-кнопки выбора движка. Не переключает сразу — после
+    pre-check'а спрашивает: переносить контекст?"""
+    query = update.callback_query
+    if query is None:
+        return
+    data = query.data or ""
+    if not data.startswith("engine_select:"):
+        return
+    target = data.split(":", 1)[1].strip().lower()
+    key = _key(update)
+
+    ok, msg, current = _engine_precheck(key, target)
+    if not ok:
+        try:
+            await query.answer("Не могу переключить", show_alert=False)
+        except Exception:
+            pass
+        try:
+            await query.edit_message_text(
+                msg + (f"\n\n(текущий движок: {current})" if current else ""),
+                reply_markup=_engine_keyboard(current) if current else None,
+            )
+        except BadRequest:
+            await send_to_topic(update.effective_chat, key[1], msg)
+        return
+
+    try:
+        await query.answer()
+    except Exception:
+        pass
+    try:
+        await query.edit_message_text(
+            f"Переключаюсь {current} → {target}.\n"
+            "Перенести контекст текущего диалога в новый движок?\n"
+            "(резюме старого движка будет добавлено к первому твоему сообщению)",
+            reply_markup=_carry_keyboard(current, target),
+        )
+    except BadRequest:
+        await send_to_topic(
+            update.effective_chat, key[1],
+            f"Переключаюсь {current} → {target}. Перенести контекст?",
+            reply_markup=_carry_keyboard(current, target),
+        )
+
+
+async def on_engine_carry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Callback после ответа «Да/Нет» на вопрос о переносе контекста."""
+    query = update.callback_query
+    if query is None:
+        return
+    data = query.data or ""
+    if not data.startswith("engine_carry:"):
+        return
+    parts = data.split(":")
+    if len(parts) != 4:
+        return
+    _, old_engine, new_engine, choice = parts
+    key = _key(update)
+
+    # Проверим, что состояние с момента предыдущего шага не изменилось.
+    ok, msg, current = _engine_precheck(key, new_engine)
+    if not ok or current != old_engine:
+        try:
+            await query.answer("Состояние изменилось", show_alert=False)
+        except Exception:
+            pass
+        try:
+            await query.edit_message_text(
+                (msg or f"Состояние изменилось: текущий движок — {current}.")
+                + ("\n\nВыбери движок заново." if current else ""),
+                reply_markup=_engine_keyboard(current) if current else None,
+            )
+        except BadRequest:
+            await send_to_topic(update.effective_chat, key[1],
+                                msg or "Состояние изменилось.")
+        return
+
+    try:
+        await query.answer()
+    except Exception:
+        pass
+
+    if choice == "n":
+        text = await _do_engine_switch(key, new_engine)
+        text += "\nКонтекст прежнего диалога не переносится."
+        try:
+            await query.edit_message_text(text)
+        except BadRequest:
+            await send_to_topic(update.effective_chat, key[1], text)
+        return
+
+    # choice == 'y' — handoff с резюме. Может занять десятки секунд.
+    async def progress_edit(t: str) -> None:
+        try:
+            await query.edit_message_text(t)
+        except BadRequest:
+            pass
+
+    text = await _do_engine_handoff(key, old_engine, new_engine, progress_edit)
+    try:
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML)
+    except BadRequest:
+        # Возможно HTML невалиден — fallback на plain.
+        plain = re.sub(r"<[^>]+>", "", text)
+        try:
+            await query.edit_message_text(plain)
+        except BadRequest:
+            await send_to_topic(update.effective_chat, key[1], plain)
 
 
 async def cmd_bind(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -936,7 +1213,19 @@ async def _process_prompt(
         engine = get_engine_by_name(engine_name)
         effective_cwd = cwd or CLAUDE_CWD
 
+        # Pending handoff summary: pop'аем атомарно — доставляется ровно один раз,
+        # в первый prompt после переключения движка с переносом контекста.
+        pending_summary = pop_pending_summary(*key)
+        if pending_summary:
+            logger.info("delivering pending_summary to engine=%s key=%s (%d chars)",
+                        engine_name, key, len(pending_summary))
+
         prompt_parts = [_system_prefix(effective_cwd)]
+        if pending_summary:
+            prompt_parts.append(
+                "[Контекст от предыдущего движка — резюме прошлого диалога, "
+                "продолжай с этой точки:]\n" + pending_summary
+            )
         if meta_block:
             prompt_parts.append(meta_block)
         prompt_parts.append("---\n\nСообщение пользователя:\n" + user_text)
@@ -1213,6 +1502,48 @@ async def unauthorized_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
 # ---------- main ----------
 
+# Команды, выводимые в нативное меню Telegram (синяя кнопка слева от поля ввода).
+# Описания короткие — Telegram обрезает длинные.
+BOT_COMMANDS: list[BotCommand] = [
+    BotCommand("engine", "движок: показать/переключить (claude|codex|opencode)"),
+    BotCommand("new", "новая сессия (cwd и движок сохраняются)"),
+    BotCommand("session", "session-id, cwd и движок"),
+    BotCommand("stop", "прервать текущий запрос"),
+    BotCommand("spawn", "одноразовая параллельная сессия — /spawn <prompt>"),
+    BotCommand("bind", "привязать топик к каталогу — /bind <abs path>"),
+    BotCommand("unbind", "снять привязку cwd, вернуть дефолт"),
+    BotCommand("where", "показать эффективный cwd"),
+    BotCommand("start", "приветствие и состояние топика"),
+]
+
+
+async def _post_init(application: Application) -> None:
+    """Регистрируем команды для всех контекстов (default + private + group)
+    и явно ставим MenuButtonCommands — иначе в форум-группах нативная кнопка
+    меню часто не появляется без явной настройки."""
+    bot = application.bot
+    scopes = [
+        ("default", None),
+        ("all_private_chats", BotCommandScopeAllPrivateChats()),
+        ("all_group_chats", BotCommandScopeAllGroupChats()),
+    ]
+    for label, scope in scopes:
+        try:
+            if scope is None:
+                await bot.set_my_commands(BOT_COMMANDS)
+            else:
+                await bot.set_my_commands(BOT_COMMANDS, scope=scope)
+            logger.info("bot commands registered for scope=%s (%d entries)",
+                        label, len(BOT_COMMANDS))
+        except Exception:
+            logger.exception("set_my_commands failed for scope=%s", label)
+    try:
+        await bot.set_chat_menu_button(menu_button=MenuButtonCommands())
+        logger.info("default menu button set to MenuButtonCommands")
+    except Exception:
+        logger.exception("set_chat_menu_button failed (меню не критично)")
+
+
 def main() -> None:
     print(f"=== Jarvis Telegram Bot (per-topic engine, default={DEFAULT_ENGINE_NAME}) ===")
 
@@ -1226,7 +1557,13 @@ def main() -> None:
     # concurrent_updates=True: без этого PTB обрабатывает апдейты последовательно,
     # и per-key asyncio.Lock не даёт параллельности между разными топиками —
     # второй топик ждёт, пока освободится воркер PTB, а не сам lock.
-    app = Application.builder().token(TELEGRAM_TOKEN).concurrent_updates(True).build()
+    app = (
+        Application.builder()
+        .token(TELEGRAM_TOKEN)
+        .concurrent_updates(True)
+        .post_init(_post_init)
+        .build()
+    )
 
     allowed = filters.User(user_id=ALLOWED_USER_IDS)
 
@@ -1245,6 +1582,8 @@ def main() -> None:
     app.add_handler(MessageHandler(allowed & filters.Document.ALL, handle_document))
     app.add_handler(MessageHandler(allowed & filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(CallbackQueryHandler(on_cancel_queue, pattern=r"^cancel_queue:"))
+    app.add_handler(CallbackQueryHandler(on_engine_select, pattern=r"^engine_select:"))
+    app.add_handler(CallbackQueryHandler(on_engine_carry, pattern=r"^engine_carry:"))
 
     app.add_handler(MessageHandler(~allowed, unauthorized_handler))
 
