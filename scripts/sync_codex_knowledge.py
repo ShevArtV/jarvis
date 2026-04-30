@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Синхронизация claude-knowledge → ~/.codex/AGENTS.md.
+"""Синхронизация пользовательских правил → ~/.codex/AGENTS.md.
 
 Формирует файл user-global инструкций для Codex CLI из источников, которые
 поддерживает пользователь для Claude:
@@ -8,8 +8,8 @@
      т.к. синтаксис @ у Claude специфичен).
   2) ~/.claude/projects/-home-shevartv/memory/MEMORY.md как «индекс» + содержимое
      ВСЕХ файлов memory/*.md — полный инлайн.
-  3) ~/knowledge/access/*.md и ~/knowledge/packages/*.md — только ИНДЕКС
-     (имя файла + one-liner), без тела: иначе выходной файл раздуется.
+  3) ~/projects/knowledge-base/AGENTS.md и README.md — основные правила и индекс
+     единой базы знаний.
 
 Идемпотентен: повторный запуск перезаписывает ~/.codex/AGENTS.md.
 
@@ -33,8 +33,9 @@ HOME = Path.home()
 # Источники.
 CLAUDE_MD = HOME / ".claude" / "CLAUDE.md"
 MEMORY_DIR = HOME / ".claude" / "projects" / "-home-shevartv" / "memory"
-KNOWLEDGE_ACCESS = HOME / "knowledge" / "access"
-KNOWLEDGE_PACKAGES = HOME / "knowledge" / "packages"
+KNOWLEDGE_BASE = HOME / "projects" / "knowledge-base"
+KNOWLEDGE_BASE_AGENTS = KNOWLEDGE_BASE / "AGENTS.md"
+KNOWLEDGE_BASE_README = KNOWLEDGE_BASE / "README.md"
 
 # Куда писать. Можно переопределить через env (например, CODEX_HOME другой).
 DEFAULT_TARGET = HOME / ".codex" / "AGENTS.md"
@@ -177,7 +178,7 @@ def build_agents_md() -> str:
     lines.append("# Глобальные инструкции для Codex CLI\n")
     lines.append(
         "Этот файл собран из пользовательских настроек Claude Code и общей базы "
-        "знаний (`~/knowledge/`). Codex CLI читает `~/.codex/AGENTS.md` как "
+        "знаний (`~/projects/knowledge-base/`). Codex CLI читает `~/.codex/AGENTS.md` как "
         "user-global инструкции, аналогично тому, как Claude читает "
         "`~/.claude/CLAUDE.md`.\n"
     )
@@ -195,15 +196,26 @@ def build_agents_md() -> str:
     lines.append("\n## 2. Memory (полные файлы из ~/.claude/projects/-home-shevartv/memory/)\n")
     lines.append(_build_memory_section())
 
-    # 3) Индексы knowledge.
-    lines.append("\n## 3. Индекс общей базы знаний (~/knowledge/)\n")
+    # 3) Основная БЗ.
+    lines.append("\n## 3. Основная база знаний (~/projects/knowledge-base/)\n")
     lines.append(
-        "Содержимое файлов **не** инлайнится, чтобы не раздувать контекст. "
-        "Открывай сами файлы по имени, когда они становятся релевантными задаче.\n"
+        "Этот раздел инлайнит правила работы с БЗ, чтобы новые Codex-сессии "
+        "сразу знали актуальный порядок чтения, обновления и гигиены файлов.\n"
     )
-    lines.append(_build_index(KNOWLEDGE_ACCESS, "access (~/knowledge/access/)"))
-    lines.append("\n")
-    lines.append(_build_index(KNOWLEDGE_PACKAGES, "packages (~/knowledge/packages/)"))
+
+    agents_body = _read(KNOWLEDGE_BASE_AGENTS)
+    if agents_body:
+        lines.append("### knowledge-base/AGENTS.md\n")
+        lines.append(agents_body.rstrip() + "\n")
+    else:
+        lines.append(f"### knowledge-base/AGENTS.md\n\n(не найден {KNOWLEDGE_BASE_AGENTS})\n")
+
+    readme_body = _read(KNOWLEDGE_BASE_README)
+    if readme_body:
+        lines.append("\n### knowledge-base/README.md\n")
+        lines.append(readme_body.rstrip() + "\n")
+    else:
+        lines.append(f"\n### knowledge-base/README.md\n\n(не найден {KNOWLEDGE_BASE_README})\n")
 
     return "\n".join(lines).rstrip() + "\n"
 
