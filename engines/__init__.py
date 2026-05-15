@@ -87,3 +87,10 @@ def get_engine_by_name(name: str) -> Engine:
 def get_engine() -> Engine:
     """Адаптер дефолтного движка (для новых топиков)."""
     return get_engine_by_name(default_engine_name())
+
+
+def ensure_engine_tools(engine: Engine) -> tuple[bool, str]:
+    """Runtime tool setup for an engine when Jarvis activates or uses it."""
+    from engines.playwright_mcp import ensure_playwright_mcp
+
+    return ensure_playwright_mcp(engine.name, engine.bin_path)

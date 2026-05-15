@@ -49,6 +49,7 @@ from engines import (
     SUPPORTED_ENGINES,
     Engine,
     default_engine_name,
+    ensure_engine_tools,
     get_engine_by_name,
 )
 from engines.process_control import terminate_process_tree
@@ -91,6 +92,8 @@ def _system_prefix(effective_cwd: str) -> str:
         f"[SYSTEM: Сообщение пришло от пользователя через Telegram-бота Jarvis.\n"
         f"Ты работаешь в проекте {effective_cwd}. Используй memory-правила из "
         f"~/.claude/projects/-home-shevartv/memory/.\n"
+        f"Если нужно работать с браузером, используй Playwright MCP browser_* tools, "
+        f"когда они доступны; если MCP недоступен, скажи об этом и выбери рабочий fallback.\n"
         f"Опасные действия (удаления, DELETE/DROP, действия на проде, sudo, push --force) — "
         f"переспрашивай.]"
     )
@@ -663,6 +666,9 @@ async def call_llm_stream(
 
     Возвращает (ok, final_text, session_id_after).
     """
+    mcp_ok, mcp_status = ensure_engine_tools(engine)
+    if not mcp_ok:
+        logger.warning("engine=%s activated without Playwright MCP: %s", engine.name, mcp_status)
     ok, final_text, sid_after = await engine.call_stream(
         session_id=session_id,
         prompt=prompt,
@@ -841,6 +847,9 @@ async def _do_engine_switch(key: tuple[int, int], target: str) -> str:
     """Финальное действие переключения (без pre-check, который уже сделан вызывающим).
     Прерывает активный процесс, создаёт новый session_id, возвращает текст ответа."""
     _, _, current_engine = get_session(*key)
+    target_engine = get_engine_by_name(target)
+    mcp_ok, mcp_status = ensure_engine_tools(target_engine)
+
     proc = active_procs.get(key)
     if proc is not None:
         await terminate_process_tree(proc)
@@ -851,10 +860,12 @@ async def _do_engine_switch(key: tuple[int, int], target: str) -> str:
     effective = cwd or CLAUDE_CWD
     logger.info("engine switched for key=%s: %s -> %s (new sid=%s)",
                 key, current_engine, target, new_id)
+    mcp_line = f"\n{mcp_status}" if mcp_ok else f"\n⚠️ {mcp_status}"
     return (
         f"🔁 Движок переключён: {current_engine} → {target}\n"
         f"Новая сессия: {new_id}\n"
         f"Cwd сохранён: {effective}"
+        f"{mcp_line}"
     )
 
 
@@ -1553,6 +1564,11 @@ def main() -> None:
         logger.warning("ALLOWED_USER_IDS пуст — никто не сможет писать боту.")
 
     init_db()
+    mcp_ok, mcp_status = ensure_engine_tools(DEFAULT_ENGINE)
+    if mcp_ok:
+        logger.info("Default engine tools ready: %s", mcp_status)
+    else:
+        logger.warning("Default engine tools are not fully ready: %s", mcp_status)
 
     # concurrent_updates=True: без этого PTB обрабатывает апдейты последовательно,
     # и per-key asyncio.Lock не даёт параллельности между разными топиками —

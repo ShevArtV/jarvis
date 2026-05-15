@@ -17,6 +17,8 @@
 - Длинные ответы (> 3500 символов) присылаются как `.md`-файл с коротким превью.
 - Reply-to на сообщение бота → в запрос подмешивается скрытый контекст о том, на что ты отвечаешь.
 - Фото/документы скачиваются локально, путь прокидывается в prompt (`[Прикреплён файл: ...]`).
+- Playwright MCP автоматически подключается к активному движку, чтобы Jarvis
+  мог управлять браузером через `browser_*` tools независимо от выбранного CLI.
 - Голосовые не поддерживаются.
 - Whitelist по `user_id` (см. `ALLOWED_USER_IDS`).
 
@@ -57,6 +59,41 @@ claude -p "hello"   # проверка, что авторизация работ
 - `OPENCODE_TIMEOUT` — таймаут opencode, секунд (по умолчанию `3600`).
 - `OPENCODE_MODEL`, `OPENCODE_AGENT`, `OPENCODE_VARIANT` — опциональные параметры
   для `opencode run`; если не заданы, используются настройки самого opencode.
+- `PLAYWRIGHT_MCP_NPX` — абсолютный путь к `npx` для Playwright MCP. Если не
+  задан, runtime-хелпер ищет `npx` в `PATH` и `~/.nvm/versions/node/*/bin/npx`.
+- `PLAYWRIGHT_MCP_PACKAGE` — npm-пакет MCP-сервера (по умолчанию
+  `@playwright/mcp@latest`).
+- `PLAYWRIGHT_MCP_MODE` — `cdp` (по умолчанию) или `launch`.
+- `PLAYWRIGHT_MCP_CDP_ENDPOINT` — endpoint для CDP. По умолчанию `chrome`,
+  но можно указать `http://127.0.0.1:9222` или другой доступный endpoint.
+- `PLAYWRIGHT_MCP_ARGS` — дополнительные аргументы Playwright MCP. Для CDP
+  режима обычно используют capabilities, например `--caps=vision,pdf,devtools`.
+- `JARVIS_PLAYWRIGHT_MCP` — `1`/`0`, включает автоматическое подключение
+  Playwright MCP при активации движка (по умолчанию включено).
+
+### Playwright MCP для всех движков
+
+Jarvis сам не является MCP-клиентом: браузерные tools поднимают внешние CLI.
+Поэтому при активации или первом использовании движка Jarvis сам идемпотентно
+прописывает Playwright MCP в конфиг соответствующего CLI.
+
+- Claude Code: user-scope сервер через `claude mcp add-json --scope user`.
+- Codex CLI: `[mcp_servers.playwright]` в `~/.codex/config.toml`.
+- opencode: `mcp.playwright` в `~/.config/opencode/opencode.json`.
+
+Команда MCP по умолчанию: абсолютный `npx -y @playwright/mcp@latest --cdp-endpoint=chrome`.
+Абсолютный путь важен для systemd: в сервисе Jarvis nvm обычно не попадает в
+`PATH`, а `npx` лежит именно там.
+
+Если нужен порт, а не channel name, задай `PLAYWRIGHT_MCP_CDP_ENDPOINT=http://127.0.0.1:9222`.
+
+Проверка:
+
+```bash
+claude mcp list
+codex mcp list
+opencode mcp list
+```
 
 ### Переход на Codex CLI
 
@@ -114,6 +151,8 @@ journalctl --user -u jarvis-bot -f
 - `telegram_bot.py` — весь бот.
 - `config.py` — чтение `.env`, токен и whitelist.
 - `requirements.txt` — зависимости (`python-telegram-bot`, `python-dotenv`).
+- `engines/playwright_mcp.py` — runtime-настройка Playwright MCP для
+  активного движка.
 - `bot_state.db` — sqlite: session-id на чат + метаданные исходящих сообщений (для reply-to).
 - `temp/media/` — скачанные пользовательские вложения.
 - `systemd/jarvis-bot.service` — user-unit.

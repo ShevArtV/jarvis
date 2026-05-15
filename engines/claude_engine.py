@@ -14,6 +14,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 import uuid
 from pathlib import Path
@@ -37,8 +38,9 @@ APPEND_SYSTEM_PROMPT = (
 
 
 def _sessions_dir_for(cwd: str) -> Path:
-    """~/.claude/projects/<encoded-cwd>/  (Claude CLI кодирует путь заменой / на -)."""
-    encoded = cwd.replace("/", "-")
+    """~/.claude/projects/<encoded-cwd>/  (Claude CLI заменяет '/' и '.' на '-':
+    /home/shevartv/projects/visa-center.ru → -home-shevartv-projects-visa-center-ru)."""
+    encoded = re.sub(r"[/.]+", "-", cwd)
     return Path.home() / ".claude" / "projects" / encoded
 
 
