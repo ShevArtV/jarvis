@@ -83,6 +83,10 @@ claude -p "hello"   # проверка, что авторизация работ
 - `JARVIS_MCP_PYTHON` — путь к Python для запуска MCP-сервера (по умолчанию
   `venv/bin/python` репозитория jarvis).
 - `JARVIS_MCP_SCRIPT` / `JARVIS_MCP_DB` — переопределить пути к серверу/БД.
+- `JARVIS_LOG_TTL_DAYS` — сколько дней хранить записи `messages_log` и
+  завершённые (`done`/`failed`/`cancelled`) `jobs`. Дефолт `30`. `0`,
+  `none`, `off`, `false`, `no` — отключают авто-cleanup. `pending` jobs
+  (включая scheduled с `not_before` в будущем) **никогда** не удаляются.
 
 ### Playwright MCP для всех движков
 

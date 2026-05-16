@@ -22,7 +22,7 @@ import sqlite3
 import asyncio
 import logging
 import tempfile
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from telegram import (
     BotCommand,
@@ -367,6 +367,69 @@ def finish_job(
             "finished_at = ? WHERE id = ?",
             (status, error, result_message_id, datetime.utcnow().isoformat(), job_id),
         )
+
+
+def _log_ttl_days() -> int:
+    """How long to retain messages_log + completed jobs. 0/'none'/'off' disables."""
+    raw = (os.environ.get("JARVIS_LOG_TTL_DAYS") or "30").strip().lower()
+    if raw in {"0", "none", "off", "false", "no"}:
+        return 0
+    try:
+        n = int(raw)
+        return max(0, n)
+    except ValueError:
+        logger.warning("JARVIS_LOG_TTL_DAYS=%r is not an int, defaulting to 30", raw)
+        return 30
+
+
+def cleanup_old_log_entries(ttl_days: int) -> dict[str, int]:
+    """Delete messages_log entries and terminal-status jobs older than ttl_days.
+
+    Pending jobs (incl. scheduled with future not_before) are NEVER deleted —
+    they may be valid auto-go timers. Returns counts of deleted rows.
+    """
+    if ttl_days <= 0:
+        return {"messages_log": 0, "jobs": 0}
+    threshold = (datetime.utcnow() - timedelta(days=ttl_days)).isoformat()
+    with _db() as conn:
+        log_n = conn.execute(
+            "DELETE FROM messages_log WHERE ts < ?", (threshold,),
+        ).rowcount
+        jobs_n = conn.execute(
+            "DELETE FROM jobs WHERE status IN ('done', 'failed', 'cancelled') "
+            "AND COALESCE(finished_at, created_at) < ?",
+            (threshold,),
+        ).rowcount
+    return {"messages_log": log_n, "jobs": jobs_n}
+
+
+async def cleanup_worker(app: Application) -> None:
+    """Long-running background task: hourly sweep of stale log/jobs rows.
+
+    Honors JARVIS_LOG_TTL_DAYS env (defaults to 30). Set to 0/none/off
+    to disable cleanup entirely.
+    """
+    ttl = _log_ttl_days()
+    if ttl <= 0:
+        logger.info("cleanup_worker: TTL disabled (JARVIS_LOG_TTL_DAYS=%s)",
+                    os.environ.get("JARVIS_LOG_TTL_DAYS"))
+        return
+    logger.info("cleanup_worker started (TTL=%dd)", ttl)
+    while True:
+        try:
+            stats = cleanup_old_log_entries(ttl)
+            if stats["messages_log"] or stats["jobs"]:
+                logger.info(
+                    "cleanup_worker: pruned messages_log=%d jobs=%d (TTL=%dd)",
+                    stats["messages_log"], stats["jobs"], ttl,
+                )
+            await asyncio.sleep(3600.0)
+        except asyncio.CancelledError:
+            logger.info("cleanup_worker cancelled")
+            raise
+        except Exception:
+            logger.exception("cleanup_worker loop crashed; sleeping 5min")
+            await asyncio.sleep(300.0)
 
 
 def resolve_manager_topic() -> tuple[int, int] | None:
@@ -2174,6 +2237,11 @@ async def _post_init(application: Application) -> None:
     # Хранить ссылку в bot_data на случай нужды в shutdown'е/тестах.
     task = asyncio.create_task(jobs_worker(application))
     application.bot_data["jobs_worker_task"] = task
+
+    # Гигиена: hourly cleanup старых записей messages_log + завершённых jobs.
+    # TTL — env JARVIS_LOG_TTL_DAYS (дефолт 30, 0/none/off отключает).
+    cleanup_task = asyncio.create_task(cleanup_worker(application))
+    application.bot_data["cleanup_worker_task"] = cleanup_task
 
 
 def main() -> None:
