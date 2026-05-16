@@ -268,6 +268,23 @@ def init_db() -> None:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status, created_at)"
         )
+        # Idempotent миграция: not_before — момент времени, когда job
+        # становится доступным для worker'а. NULL = доступен немедленно.
+        # Используется для «авто-go через 10 мин» сценария Менеджера:
+        # план готов → ставится scheduled job с delay=600s; если оператор
+        # одобрил/корректирует раньше — новый manager_send в этот же
+        # thread_id автоматически переводит pending scheduled в cancelled.
+        cols_now = [r[1] for r in conn.execute("PRAGMA table_info(jobs)").fetchall()]
+        if cols_now and "not_before" not in cols_now:
+            _backup_db_once()
+            logger.info("adding 'not_before' column to jobs")
+            conn.execute("ALTER TABLE jobs ADD COLUMN not_before TEXT")
+            # Поправляем индекс под новый ORDER BY.
+            conn.execute("DROP INDEX IF EXISTS idx_jobs_status")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_jobs_pending "
+            "ON jobs(status, not_before, created_at)"
+        )
 
 
 def log_message(
@@ -301,16 +318,22 @@ def log_message(
 
 
 def claim_next_job() -> dict | None:
-    """Atomically claim one pending job. Returns its row as a dict or None.
+    """Atomically claim one pending job that's due now. Returns its row as
+    a dict or None.
 
-    Uses UPDATE ... WHERE id = (SELECT ... LIMIT 1) to grab a single row
-    without holding the connection between SELECT and UPDATE.
+    Scheduled jobs (`not_before > NOW()`) are skipped; immediate jobs
+    (not_before IS NULL) and overdue scheduled ones are eligible. Ordering
+    is by "effective firing time" (`COALESCE(not_before, created_at)`) so
+    that a live live job created during a 10-min wait gets handled before
+    the wait expires.
     """
     now = datetime.utcnow().isoformat()
     with _db() as conn:
         row = conn.execute(
             "SELECT id, chat_id, thread_id, text, source FROM jobs "
-            "WHERE status = 'pending' ORDER BY created_at ASC, id ASC LIMIT 1"
+            "WHERE status = 'pending' AND (not_before IS NULL OR not_before <= ?) "
+            "ORDER BY COALESCE(not_before, created_at) ASC, id ASC LIMIT 1",
+            (now,),
         ).fetchone()
         if not row:
             return None
@@ -1858,17 +1881,32 @@ async def _run_manager_job(app: Application, job: dict) -> tuple[bool, int | Non
             mgr_chat_id, mgr_thread_id = mgr_target
             prompt_parts.append(
                 f"[SYSTEM NOTE: задача делегирована Менеджером через MCP "
-                f"(job_id={job_id}). Отвечай как обычно — финальный ответ "
-                f"пойдёт в этот топик (thread_id={thread_id}, cwd={effective_cwd}).\n"
-                f"ПОСЛЕ финального ответа ОБЯЗАТЕЛЬНО отправь короткий "
-                f"отчёт в топик Менеджера через "
-                f"mcp__jarvis__manager_send с as_user=false:\n"
-                f"  thread_id={mgr_thread_id}\n"
-                f"  text:\n"
-                f"    #job_{job_id} ✅ <одна строка: что сделано>\n"
-                f"    src: thread_id={thread_id}, cwd={effective_cwd}\n"
-                f"либо при провале — #job_{job_id} ❌ <что не получилось>.\n"
-                f"Одно сообщение, без дублей и промежуточных статусов.]"
+                f"(job_id={job_id}). Финальный ответ идёт в этот топик "
+                f"(thread_id={thread_id}, cwd={effective_cwd}).\n\n"
+                f"Правила:\n"
+                f"1. Нетривиальная задача (любая правка кода / архитектурное "
+                f"решение / больше 1 файла) — сначала предложи план, не "
+                f"начинай реализацию. Финальный ответ этого turn'а = план. "
+                f"Менеджер либо одобрит, либо корректирует следующим сообщением.\n"
+                f"2. Если нужно уточнение по ToR — финальный ответ = вопрос "
+                f"с тегом #ask_{job_id}, ничего не реализуй. Дополнительно "
+                f"короткий notice в топик Менеджера: "
+                f"mcp__jarvis__manager_send(thread_id={mgr_thread_id}, "
+                f"as_user=false, text='❓ Вопрос #ask_{job_id} в топике "
+                f"thread_id={thread_id}, загляни.').\n"
+                f"3. При правках на ПРОДЕ — обязательный smoke-check после: "
+                f"ищи команду в knowledge-base/projects/<имя>/production_smoke_check.md "
+                f"(или подобном файле). Если smoke упал — откатить через "
+                f"git revert и сообщить ❌. Если файла smoke-check нет — "
+                f"запроси команду у Менеджера через шаг 2.\n"
+                f"4. ПОСЛЕ финального ответа на CODE-задачу обязательно "
+                f"отправь короткий отчёт в топик Менеджера:\n"
+                f"   mcp__jarvis__manager_send(thread_id={mgr_thread_id}, "
+                f"as_user=false, text=...):\n"
+                f"     #job_{job_id} ✅ <одна строка: что сделано>\n"
+                f"     src: thread_id={thread_id}, cwd={effective_cwd}\n"
+                f"   или #job_{job_id} ❌ <что не получилось>.\n"
+                f"   На plan-turn / ask-turn — НЕ шли #job_N (ещё не закончено).]"
             )
         else:
             prompt_parts.append(

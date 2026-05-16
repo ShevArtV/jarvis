@@ -25,7 +25,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -496,12 +496,17 @@ def manager_create_topic(
 @mcp.tool(
     name="manager_send",
     description=(
-        "Send a message to a topic. With as_user=True (default) the message is "
-        "enqueued as a job — the bot picks it up, runs it through the LLM "
-        "pipeline (as if a Telegram user wrote it), and posts the reply back "
-        "into the topic. With as_user=False the text is delivered as a plain "
-        "bot message (notice / FYI), no LLM cycle. Use manager_inbox after a "
-        "few seconds (or longer for non-trivial work) to read the reply."
+        "Send a message to a topic.\n"
+        "as_user=True (default): enqueues a job — the bot runs it through "
+        "the LLM pipeline. With delay_seconds>0 the job is SCHEDULED to fire "
+        "later (auto-go pattern: «делай по плану через 10 мин если оператор "
+        "не вмешался»). Any subsequent immediate as_user=True send to the "
+        "SAME thread_id automatically cancels still-pending scheduled jobs "
+        "in that topic — so a fresh correction supersedes the timer "
+        "without manual cleanup.\n"
+        "as_user=False: plain sendMessage (notice / FYI), no LLM cycle. Use "
+        "this for short notifications to other topics (e.g. «вопрос #ask_N "
+        "в топике X — загляни»)."
     ),
 )
 def manager_send(
@@ -509,11 +514,16 @@ def manager_send(
     text: str,
     chat_id: int | None = None,
     as_user: bool = True,
+    delay_seconds: int = 0,
 ) -> dict[str, Any]:
     """Queue or deliver a message into the topic."""
     text = text.strip()
     if not text:
         raise ValueError("text is required")
+    if delay_seconds < 0:
+        raise ValueError("delay_seconds must be >= 0")
+    if delay_seconds > 0 and not as_user:
+        raise ValueError("delay_seconds only makes sense with as_user=True")
     target_chat_id = chat_id if chat_id is not None else _default_chat_id()
 
     with _connect() as conn:
@@ -529,13 +539,31 @@ def manager_send(
             "thread_id (use manager_topics to list)."
         )
 
-    now = datetime.utcnow().isoformat()
+    now_dt = datetime.utcnow()
+    now = now_dt.isoformat()
     if as_user:
+        not_before: str | None = None
+        if delay_seconds > 0:
+            not_before = (now_dt + timedelta(seconds=delay_seconds)).isoformat()
+        cancelled_ids: list[int] = []
         with _connect() as conn:
+            if delay_seconds == 0:
+                # Immediate send → auto-cancel still-pending scheduled jobs
+                # for the same topic. Fresh decision supersedes the timer.
+                cancelled = conn.execute(
+                    "UPDATE jobs SET status='cancelled', finished_at=?, "
+                    "error='superseded by new manager_send' "
+                    "WHERE chat_id=? AND thread_id=? AND status='pending' "
+                    "AND not_before IS NOT NULL AND not_before > ? "
+                    "RETURNING id",
+                    (now, target_chat_id, thread_id, now),
+                ).fetchall()
+                cancelled_ids = [r[0] for r in cancelled]
             cur = conn.execute(
                 "INSERT INTO jobs(chat_id, thread_id, text, source, status, "
-                "created_at) VALUES (?, ?, ?, 'manager', 'pending', ?)",
-                (target_chat_id, thread_id, text, now),
+                "created_at, not_before) "
+                "VALUES (?, ?, ?, 'manager', 'pending', ?, ?)",
+                (target_chat_id, thread_id, text, now, not_before),
             )
             job_id = cur.lastrowid
             conn.execute(
@@ -545,21 +573,20 @@ def manager_send(
                 (target_chat_id, thread_id, text, now),
             )
         logger.info(
-            "queued job %s for chat=%s thread=%s (%d chars)",
-            job_id, target_chat_id, thread_id, len(text),
+            "queued job %s for chat=%s thread=%s delay=%ss cancelled=%s",
+            job_id, target_chat_id, thread_id, delay_seconds, cancelled_ids,
         )
         return {
-            "mode": "as_user",
+            "mode": "scheduled" if delay_seconds > 0 else "as_user",
             "job_id": job_id,
             "chat_id": target_chat_id,
             "thread_id": thread_id,
             "queued_at": now,
+            "not_before": not_before,
+            "delay_seconds": delay_seconds,
+            "cancelled_scheduled": cancelled_ids,
             "engine": row["engine"],
             "cwd": row["cwd"],
-            "message": (
-                "Job queued. Poll manager_inbox (since=queued_at, "
-                "direction='out') to see the bot's reply."
-            ),
         }
 
     # as_user=False — just deliver a bot message, no LLM trigger.
@@ -587,6 +614,78 @@ def manager_send(
         "thread_id": thread_id,
         "telegram_message_id": msg_id,
         "sent_at": now,
+    }
+
+
+@mcp.tool(
+    name="manager_cancel_job",
+    description=(
+        "Cancel a still-pending job (typically a scheduled auto-go that the "
+        "operator wants to abort entirely without sending a replacement). "
+        "Returns cancelled=true if the job was actually flipped, false if "
+        "it was already in_progress / done / cancelled. Note: for the "
+        "common case «оператор передумал, шлёт корректировку», just call "
+        "manager_send again — it auto-cancels pending scheduled jobs for "
+        "the same topic."
+    ),
+)
+def manager_cancel_job(job_id: int) -> dict[str, Any]:
+    """Cancel a single pending job by id."""
+    now = datetime.utcnow().isoformat()
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT status, chat_id, thread_id, not_before FROM jobs WHERE id = ?",
+            (job_id,),
+        ).fetchone()
+        if row is None:
+            raise RuntimeError(f"job {job_id} not found")
+        prev_status = row["status"]
+        cur = conn.execute(
+            "UPDATE jobs SET status='cancelled', finished_at=?, "
+            "error='cancelled via manager_cancel_job' "
+            "WHERE id=? AND status='pending'",
+            (now, job_id),
+        )
+    cancelled = cur.rowcount == 1
+    return {
+        "job_id": job_id,
+        "cancelled": cancelled,
+        "previous_status": prev_status,
+        "chat_id": row["chat_id"],
+        "thread_id": row["thread_id"],
+        "not_before": row["not_before"],
+    }
+
+
+@mcp.tool(
+    name="manager_dismiss_notice",
+    description=(
+        "Delete a notice/message from Telegram by its message_id. Use after "
+        "you've read and processed a notification (e.g. «#ask_N» or "
+        "«#job_N ✅») to keep the Manager topic tidy. Bot API restricts "
+        "deleting messages older than 48h or from a different bot — failures "
+        "are returned as ok=false with the API error, not raised."
+    ),
+)
+def manager_dismiss_notice(
+    message_id: int,
+    chat_id: int | None = None,
+) -> dict[str, Any]:
+    """Delete one message via Telegram Bot API."""
+    target_chat_id = chat_id if chat_id is not None else _default_chat_id()
+    params = {"chat_id": target_chat_id, "message_id": message_id}
+    try:
+        _telegram_api("deleteMessage", params)
+        ok = True
+        err = None
+    except Exception as exc:
+        ok = False
+        err = str(exc)[:300]
+    return {
+        "ok": ok,
+        "chat_id": target_chat_id,
+        "message_id": message_id,
+        "error": err,
     }
 
 
