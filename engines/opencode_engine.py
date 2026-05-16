@@ -13,6 +13,7 @@ import logging
 import os
 import time
 import uuid
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
@@ -34,6 +35,10 @@ FILE_MARKER_SYSTEM = (
 )
 
 _PLACEHOLDER_PREFIX = "placeholder-"
+
+# Per-call модель. Выставляется через engines.engine_model_scope() из
+# telegram_bot.py перед call_stream. Если None — фолбэк на OPENCODE_MODEL env.
+CURRENT_MODEL: ContextVar[str | None] = ContextVar("opencode_model", default=None)
 
 
 def _is_placeholder(session_id: str) -> bool:
@@ -137,6 +142,10 @@ def _tool_summary(part: dict[str, Any]) -> str:
 class OpenCodeEngine:
     name = "opencode"
     bin_path = OPENCODE_BIN
+    models: list[str] = [
+        "deepseek/deepseek-v4-flash",
+        "deepseek/deepseek-v4-pro",
+    ]
 
     def new_session_id(self) -> str:
         return f"{_PLACEHOLDER_PREFIX}{uuid.uuid4()}"
@@ -176,7 +185,7 @@ class OpenCodeEngine:
             "--dangerously-skip-permissions",
             "--dir", effective_cwd,
         ]
-        model = os.environ.get("OPENCODE_MODEL")
+        model = CURRENT_MODEL.get() or os.environ.get("OPENCODE_MODEL")
         if model:
             cmd.extend(["--model", model])
         agent = os.environ.get("OPENCODE_AGENT")

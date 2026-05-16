@@ -49,6 +49,7 @@ from engines import (
     SUPPORTED_ENGINES,
     Engine,
     default_engine_name,
+    engine_model_scope,
     ensure_engine_tools,
     get_engine_by_name,
 )
@@ -183,6 +184,35 @@ def init_db() -> None:
                 conn.execute(
                     "ALTER TABLE sessions ADD COLUMN pending_summary TEXT"
                 )
+            # Idempotent миграция: model — выбранная для топика модель движка.
+            # NULL = «дефолт движка» (фолбэк на env / встроенный дефолт CLI).
+            cols_now = [r[1] for r in conn.execute("PRAGMA table_info(sessions)").fetchall()]
+            if cols_now and "model" not in cols_now:
+                _backup_db_once()
+                logger.info("adding 'model' column to sessions")
+                conn.execute(
+                    "ALTER TABLE sessions ADD COLUMN model TEXT"
+                )
+            # Idempotent миграция: topic_title — название топика в Telegram.
+            # Заполняется при `manager_create_topic`; Telegram API не отдаёт
+            # имя топика обратно через getChat, поэтому нужен свой реестр.
+            cols_now = [r[1] for r in conn.execute("PRAGMA table_info(sessions)").fetchall()]
+            if cols_now and "topic_title" not in cols_now:
+                _backup_db_once()
+                logger.info("adding 'topic_title' column to sessions")
+                conn.execute(
+                    "ALTER TABLE sessions ADD COLUMN topic_title TEXT"
+                )
+            # Idempotent миграция: topic_icon_color — цвет иконки топика
+            # (один из 6 валидных RGB-кодов Telegram). Хранится, чтобы
+            # manager_create_topic не дублировал цвета между топиками.
+            cols_now = [r[1] for r in conn.execute("PRAGMA table_info(sessions)").fetchall()]
+            if cols_now and "topic_icon_color" not in cols_now:
+                _backup_db_once()
+                logger.info("adding 'topic_icon_color' column to sessions")
+                conn.execute(
+                    "ALTER TABLE sessions ADD COLUMN topic_icon_color INTEGER"
+                )
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS messages (
@@ -194,6 +224,158 @@ def init_db() -> None:
             )
             """
         )
+        # Полный лог сообщений по топикам — нужен для Менеджера (MCP tool
+        # manager_inbox). Пишем входящие пользовательские реплики и финальные
+        # ответы бота. Промежуточные tool_use не логируем — слишком шумно.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS messages_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER NOT NULL,
+                thread_id INTEGER NOT NULL DEFAULT 0,
+                direction TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                text TEXT NOT NULL,
+                telegram_message_id INTEGER,
+                ts TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_messages_log_topic_ts "
+            "ON messages_log(chat_id, thread_id, ts)"
+        )
+        # Очередь задач от Менеджера (MCP tool manager_send as_user=True).
+        # Worker внутри бота забирает pending и прокручивает их через
+        # обычный LLM-pipeline в указанном топике.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS jobs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER NOT NULL,
+                thread_id INTEGER NOT NULL,
+                text TEXT NOT NULL,
+                source TEXT NOT NULL DEFAULT 'manager',
+                status TEXT NOT NULL DEFAULT 'pending',
+                created_at TEXT NOT NULL,
+                claimed_at TEXT,
+                finished_at TEXT,
+                error TEXT,
+                result_message_id INTEGER
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status, created_at)"
+        )
+
+
+def log_message(
+    chat_id: int,
+    thread_id: int,
+    direction: str,
+    kind: str,
+    text: str,
+    telegram_message_id: int | None = None,
+) -> None:
+    """Пишет одну запись в messages_log. direction: 'in' | 'out'.
+
+    Поглощает ошибки записи: логирование — вторичная функция, не должна
+    блокировать бот при проблемах с БД.
+    """
+    if not text:
+        return
+    try:
+        with _db() as conn:
+            conn.execute(
+                "INSERT INTO messages_log(chat_id, thread_id, direction, kind, "
+                "text, telegram_message_id, ts) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    chat_id, thread_id, direction, kind, text,
+                    telegram_message_id, datetime.utcnow().isoformat(),
+                ),
+            )
+    except Exception:
+        logger.exception("log_message failed (chat=%s thread=%s kind=%s)",
+                         chat_id, thread_id, kind)
+
+
+def claim_next_job() -> dict | None:
+    """Atomically claim one pending job. Returns its row as a dict or None.
+
+    Uses UPDATE ... WHERE id = (SELECT ... LIMIT 1) to grab a single row
+    without holding the connection between SELECT and UPDATE.
+    """
+    now = datetime.utcnow().isoformat()
+    with _db() as conn:
+        row = conn.execute(
+            "SELECT id, chat_id, thread_id, text, source FROM jobs "
+            "WHERE status = 'pending' ORDER BY created_at ASC, id ASC LIMIT 1"
+        ).fetchone()
+        if not row:
+            return None
+        cur = conn.execute(
+            "UPDATE jobs SET status = 'in_progress', claimed_at = ? "
+            "WHERE id = ? AND status = 'pending'",
+            (now, row[0]),
+        )
+        if cur.rowcount != 1:
+            # Раса с другим worker'ом — пусть следующий цикл подберёт.
+            return None
+    return {
+        "id": row[0],
+        "chat_id": row[1],
+        "thread_id": row[2],
+        "text": row[3],
+        "source": row[4],
+    }
+
+
+def finish_job(
+    job_id: int,
+    status: str,
+    error: str | None = None,
+    result_message_id: int | None = None,
+) -> None:
+    """status: 'done' | 'failed'."""
+    with _db() as conn:
+        conn.execute(
+            "UPDATE jobs SET status = ?, error = ?, result_message_id = ?, "
+            "finished_at = ? WHERE id = ?",
+            (status, error, result_message_id, datetime.utcnow().isoformat(), job_id),
+        )
+
+
+def resolve_manager_topic() -> tuple[int, int] | None:
+    """Return (chat_id, thread_id) of the Manager's topic, or None.
+
+    Used to inject the «report back to Manager» instruction into the SYSTEM
+    NOTE of delegated jobs. Falls back to a SQL lookup so the bot works out
+    of the box for the default Shevartv setup; explicit env vars override
+    for unusual deployments.
+    """
+    raw_chat = os.environ.get("JARVIS_MANAGER_CHAT_ID")
+    raw_thread = os.environ.get("JARVIS_MANAGER_THREAD_ID")
+    if raw_chat and raw_thread:
+        try:
+            return int(raw_chat), int(raw_thread)
+        except ValueError:
+            logger.warning(
+                "JARVIS_MANAGER_{CHAT,THREAD}_ID not int: %r/%r",
+                raw_chat, raw_thread,
+            )
+    try:
+        with _db() as conn:
+            row = conn.execute(
+                "SELECT chat_id, thread_id FROM sessions "
+                "WHERE thread_id > 0 AND cwd LIKE '%/knowledge-base/manager' "
+                "ORDER BY updated_at DESC LIMIT 1"
+            ).fetchone()
+        if row:
+            return row[0], row[1]
+    except Exception:
+        logger.exception("resolve_manager_topic failed")
+    return None
 
 
 def save_message_context(chat_id: int, message_id: int, ctx: dict) -> None:
@@ -293,9 +475,12 @@ def reset_session(chat_id: int, thread_id: int) -> tuple[str, str | None, str]:
     return new_id, cwd, engine_name
 
 
-def set_engine(chat_id: int, thread_id: int, new_engine_name: str) -> tuple[str, str | None]:
+def set_engine(
+    chat_id: int, thread_id: int, new_engine_name: str, model: str | None = None,
+) -> tuple[str, str | None]:
     """Меняет движок топика: создаёт новый session_id под новый движок, cwd
-    сохраняется. Если записи не было — создаётся. Возвращает (session_id, cwd).
+    сохраняется, model записывается явно (NULL допустим). Если записи не было —
+    создаётся. Возвращает (session_id, cwd).
 
     Engine-проверка (поддерживается ли имя) — на стороне get_engine_by_name."""
     new_engine = get_engine_by_name(new_engine_name)
@@ -308,13 +493,26 @@ def set_engine(chat_id: int, thread_id: int, new_engine_name: str) -> tuple[str,
         ).fetchone()
         cwd = row[0] if row else None
         conn.execute(
-            "INSERT INTO sessions(chat_id, thread_id, session_id, cwd, engine, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?) "
+            "INSERT INTO sessions(chat_id, thread_id, session_id, cwd, engine, model, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(chat_id, thread_id) DO UPDATE SET "
-            "session_id=excluded.session_id, engine=excluded.engine, updated_at=excluded.updated_at",
-            (chat_id, thread_id, new_id, cwd, new_engine.name, now),
+            "session_id=excluded.session_id, engine=excluded.engine, "
+            "model=excluded.model, updated_at=excluded.updated_at",
+            (chat_id, thread_id, new_id, cwd, new_engine.name, model, now),
         )
     return new_id, cwd
+
+
+def get_model(chat_id: int, thread_id: int) -> str | None:
+    """Возвращает выбранную для топика модель (или None — дефолт движка)."""
+    with _db() as conn:
+        row = conn.execute(
+            "SELECT model FROM sessions WHERE chat_id = ? AND thread_id = ?",
+            (chat_id, thread_id),
+        ).fetchone()
+    if not row:
+        return None
+    return row[0] or None
 
 
 def set_pending_summary(chat_id: int, thread_id: int, summary: str) -> None:
@@ -606,6 +804,8 @@ async def send_claude_reply(
     """Короткий текст — send_message с HTML-форматированием; длинный — .md вложение.
     `html_prefix` (например '[#xxxx] ') добавляется как уже готовый HTML-фрагмент
     перед сконвертированным телом."""
+    log_kind = "spawn_reply" if meta.get("spawn_id") else "bot_reply"
+
     if len(text) <= MSG_LIMIT:
         html_body = html_prefix + md_to_html(text)
         chunks = split_html_for_telegram(html_body, TG_HARD_LIMIT)
@@ -618,6 +818,9 @@ async def send_claude_reply(
         try:
             if sent is not None:
                 save_message_context(chat.id, sent.message_id, meta)
+                log_message(
+                    chat.id, thread_id, "out", log_kind, text, sent.message_id,
+                )
         except Exception:
             logger.exception("save_message_context failed")
         return sent
@@ -639,6 +842,10 @@ async def send_claude_reply(
             )
         try:
             save_message_context(chat.id, sent.message_id, meta)
+            log_message(
+                chat.id, thread_id, "out", log_kind, text,
+                sent.message_id if sent is not None else None,
+            )
         except Exception:
             logger.exception("save_message_context failed")
         return sent
@@ -713,10 +920,13 @@ def _build_reply_context_prefix(ctx: dict) -> str:
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     key = _key(update)
     session_id, cwd, engine_name = get_session(*key)
+    model = get_model(*key)
     effective = cwd or CLAUDE_CWD
+    model_line = f"Модель: `{model}`\n" if model else ""
     text = (
         f"Привет! Я Jarvis — Telegram-обёртка над LLM CLI.\n\n"
         f"Движок этого топика: `{engine_name}` (дефолт: `{DEFAULT_ENGINE_NAME}`)\n"
+        f"{model_line}"
         f"session-id: `{session_id}`\n"
         f"Рабочая директория: `{effective}`" + (" (дефолт)" if not cwd else "") + "\n\n"
         "Команды:\n"
@@ -787,9 +997,12 @@ async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def cmd_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     key = _key(update)
     session_id, cwd, engine_name = get_session(*key)
+    model = get_model(*key)
     effective = cwd or CLAUDE_CWD
+    model_line = f"\nmodel: {model}" if model else ""
     await update.message.reply_text(
-        f"engine: {engine_name}\nsession-id: {session_id}\ncwd: {effective}"
+        f"engine: {engine_name}{model_line}\n"
+        f"session-id: {session_id}\ncwd: {effective}"
         + (" (дефолт)" if not cwd else "")
     )
 
@@ -803,18 +1016,42 @@ def _engine_keyboard(current_engine: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([row])
 
 
-def _carry_keyboard(old_engine: str, new_engine: str) -> InlineKeyboardMarkup:
-    """Inline-клавиатура «перенести контекст?». callback_data короткие
-    (Telegram-лимит 64 байта), движки трёхбуквенно: c/o/k для claude/codex/opencode? нет —
-    оставим полные имена, длина с запасом."""
+def _model_label(model: str) -> str:
+    """Сокращение для отображения: 'deepseek/deepseek-v4-flash' → 'deepseek-v4-flash'."""
+    return model.split("/", 1)[-1] if "/" in model else model
+
+
+def _model_keyboard(engine_name: str, models: list[str]) -> InlineKeyboardMarkup:
+    """Список моделей движка — по одной в строке, callback_data использует
+    индекс модели в списке (не имя), чтобы не упереться в 64-байтный лимит
+    callback_data при длинных идентификаторах."""
+    rows = []
+    for idx, model in enumerate(models):
+        rows.append([
+            InlineKeyboardButton(
+                _model_label(model),
+                callback_data=f"model_select:{engine_name}:{idx}",
+            )
+        ])
+    return InlineKeyboardMarkup(rows)
+
+
+def _carry_keyboard(
+    old_engine: str, new_engine: str, model_idx: int | None = None,
+) -> InlineKeyboardMarkup:
+    """Inline-клавиатура «перенести контекст?». В callback_data зашивается
+    выбранная модель целевого движка (индексом) — чтобы переключение и выбор
+    модели атомарно прилетели в `on_engine_carry`. Для движков без моделей —
+    `-` вместо индекса."""
+    mtoken = "-" if model_idx is None else str(model_idx)
     return InlineKeyboardMarkup([[
         InlineKeyboardButton(
             "✅ Да, с резюме",
-            callback_data=f"engine_carry:{old_engine}:{new_engine}:y",
+            callback_data=f"engine_carry:{old_engine}:{new_engine}:{mtoken}:y",
         ),
         InlineKeyboardButton(
             "🚫 Нет, чисто",
-            callback_data=f"engine_carry:{old_engine}:{new_engine}:n",
+            callback_data=f"engine_carry:{old_engine}:{new_engine}:{mtoken}:n",
         ),
     ]])
 
@@ -843,9 +1080,26 @@ def _engine_precheck(key: tuple[int, int], target: str) -> tuple[bool, str, str 
     return True, "", current_engine
 
 
-async def _do_engine_switch(key: tuple[int, int], target: str) -> str:
+def _resolve_target_model(target: str, model_idx: int | None) -> str | None:
+    """По индексу из callback_data выдаёт реальное имя модели целевого движка.
+    Контракт: если у движка нет моделей — None; если одна — она; иначе — по idx."""
+    target_engine = get_engine_by_name(target)
+    models = list(target_engine.models)
+    if not models:
+        return None
+    if len(models) == 1:
+        return models[0]
+    if model_idx is None or model_idx < 0 or model_idx >= len(models):
+        return None
+    return models[model_idx]
+
+
+async def _do_engine_switch(
+    key: tuple[int, int], target: str, model: str | None = None,
+) -> str:
     """Финальное действие переключения (без pre-check, который уже сделан вызывающим).
-    Прерывает активный процесс, создаёт новый session_id, возвращает текст ответа."""
+    Прерывает активный процесс, создаёт новый session_id, сохраняет model (или
+    NULL для движков без моделей), возвращает текст ответа."""
     _, _, current_engine = get_session(*key)
     target_engine = get_engine_by_name(target)
     mcp_ok, mcp_status = ensure_engine_tools(target_engine)
@@ -856,13 +1110,15 @@ async def _do_engine_switch(key: tuple[int, int], target: str) -> str:
         active_procs.pop(key, None)
         logger.info("engine switch: killed active proc for key=%s", key)
 
-    new_id, cwd = set_engine(key[0], key[1], target)
+    new_id, cwd = set_engine(key[0], key[1], target, model=model)
     effective = cwd or CLAUDE_CWD
-    logger.info("engine switched for key=%s: %s -> %s (new sid=%s)",
-                key, current_engine, target, new_id)
+    logger.info("engine switched for key=%s: %s -> %s (new sid=%s, model=%s)",
+                key, current_engine, target, new_id, model)
     mcp_line = f"\n{mcp_status}" if mcp_ok else f"\n⚠️ {mcp_status}"
+    model_line = f"\nМодель: {model}" if model else ""
     return (
-        f"🔁 Движок переключён: {current_engine} → {target}\n"
+        f"🔁 Движок переключён: {current_engine} → {target}"
+        f"{model_line}\n"
         f"Новая сессия: {new_id}\n"
         f"Cwd сохранён: {effective}"
         f"{mcp_line}"
@@ -874,6 +1130,7 @@ async def _do_engine_handoff(
     old_engine_name: str,
     new_engine_name: str,
     progress_edit,
+    model: str | None = None,
 ) -> str:
     """Сценарий «с переносом»: 1) lock топика, 2) попросить старый движок
     выдать summary, 3) сохранить в pending_summary, 4) переключить движок.
@@ -881,6 +1138,7 @@ async def _do_engine_handoff(
     chat_id, thread_id = key
     old_engine = get_engine_by_name(old_engine_name)
     old_session_id, cwd, _ = get_session(*key)
+    old_model = get_model(*key)
     effective_cwd = cwd or CLAUDE_CWD
 
     summary_prompt = (
@@ -910,9 +1168,10 @@ async def _do_engine_handoff(
             pass
 
         try:
-            ok, summary_text, _sid_after = await call_llm_stream(
-                old_engine, old_session_id, summary_prompt, key, cwd, on_intermediate,
-            )
+            with engine_model_scope(old_engine.name, old_model):
+                ok, summary_text, _sid_after = await call_llm_stream(
+                    old_engine, old_session_id, summary_prompt, key, cwd, on_intermediate,
+                )
         except Exception as exc:
             logger.exception("handoff summary call crashed: key=%s engine=%s",
                              key, old_engine_name)
@@ -933,7 +1192,7 @@ async def _do_engine_handoff(
 
         # Переключаем движок и сохраняем pending_summary.
         await progress_edit("🔁 Переключаю движок...")
-        switch_text = await _do_engine_switch(key, new_engine_name)
+        switch_text = await _do_engine_switch(key, new_engine_name, model=model)
         set_pending_summary(chat_id, thread_id, cleaned)
         logger.info("handoff: stored pending_summary for key=%s (%d chars)",
                     key, len(cleaned))
@@ -956,15 +1215,17 @@ async def _do_engine_handoff(
 
 async def cmd_engine(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """/engine — показать движок топика с кнопками переключения;
-    /engine <name> — переключить без переноса контекста (старое поведение
-    при текстовом аргументе)."""
+    /engine <name> [model-substring] — переключить без переноса контекста.
+    При >1 моделях и без явного аргумента model — отказ с подсказкой использовать UI."""
     key = _key(update)
     args = context.args or []
 
     if not args:
         session_id, _, engine_name = get_session(*key)
+        model = get_model(*key)
+        model_line = f"\nМодель: {model}" if model else ""
         await update.message.reply_text(
-            f"Движок этого топика: {engine_name}\n"
+            f"Движок этого топика: {engine_name}{model_line}\n"
             f"session-id: {session_id}\n"
             f"Дефолт (для новых топиков): {DEFAULT_ENGINE_NAME}\n\n"
             "Выбери новый движок ниже или введи /engine <name>.",
@@ -977,7 +1238,37 @@ async def cmd_engine(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if not ok:
         await update.message.reply_text(msg)
         return
-    text = await _do_engine_switch(key, target)
+
+    target_engine = get_engine_by_name(target)
+    models = list(target_engine.models)
+    chosen_model: str | None = None
+    if len(models) == 1:
+        chosen_model = models[0]
+    elif len(models) > 1:
+        if len(args) < 2:
+            await update.message.reply_text(
+                f"У движка `{target}` несколько моделей: "
+                + ", ".join(_model_label(m) for m in models)
+                + ".\nИспользуй /engine без аргументов и выбери в UI, "
+                "или передай подстроку модели: /engine "
+                f"{target} {_model_label(models[0])}."
+            )
+            return
+        substr = args[1].strip().lower()
+        exact = [m for m in models if m.lower() == substr]
+        if len(exact) == 1:
+            chosen_model = exact[0]
+        else:
+            matches = [m for m in models if substr in m.lower()]
+            if len(matches) != 1:
+                await update.message.reply_text(
+                    f"Подстрока {substr!r} матчит {len(matches)} модель(и) у `{target}`. "
+                    f"Доступны: {', '.join(_model_label(m) for m in models)}."
+                )
+                return
+            chosen_model = matches[0]
+
+    text = await _do_engine_switch(key, target, model=chosen_model)
     await update.message.reply_text(text + "\nКонтекст прежнего диалога не переносится.")
 
 
@@ -1012,23 +1303,114 @@ async def on_engine_select(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await query.answer()
     except Exception:
         pass
+
+    # Шаг выбора модели: только если у целевого движка их >1.
+    target_engine = get_engine_by_name(target)
+    models = list(target_engine.models)
+    if len(models) > 1:
+        prompt_text = (
+            f"Движок: {current} → {target}.\n"
+            f"Выбери модель {target}:"
+        )
+        try:
+            await query.edit_message_text(
+                prompt_text,
+                reply_markup=_model_keyboard(target, models),
+            )
+        except BadRequest:
+            await send_to_topic(
+                update.effective_chat, key[1],
+                prompt_text,
+                reply_markup=_model_keyboard(target, models),
+            )
+        return
+
+    # 0 или 1 модель — сразу к шагу carry. Для одной модели сохраняем её индекс,
+    # чтобы on_engine_carry знал, что записать в БД.
+    model_idx = 0 if len(models) == 1 else None
     try:
         await query.edit_message_text(
             f"Переключаюсь {current} → {target}.\n"
             "Перенести контекст текущего диалога в новый движок?\n"
             "(резюме старого движка будет добавлено к первому твоему сообщению)",
-            reply_markup=_carry_keyboard(current, target),
+            reply_markup=_carry_keyboard(current, target, model_idx),
         )
     except BadRequest:
         await send_to_topic(
             update.effective_chat, key[1],
             f"Переключаюсь {current} → {target}. Перенести контекст?",
-            reply_markup=_carry_keyboard(current, target),
+            reply_markup=_carry_keyboard(current, target, model_idx),
+        )
+
+
+async def on_model_select(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Callback от кнопки выбора модели. После выбора — обычный шаг про
+    перенос контекста."""
+    query = update.callback_query
+    if query is None:
+        return
+    data = query.data or ""
+    if not data.startswith("model_select:"):
+        return
+    parts = data.split(":")
+    if len(parts) != 3:
+        return
+    _, target, idx_str = parts
+    target = target.strip().lower()
+    try:
+        model_idx = int(idx_str)
+    except ValueError:
+        return
+    key = _key(update)
+
+    ok, msg, current = _engine_precheck(key, target)
+    if not ok:
+        try:
+            await query.answer("Не могу переключить", show_alert=False)
+        except Exception:
+            pass
+        try:
+            await query.edit_message_text(
+                msg + (f"\n\n(текущий движок: {current})" if current else ""),
+                reply_markup=_engine_keyboard(current) if current else None,
+            )
+        except BadRequest:
+            await send_to_topic(update.effective_chat, key[1], msg)
+        return
+
+    target_engine = get_engine_by_name(target)
+    models = list(target_engine.models)
+    if model_idx < 0 or model_idx >= len(models):
+        try:
+            await query.answer("Модель не найдена", show_alert=True)
+        except Exception:
+            pass
+        return
+    chosen = models[model_idx]
+
+    try:
+        await query.answer()
+    except Exception:
+        pass
+    try:
+        await query.edit_message_text(
+            f"Переключаюсь {current} → {target} ({_model_label(chosen)}).\n"
+            "Перенести контекст текущего диалога в новый движок?\n"
+            "(резюме старого движка будет добавлено к первому твоему сообщению)",
+            reply_markup=_carry_keyboard(current, target, model_idx),
+        )
+    except BadRequest:
+        await send_to_topic(
+            update.effective_chat, key[1],
+            f"Переключаюсь {current} → {target} ({_model_label(chosen)}). "
+            "Перенести контекст?",
+            reply_markup=_carry_keyboard(current, target, model_idx),
         )
 
 
 async def on_engine_carry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Callback после ответа «Да/Нет» на вопрос о переносе контекста."""
+    """Callback после ответа «Да/Нет» на вопрос о переносе контекста.
+    Формат callback_data: engine_carry:<old>:<new>:<model_idx_or_dash>:<y|n>."""
     query = update.callback_query
     if query is None:
         return
@@ -1036,10 +1418,18 @@ async def on_engine_carry(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if not data.startswith("engine_carry:"):
         return
     parts = data.split(":")
-    if len(parts) != 4:
+    if len(parts) != 5:
         return
-    _, old_engine, new_engine, choice = parts
+    _, old_engine, new_engine, model_token, choice = parts
     key = _key(update)
+
+    # model_token: "-" → без модели, иначе индекс в target_engine.models.
+    model_idx: int | None = None
+    if model_token != "-":
+        try:
+            model_idx = int(model_token)
+        except ValueError:
+            return
 
     # Проверим, что состояние с момента предыдущего шага не изменилось.
     ok, msg, current = _engine_precheck(key, new_engine)
@@ -1059,13 +1449,15 @@ async def on_engine_carry(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                                 msg or "Состояние изменилось.")
         return
 
+    chosen_model = _resolve_target_model(new_engine, model_idx)
+
     try:
         await query.answer()
     except Exception:
         pass
 
     if choice == "n":
-        text = await _do_engine_switch(key, new_engine)
+        text = await _do_engine_switch(key, new_engine, model=chosen_model)
         text += "\nКонтекст прежнего диалога не переносится."
         try:
             await query.edit_message_text(text)
@@ -1080,7 +1472,9 @@ async def on_engine_carry(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         except BadRequest:
             pass
 
-    text = await _do_engine_handoff(key, old_engine, new_engine, progress_edit)
+    text = await _do_engine_handoff(
+        key, old_engine, new_engine, progress_edit, model=chosen_model,
+    )
     try:
         await query.edit_message_text(text, parse_mode=ParseMode.HTML)
     except BadRequest:
@@ -1143,6 +1537,14 @@ async def _process_prompt(
     key = _key(update)
     chat = update.effective_chat
     thread_id = key[1]
+
+    # Логируем входящее в messages_log сразу — Менеджер через MCP должен видеть
+    # запросы, прилетающие в проектные топики, даже если бот ещё в очереди.
+    in_text = user_text
+    if attachments:
+        in_text = in_text + "\n" + "\n".join(f"[Прикреплён файл: {p}]" for p in attachments)
+    tg_msg_id = update.message.message_id if update.message else None
+    log_message(chat.id, thread_id, "in", "user_text", in_text, tg_msg_id)
 
     # Reply-to контекст и вложения → meta_block
     extra_lines: list[str] = []
@@ -1222,6 +1624,7 @@ async def _process_prompt(
         # или /engine сработал, пока мы стояли в очереди).
         session_id, cwd, engine_name = get_session(*key)
         engine = get_engine_by_name(engine_name)
+        model = get_model(*key)
         effective_cwd = cwd or CLAUDE_CWD
 
         # Pending handoff summary: pop'аем атомарно — доставляется ровно один раз,
@@ -1277,9 +1680,10 @@ async def _process_prompt(
                 pass
 
         try:
-            ok, final_text, _sid_after = await call_llm_stream(
-                engine, session_id, prompt, key, cwd, on_intermediate,
-            )
+            with engine_model_scope(engine.name, model):
+                ok, final_text, _sid_after = await call_llm_stream(
+                    engine, session_id, prompt, key, cwd, on_intermediate,
+                )
         except Exception as exc:
             logger.exception("llm call crashed: key=%s engine=%s", key, engine.name)
             ok, final_text = False, f"Внутренняя ошибка: {exc}"
@@ -1327,9 +1731,10 @@ async def _run_spawn(update: Update, user_text: str) -> None:
     spawn_id = secrets.token_hex(2)  # 4 hex-символа
     prefix = f"[#{spawn_id}] "
 
-    # cwd и engine наследуются из топика; session_id новый и в БД не сохраняется.
+    # cwd, engine, model наследуются из топика; session_id новый и в БД не сохраняется.
     _, cwd, engine_name = get_session(*key)
     engine = get_engine_by_name(engine_name)
+    model = get_model(*key)
     effective_cwd = cwd or CLAUDE_CWD
     session_id = engine.new_session_id()
 
@@ -1373,9 +1778,10 @@ async def _run_spawn(update: Update, user_text: str) -> None:
             pass
 
     try:
-        ok, final_text, _sid_after = await call_llm_stream(
-            engine, session_id, prompt, key, cwd, on_intermediate, spawn_id=spawn_id,
-        )
+        with engine_model_scope(engine.name, model):
+            ok, final_text, _sid_after = await call_llm_stream(
+                engine, session_id, prompt, key, cwd, on_intermediate, spawn_id=spawn_id,
+            )
     except Exception as exc:
         logger.exception("spawn crashed: key=%s spawn=%s engine=%s",
                          key, spawn_id, engine.name)
@@ -1408,6 +1814,178 @@ async def _run_spawn(update: Update, user_text: str) -> None:
         await deliver_file_markers(chat, thread_id, file_markers, notice_prefix=prefix)
     logger.info("spawn done: key=%s spawn=%s ok=%s files=%d",
                 key, spawn_id, ok, len(file_markers))
+
+
+async def _run_manager_job(app: Application, job: dict) -> tuple[bool, int | None]:
+    """Drive a single queued job through the normal LLM pipeline.
+
+    No Update object: the prompt is treated as user input but sourced from the
+    Manager, so we ack it in the topic and post the bot's reply there. Per-key
+    lock is respected — if a Telegram user is mid-conversation in the same
+    topic, this waits its turn.
+    """
+    chat_id = job["chat_id"]
+    thread_id = job["thread_id"]
+    user_text = job["text"]
+    job_id = job["id"]
+    key = (chat_id, thread_id)
+    bot = app.bot
+    try:
+        chat = await bot.get_chat(chat_id)
+    except Exception:
+        logger.exception("manager job %s: bot.get_chat(%s) failed", job_id, chat_id)
+        return False, None
+
+    lock = _lock_for(key)
+    await lock.acquire()
+    try:
+        logger.info("manager job %s: lock acquired key=%s", job_id, key)
+        session_id, cwd, engine_name = get_session(*key)
+        engine = get_engine_by_name(engine_name)
+        model = get_model(*key)
+        effective_cwd = cwd or CLAUDE_CWD
+
+        pending_summary = pop_pending_summary(*key)
+
+        prompt_parts = [_system_prefix(effective_cwd)]
+        if pending_summary:
+            prompt_parts.append(
+                "[Контекст от предыдущего движка — резюме прошлого диалога, "
+                "продолжай с этой точки:]\n" + pending_summary
+            )
+        mgr_target = resolve_manager_topic()
+        if mgr_target and mgr_target != (chat_id, thread_id):
+            mgr_chat_id, mgr_thread_id = mgr_target
+            prompt_parts.append(
+                f"[SYSTEM NOTE: задача делегирована Менеджером через MCP "
+                f"(job_id={job_id}). Отвечай как обычно — финальный ответ "
+                f"пойдёт в этот топик (thread_id={thread_id}, cwd={effective_cwd}).\n"
+                f"ПОСЛЕ финального ответа ОБЯЗАТЕЛЬНО отправь короткий "
+                f"отчёт в топик Менеджера через "
+                f"mcp__jarvis__manager_send с as_user=false:\n"
+                f"  thread_id={mgr_thread_id}\n"
+                f"  text:\n"
+                f"    #job_{job_id} ✅ <одна строка: что сделано>\n"
+                f"    src: thread_id={thread_id}, cwd={effective_cwd}\n"
+                f"либо при провале — #job_{job_id} ❌ <что не получилось>.\n"
+                f"Одно сообщение, без дублей и промежуточных статусов.]"
+            )
+        else:
+            prompt_parts.append(
+                "[SYSTEM NOTE: задача делегирована Менеджером через MCP "
+                f"(job_id={job_id}). Отвечай как обычно.]"
+            )
+        prompt_parts.append("---\n\nСообщение пользователя:\n" + user_text)
+        prompt = "\n\n".join(prompt_parts)
+
+        try:
+            indicator = await send_to_topic(
+                chat, thread_id,
+                f"⏳ Manager делегировал задачу (job #{job_id})...",
+            )
+        except Exception:
+            indicator = None
+
+        async def on_intermediate(text: str) -> None:
+            nonlocal indicator
+            preview = text[-TG_HARD_LIMIT + 20:]
+            html_preview = md_to_html(preview)
+            if indicator is not None:
+                try:
+                    await indicator.edit_text(html_preview, parse_mode=ParseMode.HTML)
+                    return
+                except BadRequest as exc:
+                    if "parse" in str(exc).lower() or "entit" in str(exc).lower():
+                        try:
+                            await indicator.edit_text(preview)
+                            return
+                        except Exception:
+                            indicator = None
+                    else:
+                        indicator = None
+                except Exception:
+                    indicator = None
+            try:
+                indicator = await _send_with_html_fallback(
+                    chat.send_message, html_preview,
+                    **({"message_thread_id": thread_id} if thread_id else {}),
+                )
+            except Exception:
+                pass
+
+        try:
+            with engine_model_scope(engine.name, model):
+                ok, final_text, _sid_after = await call_llm_stream(
+                    engine, session_id, prompt, key, cwd, on_intermediate,
+                )
+        except Exception as exc:
+            logger.exception("manager job %s: llm crashed engine=%s", job_id, engine.name)
+            ok, final_text = False, f"Внутренняя ошибка: {exc}"
+
+        if indicator is not None:
+            try:
+                await indicator.delete()
+            except Exception:
+                pass
+
+        if not ok and not final_text.strip():
+            logger.info("manager job %s stopped without final reply", job_id)
+            return False, None
+
+        cleaned_text, file_markers = extract_file_markers(final_text)
+        if not cleaned_text.strip():
+            cleaned_text = "(пустой ответ)" if not file_markers else "(см. вложения)"
+        meta = {"type": "claude_response", "engine": engine.name, "job_id": job_id}
+        sent_msg_id = None
+        try:
+            sent = await send_claude_reply(chat, thread_id, cleaned_text, meta)
+            if sent is not None:
+                sent_msg_id = sent.message_id
+        except Exception:
+            logger.exception("manager job %s: failed to send reply", job_id)
+        if file_markers:
+            await deliver_file_markers(chat, thread_id, file_markers)
+
+        logger.info("manager job %s done: ok=%s files=%d engine=%s",
+                    job_id, ok, len(file_markers), engine.name)
+        return ok, sent_msg_id
+    finally:
+        try:
+            lock.release()
+        except RuntimeError:
+            pass
+
+
+async def jobs_worker(app: Application) -> None:
+    """Long-running background task: pull pending jobs and run them.
+
+    One worker is enough for now — jobs serialise per-topic anyway via the
+    same key-lock the user-side pipeline uses. The poll interval is intentionally
+    short (~2s) because the queue is meant for interactive delegation.
+    """
+    logger.info("jobs_worker started")
+    while True:
+        try:
+            job = claim_next_job()
+            if job is None:
+                await asyncio.sleep(2.0)
+                continue
+            try:
+                ok, msg_id = await _run_manager_job(app, job)
+                finish_job(
+                    job["id"], "done" if ok else "failed",
+                    None if ok else "engine returned no usable reply",
+                    msg_id,
+                )
+            except Exception as exc:
+                logger.exception("manager job %s crashed", job["id"])
+                finish_job(job["id"], "failed", str(exc)[:1000], None)
+        except asyncio.CancelledError:
+            logger.info("jobs_worker cancelled")
+            raise
+        except Exception:
+            logger.exception("jobs_worker loop crashed; sleeping 5s")
+            await asyncio.sleep(5.0)
 
 
 async def cmd_spawn(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1554,6 +2132,11 @@ async def _post_init(application: Application) -> None:
     except Exception:
         logger.exception("set_chat_menu_button failed (меню не критично)")
 
+    # Запускаем worker для очереди jobs (delegations from Manager via MCP).
+    # Хранить ссылку в bot_data на случай нужды в shutdown'е/тестах.
+    task = asyncio.create_task(jobs_worker(application))
+    application.bot_data["jobs_worker_task"] = task
+
 
 def main() -> None:
     print(f"=== Jarvis Telegram Bot (per-topic engine, default={DEFAULT_ENGINE_NAME}) ===")
@@ -1599,6 +2182,7 @@ def main() -> None:
     app.add_handler(MessageHandler(allowed & filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(CallbackQueryHandler(on_cancel_queue, pattern=r"^cancel_queue:"))
     app.add_handler(CallbackQueryHandler(on_engine_select, pattern=r"^engine_select:"))
+    app.add_handler(CallbackQueryHandler(on_model_select, pattern=r"^model_select:"))
     app.add_handler(CallbackQueryHandler(on_engine_carry, pattern=r"^engine_carry:"))
 
     app.add_handler(MessageHandler(~allowed, unauthorized_handler))

@@ -7,11 +7,13 @@
 
 - Передаёт любые текстовые запросы в выбранный движок (`claude`, OpenAI `codex` или `opencode`).
 - Запоминает session-id на каждый топик — контекст диалога сохраняется.
-- Движок per-topic: `JARVIS_ENGINE=claude|codex|opencode` задаёт дефолт для новых
-  топиков; в любом топике можно переключиться командой `/engine <name>`.
+- Движок и модель per-topic: `JARVIS_ENGINE=claude|codex|opencode` задаёт
+  дефолтный движок для новых топиков; в любом топике можно переключиться
+  командой `/engine <name> [model-substring]`.
 - `/engine` — показать текущий движок и список доступных; `/engine <name>` —
-  переключить (новый session_id под новый движок, cwd сохраняется, контекст
-  прежнего диалога не переносится).
+  переключить движок, `/engine codex gpt-5.4-mini` — переключить движок и модель
+  (новый session_id под новый движок, cwd сохраняется, контекст прежнего диалога
+  не переносится).
 - `/new` или `/reset` — начать новую сессию (движок сохраняется).
 - `/session` — показать текущий session-id, cwd и движок.
 - Длинные ответы (> 3500 символов) присылаются как `.md`-файл с коротким превью.
@@ -57,6 +59,12 @@ claude -p "hello"   # проверка, что авторизация работ
 - `CLAUDE_TIMEOUT` — таймаут claude, секунд (по умолчанию `3600`).
 - `CODEX_TIMEOUT` — таймаут codex, секунд (по умолчанию `3600`).
 - `OPENCODE_TIMEOUT` — таймаут opencode, секунд (по умолчанию `3600`).
+- `CODEX_MODEL` — дефолтная модель для Codex CLI, если в топике модель не
+  выбрана явно через `/engine`.
+- `CODEX_MODELS` — запятая-разделённый список моделей для UI `/engine`.
+  Если не задан, Jarvis читает `~/.codex/models_cache.json`; если cache
+  недоступен, использует fallback:
+  `gpt-5.5,gpt-5.4,gpt-5.4-mini,gpt-5.3-codex,gpt-5.2`.
 - `OPENCODE_MODEL`, `OPENCODE_AGENT`, `OPENCODE_VARIANT` — опциональные параметры
   для `opencode run`; если не заданы, используются настройки самого opencode.
 - `PLAYWRIGHT_MCP_NPX` — абсолютный путь к `npx` для Playwright MCP. Если не
@@ -70,6 +78,11 @@ claude -p "hello"   # проверка, что авторизация работ
   режима обычно используют capabilities, например `--caps=vision,pdf,devtools`.
 - `JARVIS_PLAYWRIGHT_MCP` — `1`/`0`, включает автоматическое подключение
   Playwright MCP при активации движка (по умолчанию включено).
+- `JARVIS_MANAGER_MCP` — `1`/`0`, аналогично для Jarvis Manager MCP (см. ниже).
+- `JARVIS_MCP_NAME` — имя MCP-сервера в конфигах движков (по умолчанию `jarvis`).
+- `JARVIS_MCP_PYTHON` — путь к Python для запуска MCP-сервера (по умолчанию
+  `venv/bin/python` репозитория jarvis).
+- `JARVIS_MCP_SCRIPT` / `JARVIS_MCP_DB` — переопределить пути к серверу/БД.
 
 ### Playwright MCP для всех движков
 
@@ -87,6 +100,25 @@ Jarvis сам не является MCP-клиентом: браузерные t
 
 Если нужен порт, а не channel name, задай `PLAYWRIGHT_MCP_CDP_ENDPOINT=http://127.0.0.1:9222`.
 
+### Jarvis Manager MCP (для агента-Менеджера)
+
+По той же схеме Jarvis регистрирует свой собственный stdio MCP-сервер,
+дающий read-only-доступ к состоянию бота (топики, лог сообщений). Сервер
+живёт в `scripts/jarvis_mcp_server.py` и запускается тем же venv-Python'ом.
+
+Доступные tools (Этап 1):
+
+- `manager_topics` — список всех топиков (chat_id, thread_id, title, cwd,
+  engine, model, session_id, updated_at, last_message_at). Фильтры:
+  `cwd_contains`, `engine`, `limit`.
+- `manager_inbox` — лог сообщений одного топика. Параметры: `chat_id`,
+  `thread_id`, `since` (ISO UTC), `limit`, `text_limit`, `direction`.
+
+Точки записи в `messages_log`: входящие пользовательские реплики
+(`direction='in'`, `kind='user_text'`) и финальные ответы бота
+(`direction='out'`, `kind='bot_reply'` / `'spawn_reply'`). Промежуточные
+tool-use'ы не логируются — они шумные.
+
 Проверка:
 
 ```bash
@@ -103,7 +135,8 @@ opencode mcp list
    ./venv/bin/python scripts/sync_codex_knowledge.py
    ```
    Скрипт идемпотентен, запускается перед стартом бота или вручную.
-3. Добавить в `.env`: `JARVIS_ENGINE=codex`.
+3. Добавить в `.env`: `JARVIS_ENGINE=codex`. При необходимости зафиксировать
+   модель: `CODEX_MODEL=gpt-5.5`.
 4. `systemctl --user restart jarvis-bot.service`.
 
 ### Переход на opencode

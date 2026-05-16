@@ -23,6 +23,7 @@ import logging
 import os
 import time
 import uuid
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Awaitable, Callable
 
@@ -34,6 +35,18 @@ CODEX_BIN = os.environ.get("CODEX_BIN", "codex")
 CODEX_TIMEOUT = int(os.environ.get("CODEX_TIMEOUT", "3600"))
 # Тот же минимальный интервал, что и у claude-адаптера.
 INTERMEDIATE_MIN_INTERVAL = 2.0
+DEFAULT_CODEX_MODELS = [
+    "gpt-5.5",
+    "gpt-5.4",
+    "gpt-5.4-mini",
+    "gpt-5.3-codex",
+    "gpt-5.2",
+]
+
+# Per-call модель. Выставляется через engines.engine_model_scope() из
+# telegram_bot.py перед call_stream. Если None — фолбэк на CODEX_MODEL env,
+# иначе CLI берёт свою дефолтную модель.
+CURRENT_MODEL: ContextVar[str | None] = ContextVar("codex_model", default=None)
 
 # Инструкция про маркер [[FILE: ...]]. Клеится префиксом к пользовательскому
 # prompt'у на каждом вызове (чтобы не зависеть от AGENTS.md — тот может быть
@@ -62,9 +75,47 @@ def _codex_sessions_root() -> Path:
     return Path.home() / ".codex" / "sessions"
 
 
+def _split_models(raw: str | None) -> list[str]:
+    if not raw:
+        return []
+    return [part.strip() for part in raw.split(",") if part.strip()]
+
+
+def _models_from_codex_cache() -> list[str]:
+    cache_path = Path(
+        os.environ.get("CODEX_MODELS_CACHE", Path.home() / ".codex" / "models_cache.json")
+    )
+    if not cache_path.is_file():
+        return []
+    try:
+        data = json.loads(cache_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        logger.warning("cannot read codex models cache: %s", cache_path, exc_info=True)
+        return []
+    if not isinstance(data, dict):
+        return []
+
+    models: list[str] = []
+    for item in data.get("models", []):
+        if not isinstance(item, dict) or item.get("visibility") != "list":
+            continue
+        slug = item.get("slug")
+        if isinstance(slug, str) and slug and slug not in models:
+            models.append(slug)
+    return models
+
+
+CODEX_MODELS = (
+    _split_models(os.environ.get("CODEX_MODELS"))
+    or _models_from_codex_cache()
+    or DEFAULT_CODEX_MODELS
+)
+
+
 class CodexEngine:
     name = "codex"
     bin_path = CODEX_BIN
+    models: list[str] = CODEX_MODELS
 
     # --- Session helpers ---
 
@@ -142,12 +193,16 @@ class CodexEngine:
             # и потом мешался в списке recent-sessions.
             shared_flags.append("--ephemeral")
 
+        model = CURRENT_MODEL.get() or os.environ.get("CODEX_MODEL")
+        model_flags = ["--model", model] if model else []
+
         if resume_mode:
             # У resume нет --sandbox и -C/--cd. Sandbox-режим уже покрыт
             # --dangerously-bypass-approvals-and-sandbox, а cwd — через subprocess cwd=.
             cmd = [
                 CODEX_BIN, "exec", "resume",
                 *shared_flags,
+                *model_flags,
                 session_id, full_prompt,
             ]
         else:
@@ -155,6 +210,7 @@ class CodexEngine:
             cmd = [
                 CODEX_BIN, "exec",
                 *shared_flags,
+                *model_flags,
                 "--sandbox", "danger-full-access",
                 "-C", effective_cwd,
                 full_prompt,

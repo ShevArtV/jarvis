@@ -15,7 +15,8 @@
 from __future__ import annotations
 
 import os
-from typing import Protocol, Awaitable, Callable
+from contextlib import contextmanager
+from typing import Protocol, Awaitable, Callable, Iterator
 
 # Набор возможных движков. Добавляется при расширении.
 ENGINE_CLAUDE = "claude"
@@ -27,8 +28,9 @@ SUPPORTED_ENGINES = (ENGINE_CLAUDE, ENGINE_CODEX, ENGINE_OPENCODE)
 class Engine(Protocol):
     """Интерфейс адаптера движка. Все методы строго asyncio-safe, где применимо."""
 
-    name: str       # "claude" | "codex" | "opencode"
-    bin_path: str   # путь/имя бинаря CLI (для shutil.which)
+    name: str            # "claude" | "codex" | "opencode"
+    bin_path: str        # путь/имя бинаря CLI (для shutil.which)
+    models: list[str]    # доступные модели; пустой список = «модель не выбирается»
 
     def new_session_id(self) -> str: ...
     def session_exists(self, session_id: str, cwd: str) -> bool: ...
@@ -90,7 +92,55 @@ def get_engine() -> Engine:
 
 
 def ensure_engine_tools(engine: Engine) -> tuple[bool, str]:
-    """Runtime tool setup for an engine when Jarvis activates or uses it."""
+    """Runtime tool setup for an engine when Jarvis activates or uses it.
+
+    Registers all stdio MCP servers Jarvis exposes (Playwright + Manager).
+    Returns combined (ok, status); ok=False if any one server fails so the
+    caller can log it, but individual failures don't block the others.
+    """
+    from engines.jarvis_mcp import ensure_jarvis_mcp
     from engines.playwright_mcp import ensure_playwright_mcp
 
-    return ensure_playwright_mcp(engine.name, engine.bin_path)
+    pw_ok, pw_status = ensure_playwright_mcp(engine.name, engine.bin_path)
+    mgr_ok, mgr_status = ensure_jarvis_mcp(engine.name, engine.bin_path)
+    return pw_ok and mgr_ok, f"{pw_status}; {mgr_status}"
+
+
+@contextmanager
+def engine_model_scope(engine_name: str, model: str | None) -> Iterator[None]:
+    """Выставляет текущую модель для движка через ContextVar на время блока.
+
+    Поддерживаются claude, codex и opencode.
+    Для движков без поддержки или при model=None — no-op.
+    ContextVar.set/reset синхронны, но значение видно через `await` внутри
+    той же таски — этого достаточно для call_stream.
+    """
+    if not model:
+        yield
+        return
+    if engine_name == ENGINE_OPENCODE:
+        from engines.opencode_engine import CURRENT_MODEL as OC_MODEL
+
+        token = OC_MODEL.set(model)
+        try:
+            yield
+        finally:
+            OC_MODEL.reset(token)
+    elif engine_name == ENGINE_CLAUDE:
+        from engines.claude_engine import CURRENT_MODEL as CL_MODEL
+
+        token = CL_MODEL.set(model)
+        try:
+            yield
+        finally:
+            CL_MODEL.reset(token)
+    elif engine_name == ENGINE_CODEX:
+        from engines.codex_engine import CURRENT_MODEL as CX_MODEL
+
+        token = CX_MODEL.set(model)
+        try:
+            yield
+        finally:
+            CX_MODEL.reset(token)
+    else:
+        yield

@@ -17,6 +17,7 @@ import os
 import re
 import time
 import uuid
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Awaitable, Callable
 
@@ -36,6 +37,11 @@ APPEND_SYSTEM_PROMPT = (
     "Используй только для файлов в пределах cwd сессии или явно указанных пользователем."
 )
 
+# Per-call модель. Выставляется через engines.engine_model_scope() из
+# telegram_bot.py перед call_stream. Если None — фолбэк на CLAUDE_MODEL env,
+# иначе --model не передаётся (CLI берёт свою дефолтную).
+CURRENT_MODEL: ContextVar[str | None] = ContextVar("claude_model", default=None)
+
 
 def _sessions_dir_for(cwd: str) -> Path:
     """~/.claude/projects/<encoded-cwd>/  (Claude CLI заменяет '/' и '.' на '-':
@@ -47,6 +53,16 @@ def _sessions_dir_for(cwd: str) -> Path:
 class ClaudeEngine:
     name = "claude"
     bin_path = CLAUDE_BIN
+    # CLI принимает алиасы ('opus', 'sonnet', 'haiku') и полные имена
+    # ('claude-opus-4-7', 'claude-opus-4-7[1m]', ...). Алиасы держим как
+    # дефолт, а вариант 1M-окна добавляем полным именем — короткого алиаса для
+    # него нет.
+    models: list[str] = [
+        "opus",
+        "claude-opus-4-7[1m]",
+        "sonnet",
+        "haiku",
+    ]
 
     # --- Session filesystem helpers ---
 
@@ -117,6 +133,9 @@ class ClaudeEngine:
             else:
                 session_flags = ["--session-id", session_id]
 
+        model = CURRENT_MODEL.get() or os.environ.get("CLAUDE_MODEL")
+        model_flags = ["--model", model] if model else []
+
         cmd = [
             CLAUDE_BIN, "--print",
             "--permission-mode", "bypassPermissions",
@@ -124,6 +143,7 @@ class ClaudeEngine:
             "--output-format", "stream-json",
             "--verbose",
             "--append-system-prompt", APPEND_SYSTEM_PROMPT,
+            *model_flags,
             *session_flags,
             prompt,
         ]
