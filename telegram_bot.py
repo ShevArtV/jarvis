@@ -1080,16 +1080,30 @@ async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("⛔ Текущий запрос прерван. Сессия сохранена.")
 
 
-async def cmd_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    key = _key(update)
+def _topic_status_block(key: tuple[int, int]) -> str:
+    """HTML-блок со статусом топика для /session и /engine.
+
+    Pre-форматированный, моноширинный. Показывает engine + model (даже
+    NULL — как «дефолт движка»), session-id, cwd.
+    """
     session_id, cwd, engine_name = get_session(*key)
     model = get_model(*key)
-    effective = cwd or CLAUDE_CWD
-    model_line = f"\nmodel: {model}" if model else ""
+    effective_cwd = cwd or CLAUDE_CWD
+    cwd_suffix = "" if cwd else " (дефолт)"
+    model_line = model if model else "(дефолт движка)"
+    body = (
+        f"engine     : {engine_name}\n"
+        f"model      : {model_line}\n"
+        f"session-id : {session_id}\n"
+        f"cwd        : {effective_cwd}{cwd_suffix}"
+    )
+    return "<pre>" + _html_escape(body) + "</pre>"
+
+
+async def cmd_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    key = _key(update)
     await update.message.reply_text(
-        f"engine: {engine_name}{model_line}\n"
-        f"session-id: {session_id}\ncwd: {effective}"
-        + (" (дефолт)" if not cwd else "")
+        _topic_status_block(key), parse_mode=ParseMode.HTML,
     )
 
 
@@ -1307,14 +1321,14 @@ async def cmd_engine(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     args = context.args or []
 
     if not args:
-        session_id, _, engine_name = get_session(*key)
-        model = get_model(*key)
-        model_line = f"\nМодель: {model}" if model else ""
+        _, _, engine_name = get_session(*key)
+        footer = _html_escape(
+            f"\n\nДефолт (для новых топиков): {DEFAULT_ENGINE_NAME}\n"
+            "Выбери новый движок ниже или введи /engine <name>."
+        )
         await update.message.reply_text(
-            f"Движок этого топика: {engine_name}{model_line}\n"
-            f"session-id: {session_id}\n"
-            f"Дефолт (для новых топиков): {DEFAULT_ENGINE_NAME}\n\n"
-            "Выбери новый движок ниже или введи /engine <name>.",
+            _topic_status_block(key) + footer,
+            parse_mode=ParseMode.HTML,
             reply_markup=_engine_keyboard(engine_name),
         )
         return
