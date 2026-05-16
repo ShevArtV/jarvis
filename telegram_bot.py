@@ -601,6 +601,22 @@ def get_model(chat_id: int, thread_id: int) -> str | None:
     return row[0] or None
 
 
+def update_model_only(chat_id: int, thread_id: int, model: str | None) -> bool:
+    """Меняет только модель текущего движка топика, не трогая session_id.
+
+    Используется, когда оператор тыкает в свой же активный движок и
+    выбирает другую модель. Контекст сессии сохраняется (тот же jsonl).
+    Возвращает True если запись существовала.
+    """
+    with _db() as conn:
+        cur = conn.execute(
+            "UPDATE sessions SET model = ?, updated_at = ? "
+            "WHERE chat_id = ? AND thread_id = ?",
+            (model, datetime.utcnow().isoformat(), chat_id, thread_id),
+        )
+    return cur.rowcount == 1
+
+
 def set_pending_summary(chat_id: int, thread_id: int, summary: str) -> None:
     """Сохраняет резюме предыдущей сессии — будет доставлено в первый prompt
     после переключения движка."""
@@ -1334,6 +1350,37 @@ async def cmd_engine(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
 
     target = args[0].strip().lower()
+
+    # Same-engine: текстовое /engine <current> <model> меняет только модель,
+    # не пересоздаёт сессию. Контекст сохраняется.
+    _, _, current_engine = get_session(*key)
+    if target in SUPPORTED_ENGINES and target == current_engine and len(args) >= 2:
+        target_engine = get_engine_by_name(target)
+        models = list(target_engine.models)
+        substr = args[1].strip().lower()
+        exact = [m for m in models if m.lower() == substr]
+        if exact:
+            chosen = exact[0]
+        else:
+            matches = [m for m in models if substr in m.lower()]
+            if len(matches) != 1:
+                await update.message.reply_text(
+                    f"Подстрока {substr!r} матчит {len(matches)} модель(и) у `{target}`. "
+                    f"Доступны: {', '.join(_model_label(m) for m in models)}."
+                )
+                return
+            chosen = matches[0]
+        update_model_only(key[0], key[1], chosen)
+        await update.message.reply_text(
+            f"Модель движка `{target}` изменена: → {_model_label(chosen)}.\n"
+            f"Контекст сессии сохранён.",
+        )
+        logger.info(
+            "model changed in-place via /engine for key=%s engine=%s: -> %s",
+            key, target, chosen,
+        )
+        return
+
     ok, msg, _ = _engine_precheck(key, target)
     if not ok:
         await update.message.reply_text(msg)
@@ -1383,6 +1430,50 @@ async def on_engine_select(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
     target = data.split(":", 1)[1].strip().lower()
     key = _key(update)
+
+    # Same-engine click: предлагаем смену модели вместо отказа.
+    _, _, current_engine = get_session(*key)
+    if target == current_engine:
+        try:
+            await query.answer()
+        except Exception:
+            pass
+        target_engine = get_engine_by_name(target)
+        models = list(target_engine.models)
+        current_model = get_model(*key)
+        if len(models) > 1:
+            prompt_text = (
+                f"Движок `{target}` уже активен.\n"
+                f"Текущая модель: {current_model or '(дефолт движка)'}.\n"
+                f"Выбери другую модель — контекст сессии сохранится:"
+            )
+            try:
+                await query.edit_message_text(
+                    prompt_text,
+                    reply_markup=_model_keyboard(target, models),
+                )
+            except BadRequest:
+                await send_to_topic(
+                    update.effective_chat, key[1],
+                    prompt_text,
+                    reply_markup=_model_keyboard(target, models),
+                )
+        else:
+            msg = (
+                f"Движок `{target}` уже активен. "
+                + (
+                    f"У него только одна модель ({models[0]}), сменить не на что."
+                    if models
+                    else "Выбор модели для этого движка недоступен."
+                )
+            )
+            try:
+                await query.edit_message_text(
+                    msg, reply_markup=_engine_keyboard(current_engine),
+                )
+            except BadRequest:
+                await send_to_topic(update.effective_chat, key[1], msg)
+        return
 
     ok, msg, current = _engine_precheck(key, target)
     if not ok:
@@ -1463,6 +1554,39 @@ async def on_model_select(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
     key = _key(update)
 
+    target_engine = get_engine_by_name(target)
+    models = list(target_engine.models)
+    if model_idx < 0 or model_idx >= len(models):
+        try:
+            await query.answer("Модель не найдена", show_alert=True)
+        except Exception:
+            pass
+        return
+    chosen = models[model_idx]
+
+    # Same-engine: меняем только модель в БД, session_id и контекст
+    # сохраняются. Carry-этап не нужен.
+    _, _, current_engine = get_session(*key)
+    if target == current_engine:
+        update_model_only(key[0], key[1], chosen)
+        try:
+            await query.answer()
+        except Exception:
+            pass
+        new_text = (
+            f"Модель движка `{target}` изменена: → {_model_label(chosen)}.\n"
+            f"Контекст сессии сохранён."
+        )
+        try:
+            await query.edit_message_text(new_text)
+        except BadRequest:
+            await send_to_topic(update.effective_chat, key[1], new_text)
+        logger.info(
+            "model changed in-place for key=%s engine=%s: -> %s",
+            key, target, chosen,
+        )
+        return
+
     ok, msg, current = _engine_precheck(key, target)
     if not ok:
         try:
@@ -1477,16 +1601,6 @@ async def on_model_select(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         except BadRequest:
             await send_to_topic(update.effective_chat, key[1], msg)
         return
-
-    target_engine = get_engine_by_name(target)
-    models = list(target_engine.models)
-    if model_idx < 0 or model_idx >= len(models):
-        try:
-            await query.answer("Модель не найдена", show_alert=True)
-        except Exception:
-            pass
-        return
-    chosen = models[model_idx]
 
     try:
         await query.answer()
