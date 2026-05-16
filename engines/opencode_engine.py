@@ -215,7 +215,7 @@ class OpenCodeEngine:
                 limit=10 * 1024 * 1024,
             )
         except FileNotFoundError:
-            return False, f"`{OPENCODE_BIN}` не найден в PATH.", session_id
+            return False, f"`{OPENCODE_BIN}` не найден в PATH.", session_id, None
 
         if is_spawn:
             spawn_procs[(key[0], key[1], spawn_id)] = proc
@@ -223,6 +223,9 @@ class OpenCodeEngine:
             active_procs[key] = proc
 
         real_session_id: str | None = None
+        # actual_model: fallback на то, что мы сами просили (--model);
+        # stream-парсер ниже перезапишет, если CLI сообщит точное.
+        actual_model: str | None = model
         text_chunks: list[str] = []
         part_texts: dict[str, str] = {}
         final_text = ""
@@ -256,7 +259,7 @@ class OpenCodeEngine:
             return txt
 
         async def read_stream() -> None:
-            nonlocal final_text, real_session_id
+            nonlocal final_text, real_session_id, actual_model
             assert proc.stdout is not None
             while True:
                 line = await proc.stdout.readline()
@@ -274,6 +277,21 @@ class OpenCodeEngine:
                 sid = _extract_session_id(ev)
                 if sid:
                     real_session_id = sid
+
+                # Best-effort парсинг модели: opencode кладёт её в part.modelID
+                # или message.info.modelID. Берём первое попадание.
+                for obj in (
+                    ev, ev.get("part"), ev.get("info"), ev.get("message"),
+                    ev.get("properties"),
+                ):
+                    if isinstance(obj, dict):
+                        for key_name in ("modelID", "model_id", "model"):
+                            m = obj.get(key_name)
+                            if isinstance(m, str) and m:
+                                actual_model = m
+                                break
+                        if actual_model and actual_model != model:
+                            break
 
                 etype = ev.get("type")
                 props = ev.get("properties") if isinstance(ev.get("properties"), dict) else {}
@@ -338,7 +356,7 @@ class OpenCodeEngine:
                 await asyncio.wait_for(read_stream(), timeout=OPENCODE_TIMEOUT)
             except asyncio.TimeoutError:
                 await terminate_process_tree(proc)
-                return False, f"Timeout: opencode не ответил за {OPENCODE_TIMEOUT}с.", session_id
+                return False, f"Timeout: opencode не ответил за {OPENCODE_TIMEOUT}с.", session_id, actual_model
             await proc.wait()
         except asyncio.CancelledError:
             await terminate_process_tree(proc)
@@ -373,25 +391,25 @@ class OpenCodeEngine:
                 stderr_text[:500], stream_errors[:3],
             )
             if proc.returncode and proc.returncode < 0:
-                return False, "", (real_session_id or session_id)
+                return False, "", (real_session_id or session_id), actual_model
             if not final_text:
                 err_body = "\n".join(stream_errors)[:1500] if stream_errors else stderr_text[:1500]
                 return False, (
                     f"Ошибка opencode (rc={proc.returncode}): {err_body or '(пусто)'}"
-                ), session_id
+                ), session_id, actual_model
 
         logger.info(
-            "opencode done: key=%s rc=%s final_len=%d real_session_id=%s",
-            key, proc.returncode, len(final_text), real_session_id,
+            "opencode done: key=%s rc=%s final_len=%d real_session_id=%s model=%s",
+            key, proc.returncode, len(final_text), real_session_id, actual_model,
         )
         if not final_text.strip():
             return False, (
                 "opencode вернул пустой ответ."
                 + (f"\n{stderr_text[:500]}" if stderr_text else "")
-            ), (real_session_id or session_id)
+            ), (real_session_id or session_id), actual_model
 
         effective_out_id = session_id
         if not is_spawn and real_session_id and real_session_id != session_id:
             effective_out_id = real_session_id
 
-        return True, final_text, effective_out_id
+        return True, final_text, effective_out_id, actual_model

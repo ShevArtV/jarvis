@@ -232,7 +232,7 @@ class CodexEngine:
                 limit=10 * 1024 * 1024,
             )
         except FileNotFoundError:
-            return False, f"`{CODEX_BIN}` не найден в PATH.", session_id
+            return False, f"`{CODEX_BIN}` не найден в PATH.", session_id, None
 
         if is_spawn:
             spawn_procs[(key[0], key[1], spawn_id)] = proc
@@ -241,6 +241,9 @@ class CodexEngine:
 
         final_text = ""
         real_thread_id: str | None = None
+        # actual_model: то, что мы сами попросили (через --model) — пока
+        # CLI не сообщит точное. Stream-парсер ниже может перезаписать.
+        actual_model: str | None = model
         buffer_intermediate: list[str] = []
         last_push = 0.0
         # Ошибки из stream (type=error и type=turn.failed). Codex пишет их
@@ -264,7 +267,7 @@ class CodexEngine:
                 logger.exception("on_intermediate failed")
 
         async def read_stream():
-            nonlocal final_text, real_thread_id
+            nonlocal final_text, real_thread_id, actual_model
             assert proc.stdout is not None
             while True:
                 line = await proc.stdout.readline()
@@ -277,6 +280,14 @@ class CodexEngine:
                     ev = json.loads(raw)
                 except json.JSONDecodeError:
                     continue
+                # Best-effort парсинг модели из любого top-level event'а
+                # с полем `model` или nested в `item`/`turn`/`thread`.
+                for obj in (ev, ev.get("item"), ev.get("turn"), ev.get("thread")):
+                    if isinstance(obj, dict):
+                        m = obj.get("model")
+                        if isinstance(m, str) and m:
+                            actual_model = m
+                            break
                 etype = ev.get("type")
                 if etype == "thread.started":
                     tid = ev.get("thread_id")
@@ -337,7 +348,7 @@ class CodexEngine:
                 await asyncio.wait_for(read_stream(), timeout=CODEX_TIMEOUT)
             except asyncio.TimeoutError:
                 await terminate_process_tree(proc)
-                return False, f"Timeout: codex не ответил за {CODEX_TIMEOUT}с.", session_id
+                return False, f"Timeout: codex не ответил за {CODEX_TIMEOUT}с.", session_id, actual_model
             await proc.wait()
         except asyncio.CancelledError:
             await terminate_process_tree(proc)
@@ -370,7 +381,7 @@ class CodexEngine:
                 stderr_text[:500], stream_errors[:3],
             )
             if proc.returncode and proc.returncode < 0:
-                return False, "", (real_thread_id or session_id)
+                return False, "", (real_thread_id or session_id), actual_model
             if not final_text:
                 # Приоритет: сообщения из stdout-stream (codex пишет сюда
                 # usage-limit и пр.), затем stderr, затем «(пусто)».
@@ -383,17 +394,17 @@ class CodexEngine:
                     err_body = "(пусто)"
                 return False, (
                     f"Ошибка codex (rc={proc.returncode}): {err_body}"
-                ), session_id
+                ), session_id, actual_model
 
         logger.info(
-            "codex done: key=%s rc=%s final_len=%d real_thread_id=%s",
-            key, proc.returncode, len(final_text), real_thread_id,
+            "codex done: key=%s rc=%s final_len=%d real_thread_id=%s model=%s",
+            key, proc.returncode, len(final_text), real_thread_id, actual_model,
         )
         if not final_text.strip():
             return False, (
                 "codex вернул пустой ответ."
                 + (f"\n{stderr_text[:500]}" if stderr_text else "")
-            ), (real_thread_id or session_id)
+            ), (real_thread_id or session_id), actual_model
 
         # Если это была новая постоянная сессия — отдаём новый id наверх.
         # Для spawn'а (ephemeral) — не возвращаем; даже если codex его выдал,
@@ -402,4 +413,4 @@ class CodexEngine:
         if not is_spawn and real_thread_id and real_thread_id != session_id:
             effective_out_id = real_thread_id
 
-        return True, final_text, effective_out_id
+        return True, final_text, effective_out_id, actual_model

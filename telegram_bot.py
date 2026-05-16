@@ -213,6 +213,17 @@ def init_db() -> None:
                 conn.execute(
                     "ALTER TABLE sessions ADD COLUMN topic_icon_color INTEGER"
                 )
+            # Idempotent миграция: actual_model — реальная модель, которой
+            # CLI ответил последний раз (парсится из stream-events каждого
+            # адаптера). Отличается от sessions.model — там «что выбрали
+            # руками», а actual_model — «что фактически работает».
+            cols_now = [r[1] for r in conn.execute("PRAGMA table_info(sessions)").fetchall()]
+            if cols_now and "actual_model" not in cols_now:
+                _backup_db_once()
+                logger.info("adding 'actual_model' column to sessions")
+                conn.execute(
+                    "ALTER TABLE sessions ADD COLUMN actual_model TEXT"
+                )
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS messages (
@@ -601,6 +612,43 @@ def get_model(chat_id: int, thread_id: int) -> str | None:
     return row[0] or None
 
 
+def update_actual_model(
+    chat_id: int, thread_id: int, engine_name: str, model: str | None,
+) -> None:
+    """Сохранить реальную модель, которой ответил CLI в последнем запуске.
+
+    Engine-проверка как у update_session_id — защита от race с /engine: если
+    оператор успел переключиться, прошлый стрим не должен перезаписать
+    actual_model нового движка.
+    """
+    if not model:
+        return
+    try:
+        with _db() as conn:
+            conn.execute(
+                "UPDATE sessions SET actual_model = ? "
+                "WHERE chat_id = ? AND thread_id = ? AND engine = ?",
+                (model, chat_id, thread_id, engine_name),
+            )
+    except Exception:
+        logger.exception(
+            "update_actual_model failed chat=%s thread=%s engine=%s",
+            chat_id, thread_id, engine_name,
+        )
+
+
+def get_actual_model(chat_id: int, thread_id: int) -> str | None:
+    """Возвращает последнюю реально использованную моделью или None."""
+    with _db() as conn:
+        row = conn.execute(
+            "SELECT actual_model FROM sessions WHERE chat_id = ? AND thread_id = ?",
+            (chat_id, thread_id),
+        ).fetchone()
+    if not row:
+        return None
+    return row[0] or None
+
+
 def update_model_only(chat_id: int, thread_id: int, model: str | None) -> bool:
     """Меняет только модель текущего движка топика, не трогая session_id.
 
@@ -973,12 +1021,16 @@ async def call_llm_stream(
     вернул изменённый id (актуально для codex/opencode — они сами назначают
     реальный id при первом запуске). Для spawn'а id в БД не сохраняется.
 
+    Также сохраняет actual_model в sessions — реальное имя модели,
+    которым CLI ответил (из stream-events). Это позволяет /session
+    показать точную модель, не догадки.
+
     Возвращает (ok, final_text, session_id_after).
     """
     mcp_ok, mcp_status = ensure_engine_tools(engine)
     if not mcp_ok:
         logger.warning("engine=%s activated without Playwright MCP: %s", engine.name, mcp_status)
-    ok, final_text, sid_after = await engine.call_stream(
+    ok, final_text, sid_after, actual_model = await engine.call_stream(
         session_id=session_id,
         prompt=prompt,
         key=key,
@@ -998,6 +1050,9 @@ async def call_llm_stream(
             )
         except Exception:
             logger.exception("failed to persist new session_id from engine")
+    # Реальная модель — сохраняем в sessions для /session и manager_topics.
+    if spawn_id is None and actual_model:
+        update_actual_model(key[0], key[1], engine.name, actual_model)
     return ok, final_text, sid_after
 
 
@@ -1099,14 +1154,25 @@ async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 def _topic_status_block(key: tuple[int, int]) -> str:
     """HTML-блок со статусом топика для /session и /engine.
 
-    Pre-форматированный, моноширинный. Показывает engine + model (даже
-    NULL — как «дефолт движка»), session-id, cwd.
+    Pre-форматированный, моноширинный. Показывает engine, выбранную модель
+    (что хотим) и реально использованную (что CLI сообщил последний раз),
+    session-id, cwd.
     """
     session_id, cwd, engine_name = get_session(*key)
     model = get_model(*key)
+    actual = get_actual_model(*key)
     effective_cwd = cwd or CLAUDE_CWD
     cwd_suffix = "" if cwd else " (дефолт)"
-    model_line = model if model else "(дефолт движка)"
+    if model and actual and model.lower() == actual.lower():
+        model_line = actual
+    elif model and actual:
+        model_line = f"{actual}  (выбрано: {model})"
+    elif actual:
+        model_line = f"{actual}  (дефолт движка)"
+    elif model:
+        model_line = f"{model}  (ожидается, ещё не отвечал)"
+    else:
+        model_line = "(дефолт движка; ещё ни разу не отвечал)"
     body = (
         f"engine     : {engine_name}\n"
         f"model      : {model_line}\n"

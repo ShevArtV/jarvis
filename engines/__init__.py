@@ -46,7 +46,11 @@ class Engine(Protocol):
         active_procs: dict,
         spawn_procs: dict,
         spawn_id: str | None = None,
-    ) -> tuple[bool, str, str | None]: ...
+    ) -> tuple[bool, str, str | None, str | None]: ...
+    # Возвращает (ok, final_text, session_id_after, actual_model).
+    # actual_model — модель, которой CLI ответил последний раз (из stream
+    # event'ов: 'system.init' у claude, 'turn.started' у codex, 'message'
+    # у opencode). None если не удалось определить.
 
 
 _CACHE: dict[str, Engine] = {}

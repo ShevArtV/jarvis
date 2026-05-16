@@ -190,6 +190,7 @@ def _row_to_topic(row: sqlite3.Row, last: dict[tuple[int, int], str]) -> dict[st
         "cwd": row["cwd"],
         "engine": row["engine"],
         "model": row["model"],
+        "actual_model": row["actual_model"] if "actual_model" in row.keys() else None,
         "session_id": row["session_id"],
         "updated_at": row["updated_at"],
         "last_message_at": last.get(key),
@@ -225,7 +226,8 @@ def manager_topics(
     with _connect() as conn:
         rows = conn.execute(
             "SELECT chat_id, thread_id, topic_title, cwd, engine, model, "
-            "session_id, updated_at FROM sessions ORDER BY updated_at DESC"
+            "actual_model, session_id, updated_at FROM sessions "
+            "ORDER BY updated_at DESC"
         ).fetchall()
         last_rows = conn.execute(
             "SELECT chat_id, thread_id, MAX(ts) AS last_ts FROM messages_log "

@@ -164,7 +164,7 @@ class ClaudeEngine:
                 limit=10 * 1024 * 1024,
             )
         except FileNotFoundError:
-            return False, f"`{CLAUDE_BIN}` не найден в PATH.", session_id
+            return False, f"`{CLAUDE_BIN}` не найден в PATH.", session_id, None
 
         if is_spawn:
             spawn_procs[(key[0], key[1], spawn_id)] = proc
@@ -172,6 +172,7 @@ class ClaudeEngine:
             active_procs[key] = proc
 
         final_text = ""
+        actual_model: str | None = None
         buffer_intermediate: list[str] = []
         last_push = 0.0
 
@@ -191,7 +192,7 @@ class ClaudeEngine:
                 logger.exception("on_intermediate failed")
 
         async def read_stream():
-            nonlocal final_text
+            nonlocal final_text, actual_model
             assert proc.stdout is not None
             while True:
                 line = await proc.stdout.readline()
@@ -205,8 +206,18 @@ class ClaudeEngine:
                 except json.JSONDecodeError:
                     continue
                 etype = ev.get("type")
+                # 'system' с subtype='init' — первый event, содержит model.
+                # Также fallback: message.model в каждом assistant event.
+                if etype == "system" and ev.get("subtype") == "init":
+                    m = ev.get("model")
+                    if isinstance(m, str) and m:
+                        actual_model = m
                 if etype == "assistant":
                     msg = ev.get("message", {}) or {}
+                    if not actual_model:
+                        m = msg.get("model")
+                        if isinstance(m, str) and m:
+                            actual_model = m
                     for block in msg.get("content", []) or []:
                         btype = block.get("type")
                         if btype == "text":
@@ -236,7 +247,7 @@ class ClaudeEngine:
                 await asyncio.wait_for(read_stream(), timeout=CLAUDE_TIMEOUT)
             except asyncio.TimeoutError:
                 await terminate_process_tree(proc)
-                return False, f"Timeout: claude не ответил за {CLAUDE_TIMEOUT}с.", session_id
+                return False, f"Timeout: claude не ответил за {CLAUDE_TIMEOUT}с.", session_id, actual_model
             await proc.wait()
         except asyncio.CancelledError:
             await terminate_process_tree(proc)
@@ -262,20 +273,20 @@ class ClaudeEngine:
         if proc.returncode != 0:
             logger.warning("claude rc=%s stderr=%s", proc.returncode, stderr_text[:500])
             if proc.returncode and proc.returncode < 0:
-                return False, "", session_id
+                return False, "", session_id, actual_model
             if not final_text:
                 return False, (
                     f"Ошибка claude (rc={proc.returncode}): "
                     f"{stderr_text[:1500] or '(пусто)'}"
-                ), session_id
+                ), session_id, actual_model
 
         logger.info(
-            "claude done: key=%s rc=%s final_len=%d",
-            key, proc.returncode, len(final_text),
+            "claude done: key=%s rc=%s final_len=%d model=%s",
+            key, proc.returncode, len(final_text), actual_model,
         )
         if not final_text.strip():
             return False, (
                 "claude вернул пустой ответ."
                 + (f"\n{stderr_text[:500]}" if stderr_text else "")
-            ), session_id
-        return True, final_text, session_id
+            ), session_id, actual_model
+        return True, final_text, session_id, actual_model
