@@ -477,7 +477,13 @@ def _env_int(name: str, default: int, min_val: int = 1) -> int:
 async def _send_manager_notice(
     app: Application, text: str, kind: str = "job_notification",
 ) -> int | None:
-    """Шлёт plain-сообщение в топик Менеджера и логирует в messages_log.
+    """Шлёт plain-сообщение в топик Менеджера, логирует и будит Менеджера.
+
+    Помимо доставки plain-сообщения через Telegram, ставит auto-job
+    source='self_notice' в очередь Менеджера, чтобы worker запустил его
+    LLM-сессию и тот прочитал свой inbox. Дедуп: если у Менеджера уже
+    есть pending/in_progress job — не создаём, он обработает все
+    свежие нотисы вместе при текущем запуске.
 
     Используется safety-нотисом из _run_manager_job, health_worker'ом,
     и manager_interrupt event'ом. Возвращает telegram_message_id или None
@@ -492,10 +498,41 @@ async def _send_manager_notice(
         sent = await send_to_topic(chat, thread_id, text)
         msg_id = sent.message_id if sent is not None else None
         log_message(chat_id, thread_id, "out", kind, text, msg_id)
-        return msg_id
     except Exception:
         logger.exception("_send_manager_notice failed (kind=%s)", kind)
         return None
+
+    # Auto-kick: создать job для Менеджера, чтобы он сам активировался и
+    # обработал свежие нотисы. С дедупом — один job на всю серию нотисов
+    # пока Менеджер их не разгребёт.
+    try:
+        now = datetime.utcnow().isoformat()
+        with _db() as conn:
+            existing = conn.execute(
+                "SELECT COUNT(*) FROM jobs "
+                "WHERE chat_id = ? AND thread_id = ? "
+                "AND status IN ('pending', 'in_progress')",
+                (chat_id, thread_id),
+            ).fetchone()
+            if existing and existing[0] > 0:
+                return msg_id
+            conn.execute(
+                "INSERT INTO jobs(chat_id, thread_id, text, source, status, "
+                "created_at) VALUES (?, ?, ?, 'self_notice', 'pending', ?)",
+                (
+                    chat_id, thread_id,
+                    "[AUTO-KICK] В твой топик пришли новые нотисы от бота. "
+                    "Прочитай свой manager_inbox(thread_id=<свой>) и решай "
+                    "что с ними делать.",
+                    now,
+                ),
+            )
+        logger.info(
+            "manager auto-kick job created chat=%s thread=%s", chat_id, thread_id,
+        )
+    except Exception:
+        logger.exception("auto-kick INSERT failed (kind=%s)", kind)
+    return msg_id
 
 
 def resolve_manager_topic() -> tuple[int, int] | None:
@@ -2163,6 +2200,8 @@ async def _run_manager_job(app: Application, job: dict) -> tuple[bool, int | Non
     thread_id = job["thread_id"]
     user_text = job["text"]
     job_id = job["id"]
+    source = job.get("source") or "manager"
+    is_self_kick = source == "self_notice"
     key = (chat_id, thread_id)
     bot = app.bot
     try:
@@ -2189,7 +2228,32 @@ async def _run_manager_job(app: Application, job: dict) -> tuple[bool, int | Non
                 "продолжай с этой точки:]\n" + pending_summary
             )
         mgr_target = resolve_manager_topic()
-        if mgr_target and mgr_target != (chat_id, thread_id):
+        if is_self_kick:
+            prompt_parts.append(
+                f"[SYSTEM NOTE: это AUTO-KICK для Менеджера (job_id={job_id}, "
+                f"source=self_notice). Тебя разбудил бот, потому что в твой "
+                f"топик пришли новые нотисы от исполнителей — обычно "
+                f"safety-нотисы «📨 ✅ job #N: новый ответ» или health-нотисы "
+                f"«⏳ работает долго».\n\n"
+                f"Что делать:\n"
+                f"1. Прочитай свежие нотисы через "
+                f"mcp__jarvis__manager_inbox(chat_id={chat_id}, "
+                f"thread_id={thread_id}, limit=10). Фильтруй по kind="
+                f"'job_notification' / 'job_heartbeat_warn' / 'job_heartbeat_fail' / "
+                f"'job_interrupted'.\n"
+                f"2. Для каждого нотиса по необходимости — заходи в источник "
+                f"через manager_inbox(thread_id=<src>) и читай развёрнутый "
+                f"ответ агента.\n"
+                f"3. Решай: либо ждать оператора (просто ничего не делай в "
+                f"ответ), либо отвечать оператору в свой топик, либо двигать "
+                f"задачу через manager_send(thread_id=<src>, as_user=True).\n"
+                f"4. После обработки нотиса — manager_dismiss_notice "
+                f"(message_id=...) чтобы топик не зарастал.\n"
+                f"5. Если по содержанию нотисов делать нечего — кратко "
+                f"подытожь («просмотрел нотисы #N..#M, оператор не нужен») "
+                f"и заверши turn. Ничего substantive без одобрения.]"
+            )
+        elif mgr_target and mgr_target != (chat_id, thread_id):
             mgr_chat_id, mgr_thread_id = mgr_target
             prompt_parts.append(
                 f"[SYSTEM NOTE: задача делегирована Менеджером через MCP "
@@ -2227,13 +2291,16 @@ async def _run_manager_job(app: Application, job: dict) -> tuple[bool, int | Non
         prompt_parts.append("---\n\nСообщение пользователя:\n" + user_text)
         prompt = "\n\n".join(prompt_parts)
 
-        try:
-            indicator = await send_to_topic(
-                chat, thread_id,
-                f"⏳ Manager делегировал задачу (job #{job_id})...",
-            )
-        except Exception:
+        if is_self_kick:
             indicator = None
+        else:
+            try:
+                indicator = await send_to_topic(
+                    chat, thread_id,
+                    f"⏳ Manager делегировал задачу (job #{job_id})...",
+                )
+            except Exception:
+                indicator = None
 
         async def on_intermediate(text: str) -> None:
             nonlocal indicator
@@ -2368,8 +2435,9 @@ async def _run_manager_job(app: Application, job: dict) -> tuple[bool, int | Non
 
         # Safety notice в топик Менеджера — гарантированно даём знать что
         # есть ответ. Не зависит от того, прислал ли агент сам что-то
-        # через mcp__jarvis__manager_send.
-        if resolve_manager_topic() != (chat_id, thread_id):
+        # через mcp__jarvis__manager_send. Не шлём для self_kick — Менеджер
+        # сам себе нотис не нужен, он уже разбирает свой inbox.
+        if not is_self_kick and resolve_manager_topic() != (chat_id, thread_id):
             with _db() as conn_:
                 row = conn_.execute(
                     "SELECT topic_title, cwd FROM sessions "
