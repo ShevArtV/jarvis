@@ -1070,6 +1070,69 @@ def pop_pending_summary(chat_id: int, thread_id: int) -> str | None:
         return summary
 
 
+_TRANSFER_MARKER_PREFIX = '{"transfer_requested":true'
+
+
+def _is_transfer_marker(pending: str) -> bool:
+    """True если pending_summary — JSON-маркер запроса на генерацию summary."""
+    return pending.startswith(_TRANSFER_MARKER_PREFIX)
+
+
+def _parse_transfer_marker(pending: str) -> dict | None:
+    """Распарсить JSON-маркер {transfer_requested, old_engine, old_session_id}
+    или вернуть None, если не маркер / невалидный JSON."""
+    try:
+        data = json.loads(pending)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if data.get("transfer_requested") and data.get("old_engine"):
+        return data
+    return None
+
+
+async def _resolve_pending_summary(
+    key: tuple[int, int], pending: str,
+) -> str | None:
+    """Если pending — маркер transfer_requested: вызывает старый движок для
+    генерации summary, сохраняет его в БД и возвращает текст summary.
+    Иначе возвращает pending как есть (готовое summary)."""
+    marker = _parse_transfer_marker(pending)
+    if marker is None:
+        return pending  # обычное summary, уже готово
+
+    chat_id, thread_id = key
+    old_engine_name = marker["old_engine"]
+    old_session_id = marker.get("old_session_id")
+    _, cwd, _ = get_session(*key)
+    old_model = marker.get("old_model")
+
+    logger.info(
+        "resolving transfer marker: key=%s old_engine=%s old_sid=%s",
+        key, old_engine_name, old_session_id,
+    )
+
+    # Попросим старый движок выдать summary. Если старый движок недоступен —
+    # просто вернём None (контекст не перенесётся, но сессия уже переключена).
+    try:
+        get_engine_by_name(old_engine_name)
+    except Exception:
+        logger.warning(
+            "old engine %s unavailable for transfer marker resolution key=%s",
+            old_engine_name, key,
+        )
+        return None
+
+    summary = await _generate_handoff_summary(key, old_engine_name, cwd, old_model)
+    if summary:
+        set_pending_summary(chat_id, thread_id, summary)
+        logger.info(
+            "transfer marker resolved: stored real summary for key=%s (%d chars)",
+            key, len(summary),
+        )
+        return summary
+    return None
+
+
 def set_cwd(chat_id: int, thread_id: int, cwd: str) -> None:
     """Создаёт запись, если её нет (session_id — новый id для дефолтного движка),
     либо обновляет cwd."""
@@ -1682,20 +1745,13 @@ async def _do_engine_switch(
     )
 
 
-async def _do_engine_handoff(
-    key: tuple[int, int],
-    old_engine_name: str,
-    new_engine_name: str,
-    progress_edit,
-    model: str | None = None,
-) -> str:
-    """Сценарий «с переносом»: 1) lock топика, 2) попросить старый движок
-    выдать summary, 3) сохранить в pending_summary, 4) переключить движок.
-    `progress_edit(text)` — async-функция для обновления карточки в чате."""
-    chat_id, thread_id = key
+async def _generate_handoff_summary(
+    key: tuple[int, int], old_engine_name: str, cwd: str | None, old_model: str | None,
+) -> str | None:
+    """Попросить старый движок сгенерировать summary диалога.
+    Возвращает очищенный текст (до 4000 символов) или None при ошибке."""
     old_engine = get_engine_by_name(old_engine_name)
-    old_session_id, cwd, _ = get_session(*key)
-    old_model = get_model(*key)
+    old_session_id, _, _ = get_session(*key)
     effective_cwd = cwd or CLAUDE_CWD
 
     summary_prompt = (
@@ -1708,6 +1764,43 @@ async def _do_engine_handoff(
         "и заключений — только сам summary, чтобы агент сразу понял контекст."
     )
 
+    async def on_intermediate(_text: str) -> None:
+        pass
+
+    try:
+        with engine_model_scope(old_engine.name, old_model):
+            ok, summary_text, _sid_after = await call_llm_stream(
+                old_engine, old_session_id, summary_prompt, key, cwd, on_intermediate,
+            )
+    except Exception as exc:
+        logger.exception("handoff summary call crashed: key=%s engine=%s",
+                         key, old_engine_name)
+        return None
+
+    if not ok or not summary_text.strip():
+        logger.warning("handoff summary empty: key=%s engine=%s", key, old_engine_name)
+        return None
+
+    cleaned, _ = extract_file_markers(summary_text)
+    cleaned = cleaned.strip() or summary_text.strip()
+    cleaned = cleaned[:4000]
+    return cleaned
+
+
+async def _do_engine_handoff(
+    key: tuple[int, int],
+    old_engine_name: str,
+    new_engine_name: str,
+    progress_edit,
+    model: str | None = None,
+) -> str:
+    """Сценарий «с переносом»: 1) lock топика, 2) попросить старый движок
+    выдать summary, 3) сохранить в pending_summary, 4) переключить движок.
+    `progress_edit(text)` — async-функция для обновления карточки в чате."""
+    chat_id, thread_id = key
+    old_model = get_model(*key)
+    _, cwd, _ = get_session(*key)
+
     lock = _lock_for(key)
     if lock.locked():
         return (
@@ -1719,35 +1812,13 @@ async def _do_engine_handoff(
     try:
         await progress_edit(f"🧠 Снимаю резюме сессии у {old_engine_name}...")
 
-        async def on_intermediate(_text: str) -> None:
-            # промежуточные сообщения от старого движка не показываем —
-            # пользователь и так знает, что мы снимаем резюме.
-            pass
-
-        try:
-            with engine_model_scope(old_engine.name, old_model):
-                ok, summary_text, _sid_after = await call_llm_stream(
-                    old_engine, old_session_id, summary_prompt, key, cwd, on_intermediate,
-                )
-        except Exception as exc:
-            logger.exception("handoff summary call crashed: key=%s engine=%s",
-                             key, old_engine_name)
-            return f"❌ Ошибка при снятии резюме: {exc}\nПереключение отменено."
-
-        if not ok or not summary_text.strip():
+        cleaned = await _generate_handoff_summary(key, old_engine_name, cwd, old_model)
+        if cleaned is None:
             return (
                 f"❌ {old_engine_name} не вернул резюме. Переключение отменено. "
                 "Можешь попробовать без переноса контекста."
             )
 
-        # cleaned: вырежем file-маркеры (если случайно попали), не нужны в саммари.
-        cleaned, _ = extract_file_markers(summary_text)
-        cleaned = cleaned.strip() or summary_text.strip()
-        # Безопасный лимит — Telegram-сообщения тут не ограничивают, но сильно
-        # длинный summary раздует первый prompt. 4000 символов с запасом.
-        cleaned = cleaned[:4000]
-
-        # Переключаем движок и сохраняем pending_summary.
         await progress_edit("🔁 Переключаю движок...")
         switch_text = await _do_engine_switch(key, new_engine_name, model=model)
         set_pending_summary(chat_id, thread_id, cleaned)
@@ -1772,16 +1843,27 @@ async def _do_engine_handoff(
 
 async def cmd_engine(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """/engine — показать движок топика с кнопками переключения;
-    /engine <name> [model-substring] — переключить без переноса контекста.
-    При >1 моделях и без явного аргумента model — отказ с подсказкой использовать UI."""
+    /engine <name> [model-substring] [--keep-context] — переключить движок.
+    С флагом --keep-context: summary-based handoff (старый движок пишет резюме,
+    новый получает его в первый prompt). Без флага: чистый старт новой сессии."""
     key = _key(update)
-    args = context.args or []
+    args = list(context.args or [])
+
+    # Вытащим --keep-context из аргументов
+    keep_context = False
+    filtered: list[str] = []
+    for a in args:
+        if a == "--keep-context":
+            keep_context = True
+        else:
+            filtered.append(a)
+    args = filtered
 
     if not args:
         _, _, engine_name = get_session(*key)
         footer = _html_escape(
             f"\n\nДефолт (для новых топиков): {DEFAULT_ENGINE_NAME}\n"
-            "Выбери новый движок ниже или введи /engine <name>."
+            "Выбери новый движок ниже или введи /engine <name> [--keep-context]."
         )
         await update.message.reply_text(
             _topic_status_block(key) + footer,
@@ -1793,7 +1875,7 @@ async def cmd_engine(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     target = args[0].strip().lower()
 
     # Same-engine: текстовое /engine <current> <model> меняет только модель,
-    # не пересоздаёт сессию. Контекст сохраняется.
+    # не пересоздаёт сессию. Контекст сохраняется. --keep-context не нужен.
     _, _, current_engine = get_session(*key)
     if target in SUPPORTED_ENGINES and target == current_engine and len(args) >= 2:
         target_engine = get_engine_by_name(target)
@@ -1856,8 +1938,17 @@ async def cmd_engine(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                 return
             chosen_model = matches[0]
 
-    text = await _do_engine_switch(key, target, model=chosen_model)
-    await update.message.reply_text(text + "\nКонтекст прежнего диалога не переносится.")
+    if keep_context:
+        async def _progress_edit(text: str) -> None:
+            pass  # из текстовой команды не можем обновлять карточку
+        text = await _do_engine_handoff(
+            key, current_engine, target, _progress_edit, model=chosen_model,
+        )
+        text = re.sub(r"<[^>]+>", "", text)
+        await update.message.reply_text(text)
+    else:
+        text = await _do_engine_switch(key, target, model=chosen_model)
+        await update.message.reply_text(text + "\nКонтекст прежнего диалога не переносится.")
 
 
 async def on_engine_select(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2284,10 +2375,13 @@ async def _process_prompt(
 
         # Pending handoff summary: pop'аем атомарно — доставляется ровно один раз,
         # в первый prompt после переключения движка с переносом контекста.
-        pending_summary = pop_pending_summary(*key)
-        if pending_summary:
-            logger.info("delivering pending_summary to engine=%s key=%s (%d chars)",
-                        engine_name, key, len(pending_summary))
+        pending_raw = pop_pending_summary(*key)
+        pending_summary = None
+        if pending_raw:
+            pending_summary = await _resolve_pending_summary(key, pending_raw)
+            if pending_summary:
+                logger.info("delivering pending_summary to engine=%s key=%s (%d chars)",
+                            engine_name, key, len(pending_summary))
 
         prompt_parts = [_system_prefix(effective_cwd)]
         if pending_summary:
@@ -2502,7 +2596,8 @@ async def _run_manager_job(app: Application, job: dict) -> tuple[bool, int | Non
         model = get_model(*key)
         effective_cwd = cwd or CLAUDE_CWD
 
-        pending_summary = pop_pending_summary(*key)
+        pending_raw = pop_pending_summary(*key)
+        pending_summary = await _resolve_pending_summary(key, pending_raw) if pending_raw else None
 
         prompt_parts = [_system_prefix(effective_cwd)]
         if pending_summary:

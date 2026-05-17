@@ -292,11 +292,15 @@ def manager_engines() -> dict[str, Any]:
     description=(
         "Switch a topic's engine (and optionally model). Same semantics as the "
         "bot's /engine command: NEW session_id under the new engine, cwd is "
-        "kept, context of the previous engine is NOT transferred. Use this "
-        "BEFORE manager_send to delegate the next task under a different "
-        "engine/model. `model` must be one of the engine's selectable models "
-        "(see manager_engines); pass null to clear and use the engine's "
-        "default."
+        "kept, context of the previous engine is NOT transferred by default. "
+        "Use this BEFORE manager_send to delegate the next task under a "
+        "different engine/model. `model` must be one of the engine's "
+        "selectable models (see manager_engines); pass null to clear and use "
+        "the engine's default.\n\n"
+        "Pass transfer_context=True to request a summary-based handoff: a "
+        "JSON marker is stored in pending_summary; the bot resolves it "
+        "on the next message/job by asking the old engine for a dialogue "
+        "summary. This adds latency to the first response after the switch."
     ),
 )
 def manager_set_engine(
@@ -304,6 +308,7 @@ def manager_set_engine(
     engine: str,
     model: str | None = None,
     chat_id: int | None = None,
+    transfer_context: bool = False,
 ) -> dict[str, Any]:
     """Persistently switch the topic to a different engine/model."""
     engine = engine.strip().lower()
@@ -350,19 +355,59 @@ def manager_set_engine(
     }
     new_session_id = _new_session_id(engine)
     now = datetime.utcnow().isoformat()
+
+    # Если переключаемся на тот же движок (только модель) — контекст сохраняется
+    # автоматически (тот же session_id). transfer_context игнорируем.
+    if engine == prev["engine"]:
+        with _connect() as conn:
+            conn.execute(
+                "UPDATE sessions SET model = ?, updated_at = ? "
+                "WHERE chat_id = ? AND thread_id = ?",
+                (model, now, target_chat_id, thread_id),
+            )
+        logger.info(
+            "switched model in-place topic chat=%s thread=%s: %s -> %s",
+            target_chat_id, thread_id, prev["model"], model,
+        )
+        return {
+            "chat_id": target_chat_id,
+            "thread_id": thread_id,
+            "title": row["topic_title"],
+            "cwd": row["cwd"],
+            "previous": prev,
+            "current": {
+                "engine": engine,
+                "model": model,
+                "session_id": prev["session_id"],
+            },
+            "warning": None,
+        }
+
     with _connect() as conn:
         conn.execute(
             "UPDATE sessions SET engine = ?, model = ?, session_id = ?, "
             "updated_at = ? WHERE chat_id = ? AND thread_id = ?",
             (engine, model, new_session_id, now, target_chat_id, thread_id),
         )
+        if transfer_context:
+            marker = json.dumps({
+                "transfer_requested": True,
+                "old_engine": prev["engine"],
+                "old_session_id": prev["session_id"],
+                "old_model": prev["model"],
+            })
+            conn.execute(
+                "UPDATE sessions SET pending_summary = ? "
+                "WHERE chat_id = ? AND thread_id = ?",
+                (marker, target_chat_id, thread_id),
+            )
 
     logger.info(
-        "switched topic chat=%s thread=%s: %s/%s -> %s/%s (new sid=%s)",
+        "switched topic chat=%s thread=%s: %s/%s -> %s/%s (new sid=%s, transfer=%s)",
         target_chat_id, thread_id, prev["engine"], prev["model"],
-        engine, model, new_session_id,
+        engine, model, new_session_id, transfer_context,
     )
-    return {
+    result: dict[str, Any] = {
         "chat_id": target_chat_id,
         "thread_id": thread_id,
         "title": row["topic_title"],
@@ -373,12 +418,20 @@ def manager_set_engine(
             "model": model,
             "session_id": new_session_id,
         },
-        "warning": (
+    }
+    if transfer_context:
+        result["warning"] = (
+            "transfer_context=True: a summary marker was stored. The bot will "
+            "ask the old engine for a dialogue summary on the next message/job "
+            "in this topic (adds latency to the first response)."
+        )
+    else:
+        result["warning"] = (
             "Context of the previous engine is NOT transferred. The next "
             "manager_send / user message starts a fresh session under the "
             "new engine."
-        ),
-    }
+        )
+    return result
 
 
 @mcp.tool(
