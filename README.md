@@ -87,6 +87,14 @@ claude -p "hello"   # проверка, что авторизация работ
   завершённые (`done`/`failed`/`cancelled`) `jobs`. Дефолт `30`. `0`,
   `none`, `off`, `false`, `no` — отключают авто-cleanup. `pending` jobs
   (включая scheduled с `not_before` в будущем) **никогда** не удаляются.
+- `JARVIS_HEARTBEAT_INTERVAL` — частота сканирования in_progress job'ов
+  (секунды). Дефолт `300` (5 мин), минимум `30`.
+- `JARVIS_HEARTBEAT_WARN` — после скольких секунд работы job'а слать в
+  топик Менеджера нотис «работает долго». Дефолт `900` (15 мин).
+- `JARVIS_HEARTBEAT_FAIL` — после скольких секунд принудительно помечать
+  job как failed. Subprocess сам по себе не убивается — для реального
+  прерывания агент Менеджер использует `manager_interrupt`. Дефолт
+  `3600` (60 мин).
 
 ### Playwright MCP для всех движков
 

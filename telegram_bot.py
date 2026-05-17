@@ -292,6 +292,24 @@ def init_db() -> None:
             conn.execute("ALTER TABLE jobs ADD COLUMN not_before TEXT")
             # Поправляем индекс под новый ORDER BY.
             conn.execute("DROP INDEX IF EXISTS idx_jobs_status")
+        # Idempotent миграция: heartbeat_notified_at — когда health_worker
+        # уже шлёт warn-нотис по этому job'у. NULL = ещё не уведомлял.
+        # Это защита от спама — нотис идёт один раз за job.
+        cols_now = [r[1] for r in conn.execute("PRAGMA table_info(jobs)").fetchall()]
+        if cols_now and "heartbeat_notified_at" not in cols_now:
+            logger.info("adding 'heartbeat_notified_at' column to jobs")
+            conn.execute(
+                "ALTER TABLE jobs ADD COLUMN heartbeat_notified_at TEXT"
+            )
+        # Idempotent миграция: cancel_requested — флаг для manager_interrupt.
+        # MCP-сервер ставит timestamp, watcher в _run_manager_job его читает
+        # раз в N секунд и убивает subprocess. NULL = не запрошено.
+        cols_now = [r[1] for r in conn.execute("PRAGMA table_info(jobs)").fetchall()]
+        if cols_now and "cancel_requested" not in cols_now:
+            logger.info("adding 'cancel_requested' column to jobs")
+            conn.execute(
+                "ALTER TABLE jobs ADD COLUMN cancel_requested TEXT"
+            )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_jobs_pending "
             "ON jobs(status, not_before, created_at)"
@@ -441,6 +459,43 @@ async def cleanup_worker(app: Application) -> None:
         except Exception:
             logger.exception("cleanup_worker loop crashed; sleeping 5min")
             await asyncio.sleep(300.0)
+
+
+def _env_int(name: str, default: int, min_val: int = 1) -> int:
+    """Parse positive int from env with fallback. Used for heartbeat thresholds."""
+    raw = os.environ.get(name)
+    if not raw:
+        return default
+    try:
+        n = int(raw)
+        return max(min_val, n)
+    except ValueError:
+        logger.warning("%s=%r is not int, defaulting to %d", name, raw, default)
+        return default
+
+
+async def _send_manager_notice(
+    app: Application, text: str, kind: str = "job_notification",
+) -> int | None:
+    """Шлёт plain-сообщение в топик Менеджера и логирует в messages_log.
+
+    Используется safety-нотисом из _run_manager_job, health_worker'ом,
+    и manager_interrupt event'ом. Возвращает telegram_message_id или None
+    при сбое (например, бот не админ в группе).
+    """
+    mgr_target = resolve_manager_topic()
+    if not mgr_target:
+        return None
+    chat_id, thread_id = mgr_target
+    try:
+        chat = await app.bot.get_chat(chat_id)
+        sent = await send_to_topic(chat, thread_id, text)
+        msg_id = sent.message_id if sent is not None else None
+        log_message(chat_id, thread_id, "out", kind, text, msg_id)
+        return msg_id
+    except Exception:
+        logger.exception("_send_manager_notice failed (kind=%s)", kind)
+        return None
 
 
 def resolve_manager_topic() -> tuple[int, int] | None:
@@ -2207,6 +2262,48 @@ async def _run_manager_job(app: Application, job: dict) -> tuple[bool, int | Non
             except Exception:
                 pass
 
+        # Watcher для interrupt: раз в 2с смотрит cancel_requested.
+        # Если выставлен — терминирует subprocess; основной stream выйдет
+        # с ошибкой, мы это поймаем по interrupted=True ниже.
+        watcher_stop = asyncio.Event()
+        interrupted = False
+
+        async def _interrupt_watcher() -> None:
+            nonlocal interrupted
+            while not watcher_stop.is_set():
+                try:
+                    await asyncio.wait_for(watcher_stop.wait(), timeout=2.0)
+                except asyncio.TimeoutError:
+                    pass
+                if watcher_stop.is_set():
+                    return
+                try:
+                    with _db() as conn_:
+                        row = conn_.execute(
+                            "SELECT cancel_requested FROM jobs WHERE id = ?",
+                            (job_id,),
+                        ).fetchone()
+                except Exception:
+                    logger.exception("interrupt watcher poll failed job=%s", job_id)
+                    continue
+                if row and row[0]:
+                    interrupted = True
+                    proc = active_procs.get(key)
+                    if proc is not None:
+                        logger.info(
+                            "manager job %s: cancel_requested, terminating proc",
+                            job_id,
+                        )
+                        try:
+                            await terminate_process_tree(proc)
+                        except Exception:
+                            logger.exception(
+                                "terminate_process_tree failed job=%s", job_id,
+                            )
+                    return
+
+        watcher_task = asyncio.create_task(_interrupt_watcher())
+
         try:
             with engine_model_scope(engine.name, model):
                 ok, final_text, _sid_after = await call_llm_stream(
@@ -2215,12 +2312,41 @@ async def _run_manager_job(app: Application, job: dict) -> tuple[bool, int | Non
         except Exception as exc:
             logger.exception("manager job %s: llm crashed engine=%s", job_id, engine.name)
             ok, final_text = False, f"Внутренняя ошибка: {exc}"
+        finally:
+            watcher_stop.set()
+            try:
+                await asyncio.wait_for(watcher_task, timeout=3.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                watcher_task.cancel()
 
         if indicator is not None:
             try:
                 await indicator.delete()
             except Exception:
                 pass
+
+        if interrupted:
+            # Менеджер прервал. Доделаем то немногое что успели увидеть в
+            # final_text (если что-то пришло), но job помечаем как cancelled
+            # и шлём отдельный нотис.
+            try:
+                await send_to_topic(
+                    chat, thread_id,
+                    f"⏹ job #{job_id} остановлен Менеджером. "
+                    "Жду уточняющий вопрос или новые инструкции.",
+                )
+            except Exception:
+                logger.exception("manager job %s: failed to post interrupt notice", job_id)
+            await _send_manager_notice(
+                app,
+                f"⏹ job #{job_id}: subprocess остановлен по твоему запросу "
+                f"(thread_id={thread_id}). Теперь можно прислать уточняющий "
+                f"вопрос обычным manager_send(as_user=True) — агент resume "
+                f"той же сессии и увидит контекст до прерывания.",
+                kind="job_interrupted",
+            )
+            logger.info("manager job %s: interrupted by manager", job_id)
+            return False, None
 
         if not ok and not final_text.strip():
             logger.info("manager job %s stopped without final reply", job_id)
@@ -2242,45 +2368,25 @@ async def _run_manager_job(app: Application, job: dict) -> tuple[bool, int | Non
 
         # Safety notice в топик Менеджера — гарантированно даём знать что
         # есть ответ. Не зависит от того, прислал ли агент сам что-то
-        # через mcp__jarvis__manager_send. Если агент сделал — будет два
-        # сообщения, краткое (бот) + развёрнутое (агент).
-        mgr_target = resolve_manager_topic()
-        if mgr_target and mgr_target != (chat_id, thread_id):
-            mgr_chat_id, mgr_thread_id = mgr_target
-            try:
-                with _db() as conn_:
-                    row = conn_.execute(
-                        "SELECT topic_title, cwd FROM sessions "
-                        "WHERE chat_id = ? AND thread_id = ?",
-                        (chat_id, thread_id),
-                    ).fetchone()
-                title = (row[0] if row and row[0] else None) or f"thread_id={thread_id}"
-                cwd_disp = (row[1] if row and row[1] else None) or f"{CLAUDE_CWD} (дефолт)"
-                status_emoji = "✅" if ok else "⚠️"
-                notice_text = (
-                    f"📨 {status_emoji} job #{job_id}: новый ответ от агента\n"
-                    f"Топик: «{title}» (thread_id={thread_id})\n"
-                    f"cwd: {cwd_disp}\n"
-                    f"Действие: прочитай через "
-                    f"manager_inbox(thread_id={thread_id}) или зайди в сам топик."
-                )
-                mgr_chat = await app.bot.get_chat(mgr_chat_id)
-                sent_notice = await send_to_topic(
-                    mgr_chat, mgr_thread_id, notice_text,
-                )
-                log_message(
-                    mgr_chat_id, mgr_thread_id, "out", "job_notification",
-                    notice_text,
-                    sent_notice.message_id if sent_notice is not None else None,
-                )
-                logger.info(
-                    "manager job %s: safety notice sent to manager topic",
-                    job_id,
-                )
-            except Exception:
-                logger.exception(
-                    "manager job %s: failed to send safety notice", job_id,
-                )
+        # через mcp__jarvis__manager_send.
+        if resolve_manager_topic() != (chat_id, thread_id):
+            with _db() as conn_:
+                row = conn_.execute(
+                    "SELECT topic_title, cwd FROM sessions "
+                    "WHERE chat_id = ? AND thread_id = ?",
+                    (chat_id, thread_id),
+                ).fetchone()
+            title = (row[0] if row and row[0] else None) or f"thread_id={thread_id}"
+            cwd_disp = (row[1] if row and row[1] else None) or f"{CLAUDE_CWD} (дефолт)"
+            status_emoji = "✅" if ok else "⚠️"
+            notice_text = (
+                f"📨 {status_emoji} job #{job_id}: новый ответ от агента\n"
+                f"Топик: «{title}» (thread_id={thread_id})\n"
+                f"cwd: {cwd_disp}\n"
+                f"Действие: прочитай через "
+                f"manager_inbox(thread_id={thread_id}) или зайди в сам топик."
+            )
+            await _send_manager_notice(app, notice_text, kind="job_notification")
 
         logger.info("manager job %s done: ok=%s files=%d engine=%s",
                     job_id, ok, len(file_markers), engine.name)
@@ -2290,6 +2396,105 @@ async def _run_manager_job(app: Application, job: dict) -> tuple[bool, int | Non
             lock.release()
         except RuntimeError:
             pass
+
+
+async def health_worker(app: Application) -> None:
+    """Watcher для долгоиграющих job'ов.
+
+    Сканирует in_progress job'ы каждые HEARTBEAT_INTERVAL секунд:
+    - claimed_at < now - WARN и heartbeat_notified_at IS NULL → шлём
+      нотис «job работает долго, проверь» (один раз за job).
+    - claimed_at < now - FAIL → принудительно помечаем failed и шлём
+      «job отменён по таймауту». Subprocess сам не убиваем — ответ
+      возможно уже почти готов; если хочешь принудительно прервать —
+      пользуйся manager_interrupt.
+    """
+    interval = _env_int("JARVIS_HEARTBEAT_INTERVAL", 300, 30)
+    warn_s = _env_int("JARVIS_HEARTBEAT_WARN", 900, 60)
+    fail_s = _env_int("JARVIS_HEARTBEAT_FAIL", 3600, 120)
+    logger.info(
+        "health_worker started (interval=%ds warn=%ds fail=%ds)",
+        interval, warn_s, fail_s,
+    )
+    while True:
+        try:
+            now_dt = datetime.utcnow()
+            warn_thr = (now_dt - timedelta(seconds=warn_s)).isoformat()
+            fail_thr = (now_dt - timedelta(seconds=fail_s)).isoformat()
+            now_iso = now_dt.isoformat()
+
+            # WARN: in_progress + claimed_at < warn_thr + ещё не уведомляли.
+            with _db() as conn:
+                warn_rows = conn.execute(
+                    "SELECT id, chat_id, thread_id, claimed_at FROM jobs "
+                    "WHERE status='in_progress' AND claimed_at IS NOT NULL "
+                    "AND claimed_at < ? AND heartbeat_notified_at IS NULL",
+                    (warn_thr,),
+                ).fetchall()
+            for r in warn_rows:
+                jid, jchat, jthread, jclaimed = r[0], r[1], r[2], r[3]
+                try:
+                    claimed_dt = datetime.fromisoformat(jclaimed)
+                    mins = int((now_dt - claimed_dt).total_seconds() / 60)
+                except Exception:
+                    mins = warn_s // 60
+                with _db() as conn:
+                    title_row = conn.execute(
+                        "SELECT topic_title FROM sessions WHERE chat_id=? AND thread_id=?",
+                        (jchat, jthread),
+                    ).fetchone()
+                title = (
+                    (title_row[0] if title_row and title_row[0] else None)
+                    or f"thread_id={jthread}"
+                )
+                text = (
+                    f"⏳ job #{jid} работает {mins} мин в топике «{title}» "
+                    f"(thread_id={jthread}).\n"
+                    f"Возможно ушло не туда. Если что — останови через "
+                    f"manager_interrupt(thread_id={jthread}) и спроси, "
+                    f"что происходит."
+                )
+                await _send_manager_notice(app, text, kind="job_heartbeat_warn")
+                with _db() as conn:
+                    conn.execute(
+                        "UPDATE jobs SET heartbeat_notified_at = ? WHERE id = ?",
+                        (now_iso, jid),
+                    )
+
+            # FAIL: in_progress + claimed_at < fail_thr → помечаем failed.
+            with _db() as conn:
+                fail_rows = conn.execute(
+                    "SELECT id, chat_id, thread_id FROM jobs "
+                    "WHERE status='in_progress' AND claimed_at IS NOT NULL "
+                    "AND claimed_at < ?",
+                    (fail_thr,),
+                ).fetchall()
+            for r in fail_rows:
+                jid, jchat, jthread = r[0], r[1], r[2]
+                with _db() as conn:
+                    conn.execute(
+                        "UPDATE jobs SET status='failed', "
+                        "error='timeout > heartbeat_fail', finished_at=? "
+                        "WHERE id=? AND status='in_progress'",
+                        (now_iso, jid),
+                    )
+                text = (
+                    f"❌ job #{jid}: принудительно помечен failed "
+                    f"(работал >{fail_s // 60} мин в thread_id={jthread}). "
+                    f"Subprocess не убит — если ответ всё-таки придёт, "
+                    f"он окажется в проектном топике, но job уже закрыт. "
+                    f"Чтобы реально прервать — используй "
+                    f"manager_interrupt(thread_id={jthread})."
+                )
+                await _send_manager_notice(app, text, kind="job_heartbeat_fail")
+
+            await asyncio.sleep(interval)
+        except asyncio.CancelledError:
+            logger.info("health_worker cancelled")
+            raise
+        except Exception:
+            logger.exception("health_worker loop crashed; sleeping 60s")
+            await asyncio.sleep(60.0)
 
 
 async def jobs_worker(app: Application) -> None:
@@ -2477,6 +2682,11 @@ async def _post_init(application: Application) -> None:
     # TTL — env JARVIS_LOG_TTL_DAYS (дефолт 30, 0/none/off отключает).
     cleanup_task = asyncio.create_task(cleanup_worker(application))
     application.bot_data["cleanup_worker_task"] = cleanup_task
+
+    # Health: следит за долгими in_progress jobs, шлёт Менеджеру нотисы.
+    # Параметры в env JARVIS_HEARTBEAT_INTERVAL/WARN/FAIL (300/900/3600с).
+    health_task = asyncio.create_task(health_worker(application))
+    application.bot_data["health_worker_task"] = health_task
 
 
 def main() -> None:

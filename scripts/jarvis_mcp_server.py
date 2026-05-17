@@ -660,6 +660,54 @@ def manager_cancel_job(job_id: int) -> dict[str, Any]:
 
 
 @mcp.tool(
+    name="manager_interrupt",
+    description=(
+        "Останавливает активный исполнитель LLM в указанном топике. "
+        "Используется, когда агент работает подозрительно долго / явно "
+        "пошёл не туда. Под капотом: выставляет cancel_requested в jobs "
+        "для всех in_progress job'ов этого thread_id; bot-watcher через "
+        "~2с увидит флаг и убьёт subprocess. После прерывания можно "
+        "сразу прислать новый manager_send(as_user=True) с уточняющим "
+        "вопросом — агент resume в той же сессии и увидит контекст до "
+        "прерывания. Возвращает interrupted_jobs — id'ы задач, "
+        "которым выставлен флаг (пусто если в топике сейчас нет "
+        "активных)."
+    ),
+)
+def manager_interrupt(
+    thread_id: int,
+    chat_id: int | None = None,
+) -> dict[str, Any]:
+    """Set cancel_requested for active jobs in the given topic."""
+    target_chat_id = chat_id if chat_id is not None else _default_chat_id()
+    now = datetime.utcnow().isoformat()
+    with _connect() as conn:
+        rows = conn.execute(
+            "UPDATE jobs SET cancel_requested = ? "
+            "WHERE chat_id = ? AND thread_id = ? AND status = 'in_progress' "
+            "RETURNING id",
+            (now, target_chat_id, thread_id),
+        ).fetchall()
+    interrupted_jobs = [r[0] for r in rows]
+    logger.info(
+        "manager_interrupt chat=%s thread=%s -> jobs=%s",
+        target_chat_id, thread_id, interrupted_jobs,
+    )
+    return {
+        "chat_id": target_chat_id,
+        "thread_id": thread_id,
+        "interrupted_jobs": interrupted_jobs,
+        "requested_at": now,
+        "message": (
+            f"Cancel-flag set for {len(interrupted_jobs)} job(s). "
+            "Bot watcher will terminate the subprocess within ~2s."
+            if interrupted_jobs
+            else "No in_progress jobs in this topic right now."
+        ),
+    }
+
+
+@mcp.tool(
     name="manager_dismiss_notice",
     description=(
         "Delete a notice/message from Telegram by its message_id. Use after "
