@@ -2138,32 +2138,31 @@ async def _run_manager_job(app: Application, job: dict) -> tuple[bool, int | Non
             mgr_chat_id, mgr_thread_id = mgr_target
             prompt_parts.append(
                 f"[SYSTEM NOTE: задача делегирована Менеджером через MCP "
-                f"(job_id={job_id}). Финальный ответ идёт в этот топик "
-                f"(thread_id={thread_id}, cwd={effective_cwd}).\n\n"
+                f"(job_id={job_id}). Финальный ответ этого turn'а идёт в "
+                f"этот топик (thread_id={thread_id}, cwd={effective_cwd}). "
+                f"Бот сам пришлёт Менеджеру короткий нотис «есть ответ» "
+                f"после твоего bot_reply — отдельно слать manager_send не "
+                f"нужно.\n\n"
                 f"Правила:\n"
                 f"1. Нетривиальная задача (любая правка кода / архитектурное "
-                f"решение / больше 1 файла) — сначала предложи план, не "
-                f"начинай реализацию. Финальный ответ этого turn'а = план. "
-                f"Менеджер либо одобрит, либо корректирует следующим сообщением.\n"
+                f"решение / >1 файла) — сначала предложи план, не начинай "
+                f"реализацию. Финальный ответ = план. Менеджер либо одобрит, "
+                f"либо корректирует следующим сообщением.\n"
                 f"2. Если нужно уточнение по ToR — финальный ответ = вопрос "
-                f"с тегом #ask_{job_id}, ничего не реализуй. Дополнительно "
-                f"короткий notice в топик Менеджера: "
-                f"mcp__jarvis__manager_send(thread_id={mgr_thread_id}, "
-                f"as_user=false, text='❓ Вопрос #ask_{job_id} в топике "
-                f"thread_id={thread_id}, загляни.').\n"
+                f"с тегом #ask_{job_id}, ничего не реализуй. Жди следующего "
+                f"сообщения.\n"
                 f"3. При правках на ПРОДЕ — обязательный smoke-check после: "
                 f"ищи команду в knowledge-base/projects/<имя>/production_smoke_check.md "
                 f"(или подобном файле). Если smoke упал — откатить через "
-                f"git revert и сообщить ❌. Если файла smoke-check нет — "
-                f"запроси команду у Менеджера через шаг 2.\n"
-                f"4. ПОСЛЕ финального ответа на CODE-задачу обязательно "
-                f"отправь короткий отчёт в топик Менеджера:\n"
-                f"   mcp__jarvis__manager_send(thread_id={mgr_thread_id}, "
-                f"as_user=false, text=...):\n"
-                f"     #job_{job_id} ✅ <одна строка: что сделано>\n"
-                f"     src: thread_id={thread_id}, cwd={effective_cwd}\n"
-                f"   или #job_{job_id} ❌ <что не получилось>.\n"
-                f"   На plan-turn / ask-turn — НЕ шли #job_N (ещё не закончено).]"
+                f"git revert и сообщить ❌ в финальном ответе. Если файла "
+                f"smoke-check нет — задай уточняющий вопрос через #ask.\n"
+                f"4. (опционально) По завершении CODE-задачи можешь "
+                f"дополнительно прислать богатый отчёт в Менеджеров топик: "
+                f"mcp__jarvis__manager_send(thread_id={mgr_thread_id}, "
+                f"as_user=false, text='#job_{job_id} ✅ <одна строка> — "
+                f"src: thread_id={thread_id}, cwd={effective_cwd}'). Это "
+                f"улучшает поиск по хэштегу, но НЕ обязательно — бот пришлёт "
+                f"свой нотис сам.]"
             )
         else:
             prompt_parts.append(
@@ -2240,6 +2239,48 @@ async def _run_manager_job(app: Application, job: dict) -> tuple[bool, int | Non
             logger.exception("manager job %s: failed to send reply", job_id)
         if file_markers:
             await deliver_file_markers(chat, thread_id, file_markers)
+
+        # Safety notice в топик Менеджера — гарантированно даём знать что
+        # есть ответ. Не зависит от того, прислал ли агент сам что-то
+        # через mcp__jarvis__manager_send. Если агент сделал — будет два
+        # сообщения, краткое (бот) + развёрнутое (агент).
+        mgr_target = resolve_manager_topic()
+        if mgr_target and mgr_target != (chat_id, thread_id):
+            mgr_chat_id, mgr_thread_id = mgr_target
+            try:
+                with _db() as conn_:
+                    row = conn_.execute(
+                        "SELECT topic_title, cwd FROM sessions "
+                        "WHERE chat_id = ? AND thread_id = ?",
+                        (chat_id, thread_id),
+                    ).fetchone()
+                title = (row[0] if row and row[0] else None) or f"thread_id={thread_id}"
+                cwd_disp = (row[1] if row and row[1] else None) or f"{CLAUDE_CWD} (дефолт)"
+                status_emoji = "✅" if ok else "⚠️"
+                notice_text = (
+                    f"📨 {status_emoji} job #{job_id}: новый ответ от агента\n"
+                    f"Топик: «{title}» (thread_id={thread_id})\n"
+                    f"cwd: {cwd_disp}\n"
+                    f"Действие: прочитай через "
+                    f"manager_inbox(thread_id={thread_id}) или зайди в сам топик."
+                )
+                mgr_chat = await app.bot.get_chat(mgr_chat_id)
+                sent_notice = await send_to_topic(
+                    mgr_chat, mgr_thread_id, notice_text,
+                )
+                log_message(
+                    mgr_chat_id, mgr_thread_id, "out", "job_notification",
+                    notice_text,
+                    sent_notice.message_id if sent_notice is not None else None,
+                )
+                logger.info(
+                    "manager job %s: safety notice sent to manager topic",
+                    job_id,
+                )
+            except Exception:
+                logger.exception(
+                    "manager job %s: failed to send safety notice", job_id,
+                )
 
         logger.info("manager job %s done: ok=%s files=%d engine=%s",
                     job_id, ok, len(file_markers), engine.name)
