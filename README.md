@@ -95,6 +95,10 @@ claude -p "hello"   # проверка, что авторизация работ
   job как failed. Subprocess сам по себе не убивается — для реального
   прерывания агент Менеджер использует `manager_interrupt`. Дефолт
   `3600` (60 мин).
+- `JARVIS_REMINDERS_INTERVAL` — частота сканирования `reminders` (секунды).
+  Дефолт `60`.
+- `JARVIS_REMINDERS_TZ` — таймзона для парсинга времён в schedule
+  (`daily HH:MM` и т.п.). Дефолт `Europe/Moscow`.
 
 ### Playwright MCP для всех движков
 

@@ -314,6 +314,30 @@ def init_db() -> None:
             "CREATE INDEX IF NOT EXISTS idx_jobs_pending "
             "ON jobs(status, not_before, created_at)"
         )
+        # Напоминания Менеджеру (cron-light). schedule — простой текст,
+        # парсится в _parse_schedule(): daily HH:MM, weekday HH:MM,
+        # weekend HH:MM, weekly DAY[,DAY] HH:MM, monthly D HH:MM,
+        # once YYYY-MM-DD HH:MM (все времена в JARVIS_REMINDERS_TZ).
+        # next_fire_at хранится в UTC ISO.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS reminders (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER NOT NULL,
+                thread_id INTEGER NOT NULL,
+                text TEXT NOT NULL,
+                schedule TEXT NOT NULL,
+                next_fire_at TEXT NOT NULL,
+                last_fired_at TEXT,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_reminders_due "
+            "ON reminders(enabled, next_fire_at)"
+        )
 
 
 def log_message(
@@ -459,6 +483,265 @@ async def cleanup_worker(app: Application) -> None:
         except Exception:
             logger.exception("cleanup_worker loop crashed; sleeping 5min")
             await asyncio.sleep(300.0)
+
+
+def _reminders_tz():
+    """Local timezone для парсера schedule. Default Europe/Moscow."""
+    from zoneinfo import ZoneInfo
+    name = os.environ.get("JARVIS_REMINDERS_TZ", "Europe/Moscow")
+    try:
+        return ZoneInfo(name)
+    except Exception:
+        logger.warning("JARVIS_REMINDERS_TZ=%r invalid, using Europe/Moscow", name)
+        return ZoneInfo("Europe/Moscow")
+
+
+_DAY_NAMES = {
+    "mon": 0, "tue": 1, "wed": 2, "thu": 3,
+    "fri": 4, "sat": 5, "sun": 6,
+}
+
+
+def parse_reminder_schedule(schedule: str) -> dict:
+    """Парсит человекочитаемое расписание в структуру.
+
+    Поддерживаемые форматы:
+      daily HH:MM
+      weekday HH:MM        (Пн-Пт)
+      weekend HH:MM        (Сб-Вс)
+      weekly DAY[,DAY,...] HH:MM   (DAY: mon|tue|wed|thu|fri|sat|sun)
+      monthly D HH:MM      (D: 1..28)
+      once YYYY-MM-DD HH:MM
+
+    Возвращает dict с ключами:
+      type: 'daily'|'weekday'|'weekend'|'weekly'|'monthly'|'once'
+      hour, minute: int
+      days: list[int] — для 'weekly', индексы 0=mon..6=sun
+      day: int — для 'monthly' (1..28)
+      date: 'YYYY-MM-DD' — для 'once'
+    """
+    raw = " ".join((schedule or "").split()).strip().lower()
+    if not raw:
+        raise ValueError("schedule is empty")
+
+    def parse_hm(token: str) -> tuple[int, int]:
+        try:
+            h, m = token.split(":")
+            h, m = int(h), int(m)
+            if not (0 <= h <= 23 and 0 <= m <= 59):
+                raise ValueError
+            return h, m
+        except (ValueError, AttributeError):
+            raise ValueError(f"invalid HH:MM: {token!r}")
+
+    parts = raw.split()
+    kind = parts[0]
+
+    if kind in ("daily", "weekday", "weekend") and len(parts) == 2:
+        h, m = parse_hm(parts[1])
+        return {"type": kind, "hour": h, "minute": m}
+
+    if kind == "weekly" and len(parts) == 3:
+        days_token = parts[1]
+        days_idx: list[int] = []
+        for d in days_token.split(","):
+            d = d.strip()
+            if d not in _DAY_NAMES:
+                raise ValueError(f"unknown day: {d!r}; expected one of {list(_DAY_NAMES)}")
+            if _DAY_NAMES[d] not in days_idx:
+                days_idx.append(_DAY_NAMES[d])
+        if not days_idx:
+            raise ValueError("weekly: at least one day required")
+        h, m = parse_hm(parts[2])
+        return {"type": "weekly", "days": sorted(days_idx), "hour": h, "minute": m}
+
+    if kind == "monthly" and len(parts) == 3:
+        try:
+            day = int(parts[1])
+        except ValueError:
+            raise ValueError(f"monthly: day must be int, got {parts[1]!r}")
+        if not (1 <= day <= 28):
+            raise ValueError("monthly: day must be 1..28 (защита от февраля)")
+        h, m = parse_hm(parts[2])
+        return {"type": "monthly", "day": day, "hour": h, "minute": m}
+
+    if kind == "once" and len(parts) == 3:
+        date_str = parts[1]
+        h, m = parse_hm(parts[2])
+        try:
+            datetime.strptime(date_str, "%Y-%m-%d")
+        except ValueError:
+            raise ValueError(f"once: date must be YYYY-MM-DD, got {date_str!r}")
+        return {"type": "once", "date": date_str, "hour": h, "minute": m}
+
+    raise ValueError(
+        f"can't parse schedule: {schedule!r}. Examples: "
+        "'daily 09:30', 'weekday 09:30', 'weekly mon,wed 14:00', "
+        "'monthly 1 10:00', 'once 2026-06-01 09:00'."
+    )
+
+
+def compute_next_fire(parsed: dict, after_utc: datetime | None = None) -> datetime | None:
+    """Возвращает следующий момент срабатывания (datetime, UTC, naive ISO-able).
+
+    Возвращает None для 'once' если дата уже в прошлом — такой reminder
+    в БД пометится disabled при INSERT/обновлении.
+    """
+    from zoneinfo import ZoneInfo
+    tz = _reminders_tz()
+    if after_utc is None:
+        after_utc = datetime.utcnow()
+    # UTC naive → aware
+    now_aware = after_utc.replace(tzinfo=ZoneInfo("UTC")).astimezone(tz)
+    hh = parsed["hour"]
+    mm = parsed["minute"]
+
+    def at_local(year: int, month: int, day: int) -> datetime:
+        local = datetime(year, month, day, hh, mm, tzinfo=tz)
+        return local.astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
+
+    ptype = parsed["type"]
+    if ptype == "once":
+        y, mo, d = map(int, parsed["date"].split("-"))
+        fire = at_local(y, mo, d)
+        return fire if fire > after_utc else None
+
+    today_local = now_aware.replace(hour=hh, minute=mm, second=0, microsecond=0)
+
+    def in_set(weekday: int) -> bool:
+        if ptype == "daily":
+            return True
+        if ptype == "weekday":
+            return weekday < 5
+        if ptype == "weekend":
+            return weekday >= 5
+        if ptype == "weekly":
+            return weekday in parsed["days"]
+        if ptype == "monthly":
+            return False  # для monthly другой механизм ниже
+        return False
+
+    if ptype == "monthly":
+        target_day = parsed["day"]
+        candidate_local = now_aware.replace(day=target_day, hour=hh, minute=mm, second=0, microsecond=0)
+        if candidate_local <= now_aware:
+            # следующий месяц
+            year = candidate_local.year
+            month = candidate_local.month + 1
+            if month > 12:
+                month = 1
+                year += 1
+            candidate_local = candidate_local.replace(year=year, month=month)
+        return candidate_local.astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
+
+    # daily/weekday/weekend/weekly — итеративный поиск ближайшего дня.
+    for delta in range(0, 8):
+        cand_local = today_local + timedelta(days=delta)
+        if delta == 0 and cand_local <= now_aware:
+            continue
+        if in_set(cand_local.weekday()):
+            return cand_local.astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
+    return None  # не должно случаться для рекуррентных
+
+
+async def reminders_worker(app: Application) -> None:
+    """Раз в N секунд сканирует reminders и шлёт сработавшие в Менеджера."""
+    interval = _env_int("JARVIS_REMINDERS_INTERVAL", 60, 10)
+    logger.info("reminders_worker started (interval=%ds)", interval)
+    while True:
+        try:
+            now = datetime.utcnow()
+            now_iso = now.isoformat()
+            with _db() as conn:
+                due_rows = conn.execute(
+                    "SELECT id, chat_id, thread_id, text, schedule, next_fire_at "
+                    "FROM reminders WHERE enabled = 1 AND next_fire_at <= ? "
+                    "ORDER BY next_fire_at ASC",
+                    (now_iso,),
+                ).fetchall()
+            for r in due_rows:
+                rid, rchat, rthread, rtext, rschedule, _ = r
+                notice = f"🔔 Напоминание #{rid}: {rtext}"
+                # Используем _send_manager_notice не получится — нотис для
+                # конкретного thread_id, а helper жёстко идёт в Менеджера.
+                # Но reminders сейчас работают только в Менеджеров топик
+                # (по умолчанию), так что helper подходит, если thread_id
+                # совпадает с manager-target. Универсально — отправим
+                # напрямую как plain notice, плюс auto-kick если это
+                # Менеджеров топик.
+                mgr_target = resolve_manager_topic()
+                try:
+                    chat = await app.bot.get_chat(rchat)
+                    sent = await send_to_topic(chat, rthread, notice)
+                    msg_id = sent.message_id if sent is not None else None
+                    log_message(rchat, rthread, "out", "reminder", notice, msg_id)
+                except Exception:
+                    logger.exception("reminders_worker: send failed id=%s", rid)
+                    # Не пересчитываем next_fire_at — попробуем в следующем цикле.
+                    continue
+
+                # Auto-kick если напоминание в топик Менеджера.
+                if mgr_target and (rchat, rthread) == mgr_target:
+                    try:
+                        with _db() as conn:
+                            existing = conn.execute(
+                                "SELECT COUNT(*) FROM jobs "
+                                "WHERE chat_id=? AND thread_id=? "
+                                "AND status IN ('pending','in_progress')",
+                                (rchat, rthread),
+                            ).fetchone()[0]
+                            if existing == 0:
+                                conn.execute(
+                                    "INSERT INTO jobs(chat_id, thread_id, text, "
+                                    "source, status, created_at) VALUES "
+                                    "(?, ?, ?, 'self_notice', 'pending', ?)",
+                                    (
+                                        rchat, rthread,
+                                        f"[REMINDER] 🔔 Сработало напоминание "
+                                        f"#{rid}: {rtext}",
+                                        now_iso,
+                                    ),
+                                )
+                    except Exception:
+                        logger.exception(
+                            "reminders_worker: auto-kick failed id=%s", rid,
+                        )
+
+                # Пересчитать next_fire_at.
+                try:
+                    parsed = parse_reminder_schedule(rschedule)
+                    next_fire = compute_next_fire(parsed, now)
+                except Exception:
+                    logger.exception(
+                        "reminders_worker: failed to recompute next_fire id=%s "
+                        "schedule=%r → disabling", rid, rschedule,
+                    )
+                    next_fire = None
+                with _db() as conn:
+                    if next_fire is None:
+                        # once отработал, либо schedule сломался → выключаем.
+                        conn.execute(
+                            "UPDATE reminders SET enabled=0, last_fired_at=? "
+                            "WHERE id=?",
+                            (now_iso, rid),
+                        )
+                    else:
+                        conn.execute(
+                            "UPDATE reminders SET next_fire_at=?, last_fired_at=? "
+                            "WHERE id=?",
+                            (next_fire.isoformat(), now_iso, rid),
+                        )
+                logger.info(
+                    "reminders_worker: fired id=%s next=%s",
+                    rid, next_fire.isoformat() if next_fire else "DISABLED",
+                )
+            await asyncio.sleep(interval)
+        except asyncio.CancelledError:
+            logger.info("reminders_worker cancelled")
+            raise
+        except Exception:
+            logger.exception("reminders_worker loop crashed; sleeping 60s")
+            await asyncio.sleep(60.0)
 
 
 def _env_int(name: str, default: int, min_val: int = 1) -> int:
@@ -2755,6 +3038,10 @@ async def _post_init(application: Application) -> None:
     # Параметры в env JARVIS_HEARTBEAT_INTERVAL/WARN/FAIL (300/900/3600с).
     health_task = asyncio.create_task(health_worker(application))
     application.bot_data["health_worker_task"] = health_task
+
+    # Reminders: cron-light напоминания для Менеджера.
+    reminders_task = asyncio.create_task(reminders_worker(application))
+    application.bot_data["reminders_worker_task"] = reminders_task
 
 
 def main() -> None:
