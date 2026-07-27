@@ -528,6 +528,27 @@ class TopicAdminTest(unittest.TestCase):
                     ))
         self.assertIn("Manager", str(manager.exception))
 
+    def test_manager_guard_reads_dotenv_when_env_is_empty(self) -> None:
+        """MCP-сервер поднимается отдельным процессом и окружение бота
+        наследует не всегда: читай guard только из os.environ — топик
+        Менеджера удалялся бы как обычный там, где задан лишь .env."""
+        with tempfile.TemporaryDirectory() as tmp:
+            mcp_server, db_path = self._prepared(tmp)
+            (Path(db_path).parent / ".env").write_text(
+                f"TELEGRAM_TOKEN=123:fake\nJARVIS_MANAGER_THREAD_ID={self.THREAD_ID}\n",
+                encoding="utf-8",
+            )
+            env_without_manager = {
+                k: v for k, v in os.environ.items()
+                if k != "JARVIS_MANAGER_THREAD_ID"
+            }
+            with patch.dict(os.environ, env_without_manager, clear=True):
+                with self.assertRaises(RuntimeError) as manager:
+                    asyncio.run(mcp_server.manager_delete_topic(
+                        thread_id=self.THREAD_ID, chat_id=self.CHAT_ID,
+                    ))
+        self.assertIn("Manager", str(manager.exception))
+
     def test_delete_refuses_unknown_topic(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             mcp_server, _ = self._prepared(tmp)

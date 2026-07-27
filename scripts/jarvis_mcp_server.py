@@ -61,27 +61,37 @@ def _connect() -> sqlite3.Connection:
     return conn
 
 
-def _telegram_token() -> str:
-    """Read TELEGRAM_TOKEN from env or the bot's .env file.
+def _env_or_dotenv(name: str) -> str | None:
+    """Настройка из окружения, иначе из .env бота.
 
-    The bot already loads .env via python-dotenv; the MCP server runs
-    standalone, so we duplicate that lookup here. .env path is resolved
-    relative to JARVIS_DB_PATH's parent so a non-default DB also works.
+    Бот читает .env через python-dotenv; MCP-сервер запускается отдельно и
+    окружение бота наследует не всегда, поэтому смотрим в файл сами. Путь к
+    .env — рядом с БД, так что нестандартный --db тоже работает.
     """
-    token = os.environ.get("TELEGRAM_TOKEN")
-    if token:
-        return token
-    if _DB_PATH is not None:
-        env_path = _DB_PATH.parent / ".env"
-        if env_path.exists():
-            for line in env_path.read_text(encoding="utf-8").splitlines():
-                line = line.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                k, _, v = line.partition("=")
-                if k.strip() == "TELEGRAM_TOKEN":
-                    return v.strip().strip('"').strip("'")
-    raise RuntimeError("TELEGRAM_TOKEN not found (env / .env)")
+    value = os.environ.get(name)
+    if value:
+        return value
+    if _DB_PATH is None:
+        return None
+    env_path = _DB_PATH.parent / ".env"
+    if not env_path.exists():
+        return None
+    for line in env_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, raw = line.partition("=")
+        if key.strip() == name:
+            return raw.strip().strip('"').strip("'") or None
+    return None
+
+
+def _telegram_token() -> str:
+    """Read TELEGRAM_TOKEN from env or the bot's .env file."""
+    token = _env_or_dotenv("TELEGRAM_TOKEN")
+    if not token:
+        raise RuntimeError("TELEGRAM_TOKEN not found (env / .env)")
+    return token
 
 
 def _default_chat_id() -> int:
@@ -90,7 +100,7 @@ def _default_chat_id() -> int:
     Priority: JARVIS_MANAGER_CHAT_ID env → single most-frequent chat_id in
     sessions. Errors if the bot serves multiple chats and no env was set.
     """
-    raw = os.environ.get("JARVIS_MANAGER_CHAT_ID")
+    raw = _env_or_dotenv("JARVIS_MANAGER_CHAT_ID")
     if raw:
         try:
             return int(raw)
@@ -122,7 +132,7 @@ def _manager_thread_id() -> int:
     Until 2026-07-25 this was a SQL lookup for a cwd naming convention private
     to the author, which raised «Manager topic not found» for everyone else.
     """
-    raw = os.environ.get("JARVIS_MANAGER_THREAD_ID")
+    raw = _env_or_dotenv("JARVIS_MANAGER_THREAD_ID")
     if not raw:
         raise RuntimeError(
             "Manager topic is not configured; pass thread_id explicitly or set "
@@ -1140,7 +1150,11 @@ def _guard_topic_admin(chat_id: int, thread_id: int, action: str) -> None:
             f"thread_id={thread_id} is the forum's General topic — {action} "
             "would hit the whole chat, not a topic. Refusing."
         )
-    raw_manager = os.environ.get("JARVIS_MANAGER_THREAD_ID")
+    # Через _env_or_dotenv, а не os.environ: MCP-сервер поднимается отдельным
+    # процессом и окружение бота наследует не всегда. Читай guard только из
+    # переменных — он бы молча не сработал там, где .env есть, а env пуст,
+    # и топик Менеджера удалялся бы как обычный.
+    raw_manager = _env_or_dotenv("JARVIS_MANAGER_THREAD_ID")
     if raw_manager and raw_manager.strip().isdigit():
         if int(raw_manager) == thread_id:
             raise RuntimeError(
