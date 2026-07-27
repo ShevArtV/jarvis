@@ -1131,6 +1131,339 @@ def manager_close_session(
     }
 
 
+# Топики, которые нельзя ни свернуть, ни удалить: General (у него нет своего
+# message_thread_id — 0/1 адресуют корень форума) и топик Менеджера, иначе
+# оркестратор заглушил бы сам себя, и вернуть его было бы некому.
+def _guard_topic_admin(chat_id: int, thread_id: int, action: str) -> None:
+    if thread_id <= 1:
+        raise RuntimeError(
+            f"thread_id={thread_id} is the forum's General topic — {action} "
+            "would hit the whole chat, not a topic. Refusing."
+        )
+    raw_manager = os.environ.get("JARVIS_MANAGER_THREAD_ID")
+    if raw_manager and raw_manager.strip().isdigit():
+        if int(raw_manager) == thread_id:
+            raise RuntimeError(
+                f"thread_id={thread_id} is the Manager's own topic — {action} "
+                "would cut off the orchestrator. Refusing."
+            )
+
+
+async def _await_bot_close(
+    chat_id: int, thread_id: int, timeout: float = 10.0, poll: float = 1.0,
+) -> bool:
+    """Закрыть сеанс топика и дождаться, пока бот это исполнит.
+
+    MCP-процесс не видит active_procs / persistent_workers — их знает только
+    бот, поэтому единственный канал — close_requested в sessions. Ждём, пока
+    close_requests_worker погасит флаг: до этого момента процессы топика ещё
+    живы, и удалять топик в Telegram рано — осиротевший процесс пошёл бы
+    писать в несуществующий тред.
+
+    True — бот подтвердил; False — не дождались (бот не запущен / занят).
+    """
+    manager_close_session(
+        thread_id=thread_id, chat_id=chat_id, interrupt_active=True,
+    )
+    deadline = time.monotonic() + max(timeout, 0.0)
+    while True:
+        with _connect() as conn:
+            row = conn.execute(
+                "SELECT close_requested FROM sessions "
+                "WHERE chat_id = ? AND thread_id = ?",
+                (chat_id, thread_id),
+            ).fetchone()
+        if row is None or row["close_requested"] is None:
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        await asyncio.sleep(poll)
+
+
+# Топик уже мог быть удалён руками в Telegram — тогда строка в sessions
+# осиротела, и чистка БД как раз то, что нужно. Отличаем этот случай от
+# «нет прав» / «бот не админ»: те обязаны прерывать операцию.
+_GONE_MARKERS = (
+    "thread not found",
+    "topic_id_invalid",
+    "message thread not found",
+    "topic_deleted",
+    "chat not found",
+)
+
+
+def _telegram_topic_gone(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return any(marker in text for marker in _GONE_MARKERS)
+
+
+@mcp.tool(
+    name="manager_archive_topic",
+    description=(
+        "Свернуть топик в Telegram (closeForumTopic) — мягкая архивация: "
+        "история и настройки топика остаются, писать в него нельзя, в списке "
+        "он уходит в свёрнутые. Это ДЕФОЛТНЫЙ способ убрать временный топик "
+        "после финальной стадии задачи: в отличие от manager_delete_topic "
+        "операция обратима — reopen=True разворачивает топик обратно "
+        "(reopenForumTopic).\n\n"
+        "Перед сворачиванием сеанс топика закрывается, как manager_close_"
+        "session, и инструмент ждёт (до wait_seconds), пока бот добьёт живые "
+        "процессы — иначе идущая задача продолжала бы писать в закрытый "
+        "топик. Строка в sessions сохраняется: cwd/engine/model на месте, "
+        "после reopen топик работает как раньше.\n\n"
+        "Отказ на топике Менеджера и на General."
+    ),
+)
+async def manager_archive_topic(
+    thread_id: int,
+    chat_id: int | None = None,
+    reopen: bool = False,
+    wait_seconds: float = 10.0,
+) -> dict[str, Any]:
+    """Свернуть (или развернуть обратно) форум-топик, сохранив его состояние."""
+    target_chat_id = chat_id if chat_id is not None else _default_chat_id()
+    _guard_topic_admin(target_chat_id, thread_id, "reopen" if reopen else "archive")
+
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT cwd, engine, model, topic_title FROM sessions "
+            "WHERE chat_id = ? AND thread_id = ?",
+            (target_chat_id, thread_id),
+        ).fetchone()
+    if row is None:
+        raise RuntimeError(
+            f"topic chat_id={target_chat_id} thread_id={thread_id} is not "
+            "tracked — nothing to archive (use manager_topics to list)."
+        )
+
+    if reopen:
+        _telegram_api(
+            "reopenForumTopic",
+            {"chat_id": target_chat_id, "message_thread_id": thread_id},
+        )
+        logger.info(
+            "manager_archive_topic reopened chat=%s thread=%s",
+            target_chat_id, thread_id,
+        )
+        return {
+            "chat_id": target_chat_id,
+            "thread_id": thread_id,
+            "title": row["topic_title"],
+            "cwd": row["cwd"],
+            "engine": row["engine"],
+            "state": "open",
+            "session_closed": False,
+            "bot_confirmed": None,
+            "message": (
+                "Topic reopened. Its session stays closed — the next message "
+                "or manager_send starts a fresh one."
+            ),
+        }
+
+    bot_confirmed = await _await_bot_close(
+        target_chat_id, thread_id, timeout=wait_seconds,
+    )
+    _telegram_api(
+        "closeForumTopic",
+        {"chat_id": target_chat_id, "message_thread_id": thread_id},
+    )
+    logger.info(
+        "manager_archive_topic archived chat=%s thread=%s bot_confirmed=%s",
+        target_chat_id, thread_id, bot_confirmed,
+    )
+    return {
+        "chat_id": target_chat_id,
+        "thread_id": thread_id,
+        "title": row["topic_title"],
+        "cwd": row["cwd"],
+        "engine": row["engine"],
+        "model": row["model"],
+        "state": "closed",
+        "session_closed": True,
+        "bot_confirmed": bot_confirmed,
+        "message": (
+            "Topic archived (folded in Telegram); history and settings kept. "
+            + (
+                ""
+                if bot_confirmed
+                else "WARNING: the bot did not confirm the session close in "
+                     "time — it may be down, and the topic's live processes "
+                     "may still be running. "
+            )
+            + "Call again with reopen=true to unfold it."
+        ),
+    }
+
+
+@mcp.tool(
+    name="manager_delete_topic",
+    description=(
+        "УДАЛИТЬ форум-топик вместе со всеми его сообщениями "
+        "(deleteForumTopic) и убрать его состояние из БД бота. "
+        "НЕОБРАТИМО: Telegram не умеет восстанавливать удалённый топик. "
+        "Для штатного завершения временного топика предпочитай "
+        "manager_archive_topic — он обратим; удаляй только когда топик "
+        "действительно больше не нужен и оператор этого хочет.\n\n"
+        "Порядок: сеанс закрывается, инструмент ждёт (до wait_seconds), пока "
+        "бот добьёт живые процессы топика, и только потом удаляет тред — "
+        "иначе процесс пережил бы топик и писал в пустоту. Затем чистит БД: "
+        "строку sessions, напоминания топика, а pending job'ы, триггеры и "
+        "вопросы ask_user переводит в cancelled, чтобы они не выстрелили в "
+        "несуществующий тред. messages_log по умолчанию СОХРАНЯЕТСЯ (это "
+        "переписка, её подчистит cleanup_worker по TTL); purge_log=true "
+        "удаляет и его.\n\n"
+        "Отказ на топике Менеджера и на General, а также если в топике есть "
+        "in_progress job или бот не подтвердил закрытие — обойти можно "
+        "force=true, но тогда убедись, что бот запущен и топик не в работе. "
+        "Если топик уже удалён руками в Telegram, инструмент всё равно "
+        "почистит осиротевшее состояние в БД."
+    ),
+)
+async def manager_delete_topic(
+    thread_id: int,
+    chat_id: int | None = None,
+    purge_log: bool = False,
+    force: bool = False,
+    wait_seconds: float = 10.0,
+) -> dict[str, Any]:
+    """Delete a forum topic and drop the bot state bound to it."""
+    target_chat_id = chat_id if chat_id is not None else _default_chat_id()
+    _guard_topic_admin(target_chat_id, thread_id, "deletion")
+
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT cwd, engine, model, topic_title FROM sessions "
+            "WHERE chat_id = ? AND thread_id = ?",
+            (target_chat_id, thread_id),
+        ).fetchone()
+        if row is None:
+            raise RuntimeError(
+                f"topic chat_id={target_chat_id} thread_id={thread_id} is not "
+                "tracked — nothing to delete (use manager_topics to list)."
+            )
+        busy = [
+            r["id"] for r in conn.execute(
+                "SELECT id FROM jobs WHERE chat_id = ? AND thread_id = ? "
+                "AND status = 'in_progress'",
+                (target_chat_id, thread_id),
+            ).fetchall()
+        ]
+    if busy and not force:
+        raise RuntimeError(
+            f"topic thread_id={thread_id} has in_progress job(s) {busy} — "
+            "the task would die mid-run. Wait for it, or pass force=true if "
+            "the topic is meant to go away anyway."
+        )
+
+    bot_confirmed = await _await_bot_close(
+        target_chat_id, thread_id, timeout=wait_seconds,
+    )
+    if not bot_confirmed and not force:
+        raise RuntimeError(
+            f"the bot did not confirm the session close within {wait_seconds}s "
+            "— it may be down, and this topic's live processes would outlive "
+            "the topic. Start the bot and retry, or pass force=true to delete "
+            "anyway."
+        )
+
+    telegram_deleted = True
+    warning: str | None = None
+    try:
+        _telegram_api(
+            "deleteForumTopic",
+            {"chat_id": target_chat_id, "message_thread_id": thread_id},
+        )
+    except RuntimeError as exc:
+        if not _telegram_topic_gone(exc):
+            raise
+        telegram_deleted = False
+        warning = (
+            f"Telegram says the topic is already gone ({exc}); cleaned up the "
+            "orphaned state in the DB anyway."
+        )
+        logger.info("manager_delete_topic: topic already gone (%s)", exc)
+
+    now = datetime.utcnow().isoformat()
+    with _connect() as conn:
+        cancelled_jobs = [
+            r[0] for r in conn.execute(
+                "UPDATE jobs SET status='cancelled', finished_at=?, "
+                "error='topic deleted' "
+                "WHERE chat_id=? AND thread_id=? AND status='pending' "
+                "RETURNING id",
+                (now, target_chat_id, thread_id),
+            ).fetchall()
+        ]
+        try:
+            cancelled_triggers = [
+                r[0] for r in conn.execute(
+                    "UPDATE agent_triggers SET status='cancelled', finished_at=?, "
+                    "error='topic deleted' "
+                    "WHERE chat_id=? AND thread_id=? AND status='pending' "
+                    "RETURNING id",
+                    (now, target_chat_id, thread_id),
+                ).fetchall()
+            ]
+        except sqlite3.OperationalError:
+            # Старая БД без agent_triggers — интеграций с трекером тут просто нет.
+            cancelled_triggers = []
+        cancelled_asks = [
+            r[0] for r in conn.execute(
+                "UPDATE ask_requests SET status='cancelled', answered_at=? "
+                "WHERE chat_id=? AND thread_id=? AND status='pending' "
+                "RETURNING id",
+                (now, target_chat_id, thread_id),
+            ).fetchall()
+        ]
+        deleted_reminders = conn.execute(
+            "DELETE FROM reminders WHERE chat_id=? AND thread_id=?",
+            (target_chat_id, thread_id),
+        ).rowcount
+        deleted_log = 0
+        if purge_log:
+            deleted_log = conn.execute(
+                "DELETE FROM messages_log WHERE chat_id=? AND thread_id=?",
+                (target_chat_id, thread_id),
+            ).rowcount
+        conn.execute(
+            "DELETE FROM sessions WHERE chat_id=? AND thread_id=?",
+            (target_chat_id, thread_id),
+        )
+
+    logger.info(
+        "manager_delete_topic chat=%s thread=%s title=%r telegram_deleted=%s "
+        "jobs=%s triggers=%s asks=%s reminders=%s log=%s",
+        target_chat_id, thread_id, row["topic_title"], telegram_deleted,
+        cancelled_jobs, cancelled_triggers, cancelled_asks,
+        deleted_reminders, deleted_log,
+    )
+    return {
+        "chat_id": target_chat_id,
+        "thread_id": thread_id,
+        "title": row["topic_title"],
+        "cwd": row["cwd"],
+        "engine": row["engine"],
+        "telegram_deleted": telegram_deleted,
+        "bot_confirmed": bot_confirmed,
+        "forced": bool(force),
+        "interrupted_jobs": busy,
+        "cancelled_jobs": cancelled_jobs,
+        "cancelled_triggers": cancelled_triggers,
+        "cancelled_asks": cancelled_asks,
+        "deleted_reminders": deleted_reminders,
+        "deleted_log_rows": deleted_log,
+        "log_kept": not purge_log,
+        "warning": warning,
+        "message": (
+            "Topic deleted and its bot state removed. "
+            + ("Message log kept (cleanup_worker prunes it by TTL). "
+               if not purge_log else "Message log purged too. ")
+            + "This cannot be undone — recreate with manager_create_topic if "
+              "the project needs a topic again."
+        ),
+    }
+
+
 @mcp.tool(
     name="manager_dismiss_notice",
     description=(

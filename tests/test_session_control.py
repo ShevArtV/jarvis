@@ -282,5 +282,302 @@ class ManagerCloseSessionTest(unittest.TestCase):
         self.assertIn("close_requested", cols)
 
 
+class TopicAdminTest(unittest.TestCase):
+    """manager_archive_topic / manager_delete_topic: жизненный цикл временного
+    топика. Telegram мокается — тесты не ходят в сеть и не трогают форум."""
+
+    CHAT_ID = -100500
+    THREAD_ID = 88
+
+    def _seed(self, db_path: str, *, job_status: str = "pending") -> None:
+        now = datetime.utcnow().isoformat()
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                "INSERT INTO sessions(chat_id, thread_id, session_id, cwd, engine, "
+                "model, topic_title, updated_at, last_activity_at, session_started_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (self.CHAT_ID, self.THREAD_ID, "sid-1", "/tmp/tmp-topic", "claude",
+                 None, "tmp-2607-37", now, now, now),
+            )
+            conn.execute(
+                "INSERT INTO jobs(chat_id, thread_id, text, status, created_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (self.CHAT_ID, self.THREAD_ID, "отложенная задача", job_status, now),
+            )
+            conn.execute(
+                "INSERT INTO ask_requests(chat_id, thread_id, question, status, "
+                "created_at) VALUES (?, ?, ?, 'pending', ?)",
+                (self.CHAT_ID, self.THREAD_ID, "продолжать?", now),
+            )
+            conn.execute(
+                "INSERT INTO reminders(chat_id, thread_id, text, schedule, "
+                "next_fire_at, enabled, created_at) "
+                "VALUES (?, ?, ?, 'daily 10:00', ?, 1, ?)",
+                (self.CHAT_ID, self.THREAD_ID, "напомнить", now, now),
+            )
+            conn.execute(
+                "INSERT INTO messages_log(chat_id, thread_id, direction, kind, "
+                "text, ts) VALUES (?, ?, 'in', 'user_text', 'привет', ?)",
+                (self.CHAT_ID, self.THREAD_ID, now),
+            )
+
+    def _prepared(self, tmp: str, **seed_kwargs):
+        """Готовая БД + MCP-модуль, нацеленный на неё."""
+        db_path = str(Path(tmp) / "bot_state.db")
+        with patch.object(bot_db, "DB_PATH", db_path):
+            bot_db.init_db()
+        self._seed(db_path, **seed_kwargs)
+        mcp_server = _load_mcp_server()
+        mcp_server._DB_PATH = Path(db_path)
+        return mcp_server, db_path
+
+    @staticmethod
+    def _session_row(db_path: str, chat_id: int, thread_id: int):
+        with sqlite3.connect(db_path) as conn:
+            return conn.execute(
+                "SELECT last_activity_at FROM sessions WHERE chat_id = ? AND thread_id = ?",
+                (chat_id, thread_id),
+            ).fetchone()
+
+    def test_await_bot_close_waits_for_the_bot(self) -> None:
+        """Хелпер возвращает True только когда бот погасил close_requested —
+        до этого момента живые процессы топика ещё не убиты."""
+        with tempfile.TemporaryDirectory() as tmp:
+            mcp_server, db_path = self._prepared(tmp)
+            key = (self.CHAT_ID, self.THREAD_ID)
+
+            async def fake_bot() -> None:
+                """close_requests_worker в миниатюре: дожидается флага и
+                отрабатывает закрытие, как это делает живой бот."""
+                for _ in range(200):
+                    with sqlite3.connect(db_path) as conn:
+                        flag = conn.execute(
+                            "SELECT close_requested FROM sessions "
+                            "WHERE chat_id = ? AND thread_id = ?", key,
+                        ).fetchone()[0]
+                    if flag is not None:
+                        break
+                    await asyncio.sleep(0.01)
+                with patch.object(bot_db, "DB_PATH", db_path), patch.object(
+                    bot_workers, "_kill_persistent_worker",
+                    new=AsyncMock(return_value=False),
+                ):
+                    await bot_workers._apply_close_request(
+                        _FakeApp(_FakeChat()), key,
+                    )
+
+            async def scenario() -> tuple[bool, bool]:
+                # Бот молчит: флаг стоит, гасить его некому — False.
+                timed_out = await mcp_server._await_bot_close(
+                    *key, timeout=0.0, poll=0.01,
+                )
+                # Бот жив и гасит флаг — дожидаемся подтверждения.
+                confirmed, _ = await asyncio.gather(
+                    mcp_server._await_bot_close(*key, timeout=2.0, poll=0.01),
+                    fake_bot(),
+                )
+                return timed_out, confirmed
+
+            timed_out, confirmed = asyncio.run(scenario())
+        self.assertFalse(timed_out)
+        self.assertTrue(confirmed)
+
+    def test_archive_folds_topic_and_keeps_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            mcp_server, db_path = self._prepared(tmp)
+            with patch.object(mcp_server, "_telegram_api") as api, patch.object(
+                mcp_server, "_await_bot_close", new=AsyncMock(return_value=True)
+            ):
+                result = asyncio.run(mcp_server.manager_archive_topic(
+                    thread_id=self.THREAD_ID, chat_id=self.CHAT_ID,
+                ))
+            self.assertEqual(api.call_args.args[0], "closeForumTopic")
+            self.assertEqual(
+                api.call_args.args[1]["message_thread_id"], self.THREAD_ID,
+            )
+            self.assertEqual(result["state"], "closed")
+            self.assertTrue(result["bot_confirmed"])
+            # Топик остаётся в БД — архивация обратима.
+            self.assertIsNotNone(
+                self._session_row(db_path, self.CHAT_ID, self.THREAD_ID)
+            )
+
+    def test_archive_reopen_unfolds_and_keeps_session_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            mcp_server, _ = self._prepared(tmp)
+            with patch.object(mcp_server, "_telegram_api") as api, patch.object(
+                mcp_server, "_await_bot_close", new=AsyncMock(return_value=True)
+            ) as await_close:
+                result = asyncio.run(mcp_server.manager_archive_topic(
+                    thread_id=self.THREAD_ID, chat_id=self.CHAT_ID, reopen=True,
+                ))
+            self.assertEqual(api.call_args.args[0], "reopenForumTopic")
+            self.assertEqual(result["state"], "open")
+            # Разворачивание — не повод трогать сеанс.
+            await_close.assert_not_awaited()
+
+    def test_delete_removes_state_and_defuses_pending_work(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            mcp_server, db_path = self._prepared(tmp)
+            with patch.object(mcp_server, "_telegram_api") as api, patch.object(
+                mcp_server, "_await_bot_close", new=AsyncMock(return_value=True)
+            ):
+                result = asyncio.run(mcp_server.manager_delete_topic(
+                    thread_id=self.THREAD_ID, chat_id=self.CHAT_ID,
+                ))
+            self.assertEqual(api.call_args.args[0], "deleteForumTopic")
+            self.assertTrue(result["telegram_deleted"])
+
+            with sqlite3.connect(db_path) as conn:
+                self.assertIsNone(conn.execute(
+                    "SELECT 1 FROM sessions WHERE chat_id=? AND thread_id=?",
+                    (self.CHAT_ID, self.THREAD_ID),
+                ).fetchone())
+                job_status = conn.execute("SELECT status FROM jobs").fetchone()[0]
+                ask_status = conn.execute(
+                    "SELECT status FROM ask_requests"
+                ).fetchone()[0]
+                reminders = conn.execute(
+                    "SELECT COUNT(*) FROM reminders"
+                ).fetchone()[0]
+                log_rows = conn.execute(
+                    "SELECT COUNT(*) FROM messages_log"
+                ).fetchone()[0]
+            # Подвешенная работа обезврежена: она стреляла бы в удалённый тред.
+            self.assertEqual(job_status, "cancelled")
+            self.assertEqual(ask_status, "cancelled")
+            self.assertEqual(reminders, 0)
+            # Переписка — ценность, её сносит только purge_log.
+            self.assertEqual(log_rows, 1)
+            self.assertTrue(result["log_kept"])
+
+    def test_delete_with_purge_log_drops_the_history_too(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            mcp_server, db_path = self._prepared(tmp)
+            with patch.object(mcp_server, "_telegram_api"), patch.object(
+                mcp_server, "_await_bot_close", new=AsyncMock(return_value=True)
+            ):
+                result = asyncio.run(mcp_server.manager_delete_topic(
+                    thread_id=self.THREAD_ID, chat_id=self.CHAT_ID, purge_log=True,
+                ))
+            with sqlite3.connect(db_path) as conn:
+                log_rows = conn.execute(
+                    "SELECT COUNT(*) FROM messages_log"
+                ).fetchone()[0]
+        self.assertEqual(log_rows, 0)
+        self.assertEqual(result["deleted_log_rows"], 1)
+        self.assertFalse(result["log_kept"])
+
+    def test_delete_cleans_orphaned_state_when_topic_is_already_gone(self) -> None:
+        """Топик удалили руками в Telegram — строка в sessions осиротела;
+        инструмент обязан её убрать, а не упасть."""
+        with tempfile.TemporaryDirectory() as tmp:
+            mcp_server, db_path = self._prepared(tmp)
+            gone = RuntimeError(
+                "Telegram deleteForumTopic failed: Bad Request: message thread not found"
+            )
+            with patch.object(
+                mcp_server, "_telegram_api", side_effect=gone
+            ), patch.object(
+                mcp_server, "_await_bot_close", new=AsyncMock(return_value=True)
+            ):
+                result = asyncio.run(mcp_server.manager_delete_topic(
+                    thread_id=self.THREAD_ID, chat_id=self.CHAT_ID,
+                ))
+            with sqlite3.connect(db_path) as conn:
+                left = conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
+        self.assertFalse(result["telegram_deleted"])
+        self.assertIn("already gone", result["warning"])
+        self.assertEqual(left, 0)
+
+    def test_delete_propagates_other_telegram_errors(self) -> None:
+        """Нет прав — не наш случай «топика уже нет»: состояние трогать нельзя."""
+        with tempfile.TemporaryDirectory() as tmp:
+            mcp_server, db_path = self._prepared(tmp)
+            denied = RuntimeError(
+                "Telegram deleteForumTopic failed: Bad Request: not enough rights"
+            )
+            with patch.object(
+                mcp_server, "_telegram_api", side_effect=denied
+            ), patch.object(
+                mcp_server, "_await_bot_close", new=AsyncMock(return_value=True)
+            ):
+                with self.assertRaises(RuntimeError):
+                    asyncio.run(mcp_server.manager_delete_topic(
+                        thread_id=self.THREAD_ID, chat_id=self.CHAT_ID,
+                    ))
+            with sqlite3.connect(db_path) as conn:
+                left = conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
+        self.assertEqual(left, 1)
+
+    def test_delete_refuses_general_and_manager_topics(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            mcp_server, _ = self._prepared(tmp)
+            with self.assertRaises(RuntimeError) as general:
+                asyncio.run(mcp_server.manager_delete_topic(
+                    thread_id=1, chat_id=self.CHAT_ID,
+                ))
+            self.assertIn("General", str(general.exception))
+
+            with patch.dict(
+                os.environ, {"JARVIS_MANAGER_THREAD_ID": str(self.THREAD_ID)}
+            ):
+                with self.assertRaises(RuntimeError) as manager:
+                    asyncio.run(mcp_server.manager_delete_topic(
+                        thread_id=self.THREAD_ID, chat_id=self.CHAT_ID,
+                    ))
+        self.assertIn("Manager", str(manager.exception))
+
+    def test_delete_refuses_unknown_topic(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            mcp_server, _ = self._prepared(tmp)
+            with self.assertRaises(RuntimeError):
+                asyncio.run(mcp_server.manager_delete_topic(
+                    thread_id=999, chat_id=self.CHAT_ID,
+                ))
+
+    def test_delete_refuses_busy_topic_unless_forced(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            mcp_server, db_path = self._prepared(tmp, job_status="in_progress")
+            with patch.object(mcp_server, "_telegram_api"), patch.object(
+                mcp_server, "_await_bot_close", new=AsyncMock(return_value=True)
+            ):
+                with self.assertRaises(RuntimeError) as busy:
+                    asyncio.run(mcp_server.manager_delete_topic(
+                        thread_id=self.THREAD_ID, chat_id=self.CHAT_ID,
+                    ))
+                self.assertIn("in_progress", str(busy.exception))
+
+                forced = asyncio.run(mcp_server.manager_delete_topic(
+                    thread_id=self.THREAD_ID, chat_id=self.CHAT_ID, force=True,
+                ))
+            with sqlite3.connect(db_path) as conn:
+                left = conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
+        self.assertEqual(len(forced["interrupted_jobs"]), 1)
+        self.assertEqual(left, 0)
+
+    def test_delete_refuses_when_bot_did_not_confirm(self) -> None:
+        """Бот не отозвался — его процессы пережили бы топик. Только force."""
+        with tempfile.TemporaryDirectory() as tmp:
+            mcp_server, db_path = self._prepared(tmp)
+            with patch.object(mcp_server, "_telegram_api"), patch.object(
+                mcp_server, "_await_bot_close", new=AsyncMock(return_value=False)
+            ):
+                with self.assertRaises(RuntimeError) as silent:
+                    asyncio.run(mcp_server.manager_delete_topic(
+                        thread_id=self.THREAD_ID, chat_id=self.CHAT_ID,
+                        wait_seconds=0.0,
+                    ))
+                self.assertIn("force=true", str(silent.exception))
+
+                forced = asyncio.run(mcp_server.manager_delete_topic(
+                    thread_id=self.THREAD_ID, chat_id=self.CHAT_ID, force=True,
+                ))
+            with sqlite3.connect(db_path) as conn:
+                left = conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
+        self.assertFalse(forced["bot_confirmed"])
+        self.assertEqual(left, 0)
+
+
 if __name__ == "__main__":
     unittest.main()
