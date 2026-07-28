@@ -105,6 +105,35 @@ class RoleResolutionTest(TopicMcpTestBase):
         self.assertEqual(agent[0]["headers"]["Authorization"], "Bearer agent-token")
         self.assertEqual(manager[0]["url"], "https://example.test/mcp.php")
 
+    def test_service_roles_fall_back_to_legacy_manager_credentials(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write(tmp, CONFIG)
+            with self._env(path):
+                secretary = topic_mcp.servers_for_role("secretary")
+                teamlead = topic_mcp.servers_for_role("teamlead")
+
+        self.assertEqual(secretary[0]["headers"]["Authorization"], "Bearer manager-token")
+        self.assertEqual(teamlead[0]["headers"]["Authorization"], "Bearer manager-token")
+
+    def test_service_roles_may_have_explicit_credentials(self) -> None:
+        data = {"servers": [{
+            "name": "mxboard",
+            "url": "https://example.test/mcp.php",
+            "roles": {
+                "manager": {"headers": {"Authorization": "Bearer manager-token"}},
+                "secretary": {"headers": {"Authorization": "Bearer secretary-token"}},
+                "teamlead": {"headers": {"Authorization": "Bearer teamlead-token"}},
+            },
+        }]}
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write(tmp, data)
+            with self._env(path):
+                secretary = topic_mcp.servers_for_role("secretary")
+                teamlead = topic_mcp.servers_for_role("teamlead")
+
+        self.assertEqual(secretary[0]["headers"]["Authorization"], "Bearer secretary-token")
+        self.assertEqual(teamlead[0]["headers"]["Authorization"], "Bearer teamlead-token")
+
     def test_server_without_roles_applies_to_every_role(self) -> None:
         data = {"servers": [{
             "name": "shared",

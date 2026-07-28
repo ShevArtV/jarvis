@@ -97,15 +97,20 @@ def _telegram_token() -> str:
 def _default_chat_id() -> int:
     """Resolve chat_id for create-topic when caller omits it.
 
-    Priority: JARVIS_MANAGER_CHAT_ID env → single most-frequent chat_id in
+    Priority: explicit service-topic env → single most-frequent chat_id in
     sessions. Errors if the bot serves multiple chats and no env was set.
     """
-    raw = _env_or_dotenv("JARVIS_MANAGER_CHAT_ID")
-    if raw:
-        try:
-            return int(raw)
-        except ValueError as exc:
-            raise RuntimeError(f"JARVIS_MANAGER_CHAT_ID is not int: {raw!r}") from exc
+    for name in (
+        "JARVIS_SECRETARY_CHAT_ID",
+        "JARVIS_MANAGER_CHAT_ID",
+        "JARVIS_TEAMLEAD_CHAT_ID",
+    ):
+        raw = _env_or_dotenv(name)
+        if raw:
+            try:
+                return int(raw)
+            except ValueError as exc:
+                raise RuntimeError(f"{name} is not int: {raw!r}") from exc
     with _connect() as conn:
         # Forum chats only — private DMs always have thread_id=0 and can't host
         # topics. If the bot serves a single forum chat, that's the answer.
@@ -116,32 +121,54 @@ def _default_chat_id() -> int:
     if not rows:
         raise RuntimeError(
             "no forum topics in sessions yet — pass chat_id explicitly or "
-            "set JARVIS_MANAGER_CHAT_ID"
+            "set JARVIS_SECRETARY_CHAT_ID/JARVIS_MANAGER_CHAT_ID"
         )
     if len(rows) > 1:
         raise RuntimeError(
             "multiple forum chats present; pass chat_id explicitly or set "
-            "JARVIS_MANAGER_CHAT_ID"
+            "JARVIS_SECRETARY_CHAT_ID/JARVIS_MANAGER_CHAT_ID"
         )
     return rows[0]["chat_id"]
 
 
+def _thread_id_from_env(names: tuple[str, ...], label: str) -> int:
+    for name in names:
+        raw = _env_or_dotenv(name)
+        if not raw:
+            continue
+        try:
+            return int(raw)
+        except ValueError as exc:
+            raise RuntimeError(f"{name} is not int: {raw!r}") from exc
+    joined = " or ".join(names)
+    raise RuntimeError(
+        f"{label} topic is not configured; pass thread_id explicitly or set {joined}"
+    )
+
+
+def _secretary_thread_id() -> int:
+    """Secretary topic thread_id; old JARVIS_MANAGER_THREAD_ID is its alias."""
+    return _thread_id_from_env(
+        ("JARVIS_SECRETARY_THREAD_ID", "JARVIS_MANAGER_THREAD_ID"),
+        "Secretary",
+    )
+
+
+def _teamlead_thread_id() -> int:
+    """Teamlead topic thread_id; falls back to Secretary until configured."""
+    try:
+        return _thread_id_from_env(("JARVIS_TEAMLEAD_THREAD_ID",), "Teamlead")
+    except RuntimeError:
+        return _secretary_thread_id()
+
+
 def _manager_thread_id() -> int:
-    """Manager topic thread_id from JARVIS_MANAGER_THREAD_ID.
+    """Compatibility alias: old Manager defaults now point to Secretary.
 
     Until 2026-07-25 this was a SQL lookup for a cwd naming convention private
     to the author, which raised «Manager topic not found» for everyone else.
     """
-    raw = _env_or_dotenv("JARVIS_MANAGER_THREAD_ID")
-    if not raw:
-        raise RuntimeError(
-            "Manager topic is not configured; pass thread_id explicitly or set "
-            "JARVIS_MANAGER_THREAD_ID"
-        )
-    try:
-        return int(raw)
-    except ValueError as exc:
-        raise RuntimeError(f"JARVIS_MANAGER_THREAD_ID is not int: {raw!r}") from exc
+    return _secretary_thread_id()
 
 
 def _telegram_api(method: str, params: dict[str, Any]) -> dict[str, Any]:
@@ -831,7 +858,8 @@ def manager_cancel_job(job_id: int) -> dict[str, Any]:
 @mcp.tool(
     name="manager_remind_add",
     description=(
-        "Создаёт напоминание для Менеджера. Формат schedule (простой текст):\n"
+        "Создаёт напоминание для Секретаря (старое имя manager_* сохранено "
+        "для совместимости). Формат schedule (простой текст):\n"
         "  daily HH:MM              - каждый день\n"
         "  weekday HH:MM            - Пн-Пт\n"
         "  weekend HH:MM            - Сб-Вс\n"
@@ -840,7 +868,7 @@ def manager_cancel_job(job_id: int) -> dict[str, Any]:
         "  once YYYY-MM-DD HH:MM    - one-time\n"
         "Все времена в Europe/Moscow (можно переопределить через "
         "JARVIS_REMINDERS_TZ). В назначенное время бот шлёт в топик "
-        "Менеджера '🔔 Напоминание #N: <text>' и активирует Менеджера "
+        "Секретаря '🔔 Напоминание #N: <text>' и активирует Секретаря "
         "через auto-kick. Возвращает id, next_fire_at."
     ),
 )

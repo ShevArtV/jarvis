@@ -27,39 +27,75 @@ from bot.settings import int_env
 
 logger = logging.getLogger(__name__)
 
-def resolve_manager_topic() -> tuple[int, int] | None:
-    """Return (chat_id, thread_id) of the Manager's topic, or None.
+TopicKey = tuple[int, int]
 
-    Two uses: the «report back to Manager» instruction in the SYSTEM NOTE of
-    delegated jobs, and the topic role that decides which credentials an
-    external MCP server gets (see resolve_topic_role).
 
-    Set both JARVIS_MANAGER_CHAT_ID and JARVIS_MANAGER_THREAD_ID to enable it.
-    Without them Jarvis has no Manager topic — a single-topic install does not
-    need one. (Until 2026-07-25 this fell back to a SQL lookup for a directory
-    layout private to the author, which silently did nothing for anyone else.)
-    """
-    raw_chat = os.environ.get("JARVIS_MANAGER_CHAT_ID")
-    raw_thread = os.environ.get("JARVIS_MANAGER_THREAD_ID")
+def _resolve_topic_from_env(prefix: str) -> TopicKey | None:
+    raw_chat = os.environ.get(f"JARVIS_{prefix}_CHAT_ID")
+    raw_thread = os.environ.get(f"JARVIS_{prefix}_THREAD_ID")
     if not (raw_chat and raw_thread):
         return None
     try:
         return int(raw_chat), int(raw_thread)
     except ValueError:
         logger.warning(
-            "JARVIS_MANAGER_{CHAT,THREAD}_ID not int: %r/%r", raw_chat, raw_thread,
+            "JARVIS_%s_{CHAT,THREAD}_ID not int: %r/%r",
+            prefix, raw_chat, raw_thread,
         )
         return None
 
 
-def resolve_topic_role(key: tuple[int, int]) -> str:
-    """Role of a Jarvis topic: 'manager' for the orchestrating topic, else 'agent'.
+def resolve_secretary_topic() -> TopicKey | None:
+    """Return the Secretary topic, or None.
+
+    The old Manager topic becomes Secretary. New installs may set explicit
+    JARVIS_SECRETARY_* variables; existing installs keep working through
+    JARVIS_MANAGER_* as the compatibility alias.
+    """
+    return _resolve_topic_from_env("SECRETARY") or _resolve_topic_from_env("MANAGER")
+
+
+def resolve_teamlead_topic() -> TopicKey | None:
+    """Return the Teamlead topic, or fall back to Secretary/legacy Manager.
+
+    Engineering notices must not disappear while the new topic is being wired.
+    Once JARVIS_TEAMLEAD_* is configured, they stop waking Secretary.
+    """
+    return _resolve_topic_from_env("TEAMLEAD") or resolve_secretary_topic()
+
+
+def resolve_manager_topic() -> TopicKey | None:
+    """Compatibility alias for the old Manager topic, now Secretary.
+
+    Existing MCP tools, docs and tests still use the manager naming. Keep the
+    API stable while the human-facing role is split into Secretary + Teamlead.
+    """
+    return resolve_secretary_topic()
+
+
+def resolve_service_topic(role: str) -> TopicKey | None:
+    """Resolve a service role target used for notices/auto-kick."""
+    role = (role or "").strip().lower()
+    if role in {"teamlead", "lead", "engineering"}:
+        return resolve_teamlead_topic()
+    if role in {"secretary", "manager", "communications", "communication"}:
+        return resolve_secretary_topic()
+    logger.warning("unknown service topic role %r", role)
+    return None
+
+
+def resolve_topic_role(key: TopicKey) -> str:
+    """Role of a Jarvis topic for external per-topic MCP credentials.
 
     The selected LLM engine is irrelevant here — the role belongs to the topic.
     External MCP servers use it to pick credentials, so that one forum can act
     under two identities without either leaking into the other's topics.
     """
-    return "manager" if resolve_manager_topic() == key else "agent"
+    if _resolve_topic_from_env("TEAMLEAD") == key:
+        return "teamlead"
+    if resolve_secretary_topic() == key:
+        return "secretary"
+    return "agent"
 
 
 def save_message_context(chat_id: int, message_id: int, ctx: dict) -> None:

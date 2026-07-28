@@ -41,7 +41,12 @@ from bot.sessions import (
     get_session,
 )
 from bot.settings import CLAUDE_CWD
-from bot.topics import _key, _lock_for, active_procs, resolve_manager_topic
+from bot.topics import (
+    _key,
+    _lock_for,
+    active_procs,
+    resolve_teamlead_topic,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -157,7 +162,7 @@ async def _run_manager_job(app: Application, job: dict) -> tuple[bool, int | Non
         prompt_parts: list[str] = []  # [SYSTEM:]-блок уходит через системный канал движка
         if pending_summary:
             prompt_parts.append("[Контекст:]\n" + pending_summary)
-        mgr_target = resolve_manager_topic()
+        mgr_target = resolve_teamlead_topic()
         if is_self_kick:
             prompt_parts.append(
                 f"[SYSTEM NOTE: это AUTO-KICK для Менеджера (job_id={job_id}, "
@@ -315,6 +320,7 @@ async def _run_manager_job(app: Application, job: dict) -> tuple[bool, int | Non
                 f"вопрос обычным manager_send(as_user=True) — агент resume "
                 f"той же сессии и увидит контекст до прерывания.",
                 kind="job_interrupted",
+                target_role="teamlead",
             )
             logger.info("manager job %s: interrupted by manager", job_id)
             return False, None, "interrupted by manager request"
@@ -345,7 +351,7 @@ async def _run_manager_job(app: Application, job: dict) -> tuple[bool, int | Non
         # есть ответ. Не зависит от того, прислал ли агент сам что-то
         # через mcp__jarvis__manager_send. Не шлём для self_kick — Менеджер
         # сам себе нотис не нужен, он уже разбирает свой inbox.
-        if not is_self_kick and resolve_manager_topic() != (chat_id, thread_id):
+        if not is_self_kick and resolve_teamlead_topic() != (chat_id, thread_id):
             with _db() as conn_:
                 row = conn_.execute(
                     "SELECT topic_title, cwd FROM sessions "
@@ -362,7 +368,9 @@ async def _run_manager_job(app: Application, job: dict) -> tuple[bool, int | Non
                 f"Действие: прочитай через "
                 f"manager_inbox(thread_id={thread_id}) или зайди в сам топик."
             )
-            await _send_manager_notice(app, notice_text, kind="job_notification")
+            await _send_manager_notice(
+                app, notice_text, kind="job_notification", target_role="teamlead",
+            )
 
         logger.info("manager job %s done: ok=%s files=%d engine=%s",
                     job_id, ok, len(file_markers), engine.name)

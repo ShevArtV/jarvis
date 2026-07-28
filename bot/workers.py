@@ -39,7 +39,8 @@ from bot.topics import (
     _kill_persistent_worker,
     active_procs,
     persistent_workers,
-    resolve_manager_topic,
+    resolve_secretary_topic,
+    resolve_teamlead_topic,
 )
 
 logger = logging.getLogger(__name__)
@@ -89,7 +90,7 @@ async def cleanup_worker(app: Application) -> None:
 
 
 async def reminders_worker(app: Application) -> None:
-    """Раз в N секунд сканирует reminders и шлёт сработавшие в Менеджера."""
+    """Раз в N секунд сканирует reminders и шлёт сработавшие в их топик."""
     interval = _env_int("JARVIS_REMINDERS_INTERVAL", 60, 10)
     logger.info("reminders_worker started (interval=%ds)", interval)
     while True:
@@ -106,14 +107,10 @@ async def reminders_worker(app: Application) -> None:
             for r in due_rows:
                 rid, rchat, rthread, rtext, rschedule, _ = r
                 notice = f"🔔 Напоминание #{rid}: {rtext}"
-                # Используем _send_manager_notice не получится — нотис для
-                # конкретного thread_id, а helper жёстко идёт в Менеджера.
-                # Но reminders сейчас работают только в Менеджеров топик
-                # (по умолчанию), так что helper подходит, если thread_id
-                # совпадает с manager-target. Универсально — отправим
-                # напрямую как plain notice, плюс auto-kick если это
-                # Менеджеров топик.
-                mgr_target = resolve_manager_topic()
+                service_targets = {
+                    t for t in (resolve_secretary_topic(), resolve_teamlead_topic())
+                    if t is not None
+                }
                 try:
                     chat = await app.bot.get_chat(rchat)
                     sent = await send_to_topic(chat, rthread, notice)
@@ -124,8 +121,11 @@ async def reminders_worker(app: Application) -> None:
                     # Не пересчитываем next_fire_at — попробуем в следующем цикле.
                     continue
 
-                # Auto-kick если напоминание в топик Менеджера.
-                if mgr_target and (rchat, rthread) == mgr_target:
+                # Auto-kick если напоминание в служебный топик. Существующие
+                # reminders старого Менеджера остаются в Секретаре, а если
+                # когда-нибудь появятся инженерные reminders в Тимлиде, они тоже
+                # будут будить свой топик.
+                if (rchat, rthread) in service_targets:
                     try:
                         with _db() as conn:
                             existing = conn.execute(
@@ -344,7 +344,9 @@ async def health_worker(app: Application) -> None:
                     f"manager_interrupt(thread_id={jthread}) и спроси, "
                     f"что происходит."
                 )
-                await _send_manager_notice(app, text, kind="job_heartbeat_warn")
+                await _send_manager_notice(
+                    app, text, kind="job_heartbeat_warn", target_role="teamlead",
+                )
                 with _db() as conn:
                     conn.execute(
                         "UPDATE jobs SET heartbeat_notified_at = ? WHERE id = ?",
@@ -376,7 +378,9 @@ async def health_worker(app: Application) -> None:
                     f"Чтобы реально прервать — используй "
                     f"manager_interrupt(thread_id={jthread})."
                 )
-                await _send_manager_notice(app, text, kind="job_heartbeat_fail")
+                await _send_manager_notice(
+                    app, text, kind="job_heartbeat_fail", target_role="teamlead",
+                )
 
             await asyncio.sleep(interval)
         except asyncio.CancelledError:

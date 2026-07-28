@@ -33,7 +33,7 @@ from bot.settings import (
     TG_FILE_LIMIT_MB,
     TG_HARD_LIMIT,
 )
-from bot.topics import resolve_manager_topic, save_message_context
+from bot.topics import resolve_service_topic, save_message_context
 
 logger = logging.getLogger(__name__)
 
@@ -42,36 +42,42 @@ JOURNAL_LINE_CHARS = 400   # длинную строку шага режем —
 
 
 async def _send_manager_notice(
-    app: Application, text: str, kind: str = "job_notification",
+    app: Application,
+    text: str,
+    kind: str = "job_notification",
+    target_role: str = "secretary",
 ) -> int | None:
-    """Шлёт plain-сообщение в топик Менеджера, логирует и будит Менеджера.
+    """Шлёт plain-сообщение в служебный топик, логирует и будит его.
 
     Помимо доставки plain-сообщения через Telegram, ставит auto-job
-    source='self_notice' в очередь Менеджера, чтобы worker запустил его
-    LLM-сессию и тот прочитал свой inbox. Дедуп: если у Менеджера уже
+    source='self_notice' в очередь адресата, чтобы worker запустил его
+    LLM-сессию и тот прочитал свой inbox. Дедуп: если у адресата уже
     есть pending/in_progress job — не создаём, он обработает все
     свежие нотисы вместе при текущем запуске.
 
-    Используется safety-нотисом из _run_manager_job, health_worker'ом,
-    и manager_interrupt event'ом. Возвращает telegram_message_id или None
-    при сбое (например, бот не админ в группе).
+    target_role='secretary' — коммуникационные уведомления/reminders.
+    target_role='teamlead' — инженерные job/heartbeat/mxBoard-notices.
+    Старое имя функции сохраняется как compatibility API.
     """
-    mgr_target = resolve_manager_topic()
-    if not mgr_target:
+    target = resolve_service_topic(target_role)
+    if not target:
         return None
-    chat_id, thread_id = mgr_target
+    chat_id, thread_id = target
     try:
         chat = await app.bot.get_chat(chat_id)
         sent = await send_to_topic(chat, thread_id, text)
         msg_id = sent.message_id if sent is not None else None
         log_message(chat_id, thread_id, "out", kind, text, msg_id)
     except Exception:
-        logger.exception("_send_manager_notice failed (kind=%s)", kind)
+        logger.exception(
+            "_send_manager_notice failed (kind=%s target_role=%s)",
+            kind, target_role,
+        )
         return None
 
-    # Auto-kick: создать job для Менеджера, чтобы он сам активировался и
+    # Auto-kick: создать job для служебного топика, чтобы он сам активировался и
     # обработал свежие нотисы. С дедупом — один job на всю серию нотисов
-    # пока Менеджер их не разгребёт.
+    # пока адресат их не разгребёт.
     try:
         now = datetime.utcnow().isoformat()
         with _db() as conn:
@@ -95,10 +101,14 @@ async def _send_manager_notice(
                 ),
             )
         logger.info(
-            "manager auto-kick job created chat=%s thread=%s", chat_id, thread_id,
+            "service auto-kick job created role=%s chat=%s thread=%s",
+            target_role, chat_id, thread_id,
         )
     except Exception:
-        logger.exception("auto-kick INSERT failed (kind=%s)", kind)
+        logger.exception(
+            "auto-kick INSERT failed (kind=%s target_role=%s)",
+            kind, target_role,
+        )
     return msg_id
 
 

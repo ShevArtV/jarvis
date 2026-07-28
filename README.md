@@ -142,9 +142,14 @@ claude -p "hello"   # проверка, что авторизация работ
   топика (см. «Внешние MCP-серверы по роли топика»). Не задан или файла нет →
   таких серверов нет, это не ошибка.
 - `JARVIS_TOPIC_MCP` — `1`/`0`, глобальный рубильник для них. Дефолт `1`.
-- `JARVIS_MANAGER_CHAT_ID` / `JARVIS_MANAGER_THREAD_ID` — топик Менеджера.
-  Нужны обе: они задают, какой топик получает роль `manager` и куда уходят
-  отчёты по делегированным задачам. Не заданы — Менеджера у установки нет.
+- `JARVIS_SECRETARY_CHAT_ID` / `JARVIS_SECRETARY_THREAD_ID` — топик Секретаря:
+  коммуникационный triage, reminders, webhook/IMAP notices. Если не заданы,
+  используется совместимый alias `JARVIS_MANAGER_CHAT_ID` /
+  `JARVIS_MANAGER_THREAD_ID` — старый топик Менеджера становится Секретарём.
+- `JARVIS_TEAMLEAD_CHAT_ID` / `JARVIS_TEAMLEAD_THREAD_ID` — топик Тимлида:
+  инженерные job/heartbeat notices и mxBoard lifecycle. Если не заданы,
+  инженерные notices падают обратно в Секретаря, чтобы уведомления не терялись
+  до миграции.
 - `JARVIS_LOG_TTL_DAYS` — сколько дней хранить записи `messages_log`,
   завершённые (`done`/`failed`/`cancelled`) `jobs` и завершённые
   `agent_triggers`. Дефолт `30`. `0`, `none`, `off`, `false`, `no` —
@@ -220,16 +225,20 @@ Playwright **не** регистрируется глобально, а инъе
 
 ### Внешние MCP-серверы по роли топика
 
-Один форум часто обслуживает две разные личности: топик-оркестратор
-(«Менеджер») и рабочие топики проектов. Если у обоих один и тот же внешний
-сервис — трекер задач, доска, внутреннее API — им обычно нужны **разные креды**,
-и путать их нельзя: ход, сделанный от лица исполнителя, не должен выглядеть как
-ход Менеджера.
+Один форум часто обслуживает несколько личностей: служебные топики
+Секретаря/Тимлида и рабочие топики проектов. Если у них один и тот же внешний
+сервис — трекер задач, доска, внутреннее API — им обычно нужны разные credentials:
+ход исполнителя не должен выглядеть как ход manager-level пользователя.
 
-Jarvis решает это ролью топика. `resolve_topic_role()` сравнивает
-`(chat_id, thread_id)` с `resolve_manager_topic()` (env `JARVIS_MANAGER_CHAT_ID`
-+ `JARVIS_MANAGER_THREAD_ID`) и отдаёт `manager` либо `agent`. Выбранный движок
-на роль не влияет — роль принадлежит топику.
+Jarvis решает это ролью топика. `resolve_topic_role()` отдаёт:
+
+- `secretary` — explicit `JARVIS_SECRETARY_*`, иначе совместимый alias
+  `JARVIS_MANAGER_*`;
+- `teamlead` — explicit `JARVIS_TEAMLEAD_*`;
+- `agent` — все остальные проектные/исполнительские топики.
+
+`resolve_manager_topic()` сохранён как compatibility API и теперь указывает на
+Секретаря. Выбранный движок на роль не влияет — роль принадлежит топику.
 
 Сами серверы объявляются в JSON-файле из `JARVIS_TOPIC_MCP_CONFIG` — про сам
 сервис Jarvis не знает ничего:
@@ -241,8 +250,10 @@ Jarvis решает это ролью топика. `resolve_topic_role()` ср�
       "name": "mxboard",
       "url": "https://example.org/rest-mcp.php",
       "roles": {
-        "manager": {"headers": {"Authorization": "Bearer <manager-token>"}},
-        "agent":   {"headers": {"Authorization": "Bearer <agent-token>"}}
+        "manager":   {"headers": {"Authorization": "Bearer <manager-token>"}},
+        "secretary": {"headers": {"Authorization": "Bearer <manager-token>"}},
+        "teamlead":  {"headers": {"Authorization": "Bearer <manager-token>"}},
+        "agent":     {"headers": {"Authorization": "Bearer <agent-token>"}}
       }
     }
   ]
@@ -252,6 +263,10 @@ Jarvis решает это ролью топика. `resolve_topic_role()` ср�
 - `roles` необязателен: без него сервер подключается любой роли с общими
   `headers`. С ним — только перечисленным ролям, а `headers` роли перекрывают
   общие. Роль может переопределить и `url`.
+- Для совместимости `secretary` и `teamlead` берут роль `manager`, если в
+  конфиге нет явной записи под новую роль. Это позволяет старому
+  `jarvis-topic-mcp.json` сразу дать обоим служебным топикам manager-level
+  mxBoard-доступ.
 - `enabled: false` выключает запись, не удаляя её.
 - Поддерживаются только **remote HTTP** серверы: роль здесь — это креды, а
   stdio-сервер несёт их в argv/env, откуда они видны в списке процессов.
