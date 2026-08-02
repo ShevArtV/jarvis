@@ -52,6 +52,9 @@
 - Хотя бы один LLM CLI, установленный и авторизованный: `claude`, `codex` или
   `opencode`. Jarvis их не устанавливает и ключей не хранит — он вызывает то, что
   уже работает у вас в терминале.
+- Для role-based topic MCP через Codex нужен `codex-cli >= 0.134.0`: начиная с
+  этой версии `--profile` загружает отдельный
+  `$CODEX_HOME/<name>.config.toml`.
 - Токен бота от [@BotFather](https://t.me/BotFather) и свой Telegram user-id
   (например через `@userinfobot`).
 
@@ -282,11 +285,11 @@ Jarvis решает это ролью топика. `resolve_topic_role()` от�
 
 - **claude**: `--mcp-config` с remote HTTP server и headers.
 - **codex**: `codex exec` получает временный
-  `$CODEX_HOME/jarvis-topic-mcp-*.config.toml` + `--profile-v2 <name>`, чтобы
+  `$CODEX_HOME/jarvis-topic-mcp-*.config.toml` + `--profile <name>`, чтобы
   токены не попадали в process argv. Файл создаётся с mode `0600` и удаляется
-  после завершения процесса. `--profile-v2` — глобальный флаг Codex CLI, он
-  обязан стоять ПЕРЕД subcommand: `codex --profile-v2 <name> exec resume ...`.
-  Persistent `codex app-server` `--profile-v2` не поддерживает, поэтому там
+  после завершения процесса. Jarvis ставит `--profile` перед subcommand:
+  `codex --profile <name> exec resume ...`.
+  Persistent `codex app-server` временный профиль не использует, поэтому там
   используется `-c mcp_servers.<name>.*` (токен при этом в argv — цена
   persistent-режима).
 - **opencode**: временный `OPENCODE_CONFIG` — клон глобального `opencode.json`
@@ -401,7 +404,7 @@ turn.
 Playwright MCP в persistent Codex подключается через `-c
 mcp_servers.playwright.*` overrides при старте app-server; topic-MCP — через
 `-c mcp_servers.<name>.*`, потому что `app-server` не принимает
-`--profile-v2`. Роль топика и флаг `/browser` нужно выставить до
+временный topic-профиль. Роль топика и флаг `/browser` нужно выставить до
 первого persistent-сообщения в топике: уже запущенный живой процесс не
 перечитывает MCP-конфиг до перезапуска worker-а (`/stop`, `/new`, `/reset`,
 `/engine`, `/persistent off/on` или idle reaper).

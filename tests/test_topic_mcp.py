@@ -294,7 +294,7 @@ class EngineRenderingTest(TopicMcpTestBase):
             for cleanup_path in cleanup_paths:
                 cleanup_path.unlink(missing_ok=True)
 
-        self.assertEqual(flags[0], "--profile-v2")
+        self.assertEqual(flags[0], "--profile")
         self.assertNotIn("manager-token", "\n".join(flags))
         self.assertEqual(mode, 0o600)
         self.assertIn("[mcp_servers.mxboard]", profile_text)
@@ -317,7 +317,7 @@ class EngineRenderingTest(TopicMcpTestBase):
             for cleanup_path in cleanup_paths:
                 cleanup_path.unlink(missing_ok=True)
 
-        self.assertEqual(flags.count("--profile-v2"), 1)
+        self.assertEqual(flags.count("--profile"), 1)
         self.assertIn("[mcp_servers.one]", profile_text)
         self.assertIn("[mcp_servers.two]", profile_text)
 
@@ -341,14 +341,14 @@ class EngineRenderingTest(TopicMcpTestBase):
             data["mcp"]["mxboard"]["headers"]["Authorization"], "Bearer agent-token",
         )
 
-    def test_persistent_codex_uses_inline_config_not_profile_v2(self) -> None:
+    def test_persistent_codex_uses_inline_config_not_profile(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = self._write(tmp, CONFIG)
             with self._env(path):
                 flags, cleanup_paths = persistent_codex_mcp_overrides(False, "manager")
 
         joined = "\n".join(flags)
-        self.assertNotIn("--profile-v2", flags)
+        self.assertNotIn("--profile", flags)
         self.assertEqual(cleanup_paths, [])
         self.assertIn("mcp_servers.mxboard.url", joined)
         self.assertIn("mcp_servers.mxboard.http_headers", joined)
@@ -358,11 +358,11 @@ class EngineRenderingTest(TopicMcpTestBase):
         global_flags, command_flags = _split_codex_global_flags([
             "-c",
             "mcp_servers.playwright.enabled=true",
-            "--profile-v2",
+            "--profile",
             "jarvis-topic-mcp-test",
         ])
 
-        self.assertEqual(global_flags, ["--profile-v2", "jarvis-topic-mcp-test"])
+        self.assertEqual(global_flags, ["--profile", "jarvis-topic-mcp-test"])
         self.assertEqual(command_flags, ["-c", "mcp_servers.playwright.enabled=true"])
 
 

@@ -108,7 +108,7 @@ def _mcp_config_overrides(
         profile = create_codex_profile(mcp_topic_role)
         if profile is not None:
             profile_name, profile_path = profile
-            flags.extend(["--profile-v2", profile_name])
+            flags.extend(["--profile", profile_name])
             cleanup_paths.append(profile_path)
 
     return flags, cleanup_paths
@@ -129,7 +129,7 @@ def _split_codex_global_flags(flags: list[str]) -> tuple[list[str], list[str]]:
     while i < len(flags):
         flag = flags[i]
         value = flags[i + 1] if i + 1 < len(flags) else None
-        if flag == "--profile-v2" and value is not None:
+        if flag == "--profile" and value is not None:
             global_flags.extend([flag, value])
             i += 2
             continue

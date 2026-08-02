@@ -251,10 +251,10 @@ def opencode_mcp_servers(role: str) -> dict[str, dict[str, Any]]:
 
 
 def create_codex_profile(role: str) -> tuple[str, Path] | None:
-    """Write a temporary Codex profile-v2 config; ``None`` if nothing to attach.
+    """Write a temporary Codex profile config; ``None`` if nothing to attach.
 
     Codex ``-c`` overrides would put credentials into process argv. A named
-    profile keeps argv clean: Jarvis passes only ``--profile-v2 <name>`` and
+    profile keeps argv clean: Jarvis passes only ``--profile <name>`` and
     deletes the generated file once Codex has loaded it.
     """
     specs = servers_for_role(role)
@@ -307,7 +307,7 @@ def create_codex_profile(role: str) -> tuple[str, Path] | None:
 
 
 def codex_inline_config_flags(role: str) -> list[str]:
-    """``-c`` flags for Codex entry points that cannot use profile-v2.
+    """``-c`` flags for Codex entry points that cannot use config profiles.
 
     Only the persistent app-server needs this; it puts credentials into argv,
     which is why ``create_codex_profile`` is preferred everywhere else.
