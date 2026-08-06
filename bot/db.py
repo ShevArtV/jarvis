@@ -402,6 +402,34 @@ def init_db() -> None:
             "CREATE INDEX IF NOT EXISTS idx_reminders_due "
             "ON reminders(enabled, next_fire_at)"
         )
+        # Состояние polling-интеграций. Сейчас его использует ActiveCollab MCP,
+        # чтобы не повторять уже доложенные Секретарю задачи и уведомления.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS integration_seen_items (
+                integration TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                item_id INTEGER NOT NULL,
+                seen_at TEXT NOT NULL,
+                PRIMARY KEY (integration, kind, item_id)
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_integration_seen_items "
+            "ON integration_seen_items(integration, kind, item_id)"
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS integration_sync_state (
+                integration TEXT NOT NULL,
+                state_key TEXT NOT NULL,
+                state_value TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (integration, state_key)
+            )
+            """
+        )
         # imap_state: UIDs уже отправленных нотисов, чтобы не дублировать.
         conn.execute(
             """

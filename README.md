@@ -540,7 +540,7 @@ Per-topic MCP — часть контракта `Engine.call_stream` (см.
 ### Jarvis Manager MCP (для агента-Менеджера)
 
 По той же схеме Jarvis регистрирует свой собственный stdio MCP-сервер,
-дающий read-only-доступ к состоянию бота (топики, лог сообщений). Сервер
+дающий доступ к состоянию бота и согласованным действиям Менеджера. Сервер
 живёт в `scripts/jarvis_mcp_server.py` и запускается тем же venv-Python'ом.
 
 Доступные tools (Этап 1):
@@ -569,6 +569,24 @@ Per-topic MCP — часть контракта `Engine.call_stream` (см.
 
 (Это не полный список — есть и write-tools: `manager_send`, `manager_set_engine`,
 `manager_create_topic` и др. См. декораторы `@mcp.tool` в `scripts/jarvis_mcp_server.py`.)
+
+### ActiveCollab
+
+Если в локальном `.env` заданы `ACTIVE_COLLAB_URL` и `ACTIVE_COLLAB_TOKEN`,
+Менеджеру доступны следующие MCP-инструменты:
+
+- `manager_activecollab_my_tasks`, `manager_activecollab_task`,
+  `manager_activecollab_stages`, `manager_activecollab_job_types` — чтение
+  задач, комментариев, стадий и типов работ;
+- `manager_activecollab_check_updates` — хранит в `bot_state.db` baseline и
+  при следующих вызовах возвращает только новые назначенные задачи и новые
+  уведомления о комментариях к ним;
+- `manager_activecollab_add_comment`, `manager_activecollab_track_time`,
+  `manager_activecollab_move_task` — внешние write-действия. Вызывать их можно
+  только после явного поручения оператора с задачей и данными действия.
+
+Стадия в этой установке ActiveCollab — это task list; `move_task` принимает её
+точное название, например `В работе` или `Можно тестировать`.
 
 Точки записи в `messages_log`: входящие пользовательские реплики
 (`direction='in'`, `kind='user_text'`) и финальные ответы бота

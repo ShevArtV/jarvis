@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
-"""Jarvis Manager MCP server — read-only tools for the Manager agent.
+"""Jarvis Manager MCP server — cross-topic and controlled external tools.
 
-Stage 1 ships two tools:
-- `manager_topics`: list every topic Jarvis knows about (sessions table).
-- `manager_inbox`: read the messages_log for one topic.
-
-The server is intentionally read-only at this stage. Create/send tools land in
-later stages once the bot grows the matching ingest plumbing.
+The server exposes Jarvis state, reminders and selected integrations to the
+Secretary/Manager. Tool descriptions explicitly mark external write actions;
+the role instructions require an explicit operator request before using them.
 
 Wired into each engine (claude/codex/opencode) by `engines/jarvis_mcp.py`.
 """
@@ -92,6 +89,91 @@ def _telegram_token() -> str:
     if not token:
         raise RuntimeError("TELEGRAM_TOKEN not found (env / .env)")
     return token
+
+
+def _activecollab_client():
+    """Build an ActiveCollab client from the bot environment without logging secrets."""
+    url = _env_or_dotenv("ACTIVE_COLLAB_URL")
+    token = _env_or_dotenv("ACTIVE_COLLAB_TOKEN")
+    if not url or not token:
+        raise RuntimeError(
+            "ActiveCollab is not configured: set ACTIVE_COLLAB_URL and "
+            "ACTIVE_COLLAB_TOKEN in Jarvis .env"
+        )
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from integrations.activecollab import ActiveCollabClient  # type: ignore
+    return ActiveCollabClient(url, token)
+
+
+def _activecollab_check_updates() -> dict[str, Any]:
+    """Fetch the user's ActiveCollab delta and persist the observed IDs."""
+    client = _activecollab_client()
+    all_tasks = client.my_tasks(include_completed=True)
+    open_tasks = [task for task in all_tasks if not task.get("is_completed")]
+    task_ids = {
+        task["id"] for task in all_tasks if isinstance(task.get("id"), int)
+    }
+    task_by_id = {
+        task["id"]: task for task in all_tasks if isinstance(task.get("id"), int)
+    }
+    comment_notifications = client.comment_notifications_for(task_ids)
+    for notification in comment_notifications:
+        task = task_by_id.get(notification.get("task_id"))
+        if task is not None:
+            notification["project_id"] = task.get("project_id")
+            notification["project_name"] = task.get("project_name")
+            notification["task_name"] = task.get("name")
+    now = datetime.utcnow().isoformat()
+
+    with _connect() as conn:
+        initialized = conn.execute(
+            "SELECT 1 FROM integration_sync_state "
+            "WHERE integration='activecollab' AND state_key='updates_initialized'"
+        ).fetchone() is not None
+
+        new_tasks: list[dict[str, Any]] = []
+        for task in open_tasks:
+            task_id = task.get("id")
+            if not isinstance(task_id, int):
+                continue
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO integration_seen_items "
+                "(integration, kind, item_id, seen_at) VALUES "
+                "('activecollab', 'task', ?, ?)",
+                (task_id, now),
+            )
+            if initialized and cur.rowcount == 1:
+                new_tasks.append(task)
+
+        new_comments: list[dict[str, Any]] = []
+        for notification in comment_notifications:
+            notification_id = notification.get("id")
+            if not isinstance(notification_id, int):
+                continue
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO integration_seen_items "
+                "(integration, kind, item_id, seen_at) VALUES "
+                "('activecollab', 'comment_notification', ?, ?)",
+                (notification_id, now),
+            )
+            if initialized and cur.rowcount == 1:
+                new_comments.append(notification)
+
+        conn.execute(
+            "INSERT INTO integration_sync_state "
+            "(integration, state_key, state_value, updated_at) VALUES "
+            "('activecollab', 'updates_initialized', '1', ?) "
+            "ON CONFLICT(integration, state_key) DO UPDATE SET "
+            "state_value=excluded.state_value, updated_at=excluded.updated_at",
+            (now,),
+        )
+
+    return {
+        "initial_check": not initialized,
+        "open_tasks": open_tasks if not initialized else [],
+        "new_tasks": new_tasks,
+        "new_comment_notifications": new_comments,
+    }
 
 
 def _default_chat_id() -> int:
@@ -269,9 +351,11 @@ def _row_to_topic(row: sqlite3.Row, last: dict[tuple[int, int], str]) -> dict[st
 mcp = FastMCP(
     name="jarvis-manager",
     instructions=(
-        "Read-only access to Jarvis bot state for the Manager agent. "
+        "Access to Jarvis bot state and controlled Manager actions. "
         "Use manager_topics to see every active topic and its cwd/engine. "
-        "Use manager_inbox to read recent user/bot messages for a topic."
+        "Use manager_inbox to read recent user/bot messages for a topic. "
+        "ActiveCollab tools marked as external writes require an explicit "
+        "operator request for the exact task and action."
     ),
 )
 
@@ -966,6 +1050,125 @@ def manager_remind_list(
             "created_at": r["created_at"],
         })
     return {"count": len(reminders), "reminders": reminders}
+
+
+@mcp.tool(
+    name="manager_activecollab_my_tasks",
+    description=(
+        "Возвращает задачи, назначенные пользователю токена ActiveCollab. "
+        "По умолчанию только незавершённые; каждая запись содержит проект и "
+        "текущую стадию (task list). Только чтение."
+    ),
+)
+def manager_activecollab_my_tasks(include_completed: bool = False) -> dict[str, Any]:
+    """List tasks assigned to the authenticated ActiveCollab user."""
+    tasks = _activecollab_client().my_tasks(include_completed=include_completed)
+    return {"count": len(tasks), "tasks": tasks}
+
+
+@mcp.tool(
+    name="manager_activecollab_task",
+    description=(
+        "Читает задачу ActiveCollab и её комментарии. Нужны project_id и task_id; "
+        "бери их из manager_activecollab_my_tasks или ссылки на задачу. Только чтение."
+    ),
+)
+def manager_activecollab_task(project_id: int, task_id: int) -> dict[str, Any]:
+    """Return one task, including its comments and subscribers."""
+    return _activecollab_client().task(project_id, task_id)
+
+
+@mcp.tool(
+    name="manager_activecollab_stages",
+    description=(
+        "Возвращает допустимые стадии задачи (task lists) проекта ActiveCollab. "
+        "Используй перед переносом, если целевая стадия не названа точно. Только чтение."
+    ),
+)
+def manager_activecollab_stages(project_id: int) -> dict[str, Any]:
+    """List the project task lists used as workflow stages."""
+    stages = _activecollab_client().stages(project_id)
+    return {"count": len(stages), "stages": stages}
+
+
+@mcp.tool(
+    name="manager_activecollab_job_types",
+    description=(
+        "Возвращает доступные типы работ ActiveCollab для трекинга времени. "
+        "Только чтение."
+    ),
+)
+def manager_activecollab_job_types() -> dict[str, Any]:
+    """List ActiveCollab job types available to the current user."""
+    job_types = _activecollab_client().job_types()
+    return {"count": len(job_types), "job_types": job_types}
+
+
+@mcp.tool(
+    name="manager_activecollab_check_updates",
+    description=(
+        "Проверяет новые незавершённые задачи пользователя и новые уведомления "
+        "о комментариях к его задачам. Запоминает уже увиденные ID в локальной "
+        "SQLite БД: первый вызов возвращает стартовую сводку, следующие — только "
+        "дельту. Этот tool предназначен для reminder-чеклиста Секретаря."
+    ),
+)
+def manager_activecollab_check_updates() -> dict[str, Any]:
+    """Return new ActiveCollab tasks/comment notifications since the last check."""
+    return _activecollab_check_updates()
+
+
+@mcp.tool(
+    name="manager_activecollab_add_comment",
+    description=(
+        "Создаёт комментарий к задаче ActiveCollab. ВНЕШНЕЕ WRITE-ДЕЙСТВИЕ: "
+        "вызывай только после явного одобрения оператора с конкретной задачей "
+        "и текстом комментария."
+    ),
+)
+def manager_activecollab_add_comment(task_id: int, body: str) -> dict[str, Any]:
+    """Post an explicitly approved comment to an ActiveCollab task."""
+    return _activecollab_client().add_comment(task_id, body)
+
+
+@mcp.tool(
+    name="manager_activecollab_track_time",
+    description=(
+        "Добавляет учёт времени к задаче ActiveCollab. ВНЕШНЕЕ WRITE-ДЕЙСТВИЕ: "
+        "вызывай только после явного одобрения оператора с задачей, длительностью, "
+        "датой и типом работы. value: например '1:30' или '1.5'; record_date: YYYY-MM-DD."
+    ),
+)
+def manager_activecollab_track_time(
+    project_id: int,
+    task_id: int,
+    value: str,
+    record_date: str,
+    job_type_id: int,
+    summary: str | None = None,
+    billable_status: int | None = None,
+) -> dict[str, Any]:
+    """Create an explicitly approved ActiveCollab time record."""
+    return _activecollab_client().track_time(
+        project_id, task_id, value, record_date, job_type_id, summary, billable_status,
+    )
+
+
+@mcp.tool(
+    name="manager_activecollab_move_task",
+    description=(
+        "Переносит задачу ActiveCollab на стадию по её точному названию, например "
+        "'В работе' или 'Можно тестировать'. ВНЕШНЕЕ WRITE-ДЕЙСТВИЕ: вызывай "
+        "только после явного одобрения оператора с конкретной задачей и стадией."
+    ),
+)
+def manager_activecollab_move_task(
+    project_id: int,
+    task_id: int,
+    stage_name: str,
+) -> dict[str, Any]:
+    """Move a task to an explicitly approved workflow stage."""
+    return _activecollab_client().move_to_stage_name(project_id, task_id, stage_name)
 
 
 @mcp.tool(
