@@ -150,6 +150,14 @@ spawn_procs: dict[tuple[int, int, str], asyncio.subprocess.Process] = {}
 persistent_workers: dict[tuple[int, int], object] = {}
 
 
+# Создание persistent-процесса тоже требует сериализации. В отличие от обычных
+# turns, /persistent намеренно обходит chat_locks, чтобы новое сообщение можно
+# было отправить через turn/steer. Без отдельного лока два одновременных входа
+# могут оба увидеть пустой persistent_workers и открыть два writer'а одного
+# Codex thread.
+persistent_start_locks: dict[tuple[int, int], asyncio.Lock] = {}
+
+
 # Простаивающий живой процесс не экономит токены (сессия и так резюмируется
 # с диска) — только задержку на старте. Держать его вечно смысла нет.
 PERSISTENT_IDLE_MINUTES = int_env("JARVIS_PERSISTENT_IDLE_MINUTES", 20)
@@ -160,6 +168,15 @@ def _lock_for(key: tuple[int, int]) -> asyncio.Lock:
     if lock is None:
         lock = asyncio.Lock()
         chat_locks[key] = lock
+    return lock
+
+
+def _persistent_start_lock_for(key: tuple[int, int]) -> asyncio.Lock:
+    """Return the per-topic lock used only while creating a persistent worker."""
+    lock = persistent_start_locks.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        persistent_start_locks[key] = lock
     return lock
 
 

@@ -23,7 +23,7 @@ from bot.handlers.toggles import _ask_done_confirmation_if_needed, _warn_large_c
 from bot.llm import _build_reply_context_prefix, build_system_prefix, call_llm_stream
 from bot.sessions import _parse_transfer_marker, _persistent_column_for_engine, build_context_handoff, clear_pending_summary, ensure_active_session, get_mcp_playwright, get_model, get_pending_summary, get_persistent_for_engine, get_session, update_session_id
 from bot.settings import CLAUDE_CWD, MEDIA_DIR
-from bot.topics import _key, _kill_persistent_worker, _lock_for, load_message_context, pending_queue, persistent_workers, resolve_topic_role
+from bot.topics import _key, _kill_persistent_worker, _lock_for, _persistent_start_lock_for, load_message_context, pending_queue, persistent_workers, resolve_topic_role
 from engines import engine_model_scope, get_engine_by_name
 from engines.claude_engine import CLAUDE_TIMEOUT, start_persistent as start_persistent_claude
 from engines.codex_engine import CODEX_TIMEOUT
@@ -105,71 +105,89 @@ async def _handle_persistent_message(
         worker = None
 
     pending_summary_delivered = False
+    created_worker = False
     if worker is None:
-        session_id, cwd, engine_name, opened_new = ensure_active_session(*key)
-        if not get_persistent_for_engine(*key, engine_name):
-            # /engine сменили мимо /persistent — тихий fallback на обычный путь.
-            await _process_prompt_locked(chat, thread_id, key, user_text, meta_block)
-            return
-        if _persistent_column_for_engine(engine_name) is None:
-            await _process_prompt_locked(chat, thread_id, key, user_text, meta_block)
-            return
-        model = get_model(*key)
+        # /persistent bypasses the normal topic lock to allow steering an
+        # active turn. Serialize only worker creation, then re-check the
+        # registry: another caller may have finished thread/resume while this
+        # one was waiting.
+        async with _persistent_start_lock_for(key):
+            worker = persistent_workers.get(key)
+            if worker is not None and (worker.dead or worker.proc.returncode is not None):
+                persistent_workers.pop(key, None)
+                worker = None
 
-        if opened_new:
-            try:
-                await send_to_topic(
-                    chat, thread_id,
-                    f"🆕 Новый сеанс ({engine_name}). Контекст прошлых разговоров "
-                    "не загружен — попроси поднять историю, если нужно.",
-                )
-            except Exception:
-                logger.exception("failed to send new-session notice key=%s", key)
+            if worker is None:
+                session_id, cwd, engine_name, opened_new = ensure_active_session(*key)
+                if not get_persistent_for_engine(*key, engine_name):
+                    # /engine сменили мимо /persistent — тихий fallback на обычный путь.
+                    await _process_prompt_locked(chat, thread_id, key, user_text, meta_block)
+                    return
+                if _persistent_column_for_engine(engine_name) is None:
+                    await _process_prompt_locked(chat, thread_id, key, user_text, meta_block)
+                    return
+                model = get_model(*key)
 
-        pending_raw = get_pending_summary(*key)
-        pending_summary = None
-        if pending_raw:
-            pending_summary = await _resolve_pending_summary(key, pending_raw)
+                if opened_new:
+                    try:
+                        await send_to_topic(
+                            chat, thread_id,
+                            f"🆕 Новый сеанс ({engine_name}). Контекст прошлых разговоров "
+                            "не загружен — попроси поднять историю, если нужно.",
+                        )
+                    except Exception:
+                        logger.exception("failed to send new-session notice key=%s", key)
 
-        mcp_playwright = get_mcp_playwright(*key)
-        mcp_topic_role = resolve_topic_role(key)
-        effective_cwd = cwd or CLAUDE_CWD
-        system_prefix = build_system_prefix(effective_cwd, mcp_playwright, key=key)
+                pending_raw = get_pending_summary(*key)
+                pending_summary = None
+                if pending_raw:
+                    pending_summary = await _resolve_pending_summary(key, pending_raw)
 
-        try:
-            if engine_name == "claude":
-                worker = await start_persistent_claude(
-                    key=key, session_id=session_id, cwd=effective_cwd, model=model,
-                    system_prefix=system_prefix, mcp_playwright=mcp_playwright,
-                    mcp_topic_role=mcp_topic_role,
-                )
-            elif engine_name == "codex":
-                worker = await start_persistent_codex(
-                    key=key, session_id=session_id, cwd=effective_cwd, model=model,
-                    system_prefix=system_prefix, mcp_playwright=mcp_playwright,
-                    mcp_topic_role=mcp_topic_role,
-                )
-                if worker.session_id and worker.session_id != session_id:
-                    update_session_id(key[0], key[1], "codex", worker.session_id)
-            else:
-                raise RuntimeError(f"persistent is not supported for {engine_name}")
-        except Exception as exc:
-            logger.exception("persistent worker spawn failed key=%s", key)
-            await send_to_topic(
-                chat, thread_id,
-                f"⚠️ Не удалось поднять живой процесс {engine_name}: {exc}",
-            )
-            return
-        persistent_workers[key] = worker
+                mcp_playwright = get_mcp_playwright(*key)
+                mcp_topic_role = resolve_topic_role(key)
+                effective_cwd = cwd or CLAUDE_CWD
+                system_prefix = build_system_prefix(effective_cwd, mcp_playwright, key=key)
 
-        prompt_parts: list[str] = []
-        if pending_summary:
-            prompt_parts.append("[Контекст:]\n" + pending_summary)
-            pending_summary_delivered = True
-        if meta_block:
-            prompt_parts.append(meta_block)
-        prompt_parts.append("---\n\nСообщение пользователя:\n" + user_text)
-        prompt = "\n\n".join(prompt_parts)
+                try:
+                    if engine_name == "claude":
+                        worker = await start_persistent_claude(
+                            key=key, session_id=session_id, cwd=effective_cwd, model=model,
+                            system_prefix=system_prefix, mcp_playwright=mcp_playwright,
+                            mcp_topic_role=mcp_topic_role,
+                        )
+                    elif engine_name == "codex":
+                        worker = await start_persistent_codex(
+                            key=key, session_id=session_id, cwd=effective_cwd, model=model,
+                            system_prefix=system_prefix, mcp_playwright=mcp_playwright,
+                            mcp_topic_role=mcp_topic_role,
+                        )
+                        if worker.session_id and worker.session_id != session_id:
+                            update_session_id(key[0], key[1], "codex", worker.session_id)
+                    else:
+                        raise RuntimeError(f"persistent is not supported for {engine_name}")
+                except Exception as exc:
+                    logger.exception("persistent worker spawn failed key=%s", key)
+                    await send_to_topic(
+                        chat, thread_id,
+                        f"⚠️ Не удалось поднять живой процесс {engine_name}: {exc}",
+                    )
+                    return
+                persistent_workers[key] = worker
+                created_worker = True
+
+                prompt_parts: list[str] = []
+                if pending_summary:
+                    prompt_parts.append("[Контекст:]\n" + pending_summary)
+                    pending_summary_delivered = True
+                if meta_block:
+                    prompt_parts.append(meta_block)
+                prompt_parts.append("---\n\nСообщение пользователя:\n" + user_text)
+                prompt = "\n\n".join(prompt_parts)
+
+        if not created_worker:
+            prompt_parts = [meta_block] if meta_block else []
+            prompt_parts.append("---\n\nСообщение пользователя:\n" + user_text)
+            prompt = "\n\n".join(prompt_parts)
     else:
         prompt_parts = [meta_block] if meta_block else []
         prompt_parts.append("---\n\nСообщение пользователя:\n" + user_text)
