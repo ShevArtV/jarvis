@@ -756,6 +756,23 @@ def manager_create_topic(
     }
 
 
+_JOBS_ORIGIN_COLS: bool | None = None
+
+
+def _jobs_has_origin_columns(conn) -> bool:
+    """Есть ли в jobs колонки origin_* (миграция bot/db.py).
+
+    Сервер и бот — разные процессы: если MCP поднялся на БД, где миграция ещё
+    не отработала, INSERT с origin_* уронил бы manager_send целиком. Тогда
+    пишем по-старому, а нотис уйдёт по роли.
+    """
+    global _JOBS_ORIGIN_COLS
+    if _JOBS_ORIGIN_COLS is None:
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(jobs)").fetchall()]
+        _JOBS_ORIGIN_COLS = "origin_chat_id" in cols and "origin_thread_id" in cols
+    return _JOBS_ORIGIN_COLS
+
+
 @mcp.tool(
     name="manager_send",
     description=(
@@ -774,7 +791,13 @@ def manager_create_topic(
         "when publishing formatted content (news digest and the like), so links "
         "hide behind words instead of showing raw URLs. Only with as_user=False. "
         "If Telegram rejects the markup, the message is re-sent as plain text "
-        "rather than lost."
+        "rather than lost.\n"
+        "ALWAYS pass origin_thread_id=<your own thread_id> (it is stated in your "
+        "[SYSTEM:] block as «Твой топик: chat_id=…, thread_id=…») when "
+        "as_user=True. The bot reports the answer, the heartbeat warnings and "
+        "the interrupt notice for that job back to this topic. Omit it and the "
+        "notice falls back to the Teamlead topic, which then wakes up and "
+        "interferes with a task that is not his."
     ),
 )
 def manager_send(
@@ -784,6 +807,8 @@ def manager_send(
     as_user: bool = True,
     delay_seconds: int = 0,
     parse_mode: str | None = None,
+    origin_thread_id: int | None = None,
+    origin_chat_id: int | None = None,
 ) -> dict[str, Any]:
     """Queue or deliver a message into the topic."""
     text = text.strip()
@@ -794,6 +819,10 @@ def manager_send(
     if delay_seconds > 0 and not as_user:
         raise ValueError("delay_seconds only makes sense with as_user=True")
     target_chat_id = chat_id if chat_id is not None else _default_chat_id()
+    # Топик-инициатор: сюда бот вернёт нотис об ответе на этот job. Сервер
+    # общий на все топики и вызывающего сам не знает — его передаёт агент.
+    if origin_thread_id is not None and origin_chat_id is None:
+        origin_chat_id = _default_chat_id()
 
     with _connect() as conn:
         row = conn.execute(
@@ -828,12 +857,28 @@ def manager_send(
                     (now, target_chat_id, thread_id, now),
                 ).fetchall()
                 cancelled_ids = [r[0] for r in cancelled]
-            cur = conn.execute(
-                "INSERT INTO jobs(chat_id, thread_id, text, source, status, "
-                "created_at, not_before) "
-                "VALUES (?, ?, ?, 'manager', 'pending', ?, ?)",
-                (target_chat_id, thread_id, text, now, not_before),
-            )
+            if _jobs_has_origin_columns(conn):
+                cur = conn.execute(
+                    "INSERT INTO jobs(chat_id, thread_id, text, source, status, "
+                    "created_at, not_before, origin_chat_id, origin_thread_id) "
+                    "VALUES (?, ?, ?, 'manager', 'pending', ?, ?, ?, ?)",
+                    (
+                        target_chat_id, thread_id, text, now, not_before,
+                        origin_chat_id if origin_thread_id is not None else None,
+                        origin_thread_id,
+                    ),
+                )
+            else:
+                logger.warning(
+                    "jobs.origin_* missing — restart the bot to migrate; "
+                    "notice for this job falls back to the service role"
+                )
+                cur = conn.execute(
+                    "INSERT INTO jobs(chat_id, thread_id, text, source, status, "
+                    "created_at, not_before) "
+                    "VALUES (?, ?, ?, 'manager', 'pending', ?, ?)",
+                    (target_chat_id, thread_id, text, now, not_before),
+                )
             job_id = cur.lastrowid
             conn.execute(
                 "INSERT INTO messages_log(chat_id, thread_id, direction, kind, "
@@ -856,6 +901,8 @@ def manager_send(
             "cancelled_scheduled": cancelled_ids,
             "engine": row["engine"],
             "cwd": row["cwd"],
+            "origin_chat_id": origin_chat_id if origin_thread_id is not None else None,
+            "origin_thread_id": origin_thread_id,
         }
 
     # as_user=False — just deliver a bot message, no LLM trigger.

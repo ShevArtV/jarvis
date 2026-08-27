@@ -334,6 +334,16 @@ def init_db() -> None:
             conn.execute(
                 "ALTER TABLE jobs ADD COLUMN cancel_requested TEXT"
             )
+        # Idempotent миграция: origin_* — топик, который делегировал задачу
+        # (manager_send его передаёт). Нужен, чтобы safety/heartbeat-нотис об
+        # ответе уходил инициатору, а не константному Тимлиду: до этого любой
+        # job будил топик Тимлида, и тот вклинивался в чужую задачу.
+        # NULL = инициатор неизвестен → fallback на служебную роль teamlead.
+        cols_now = [r[1] for r in conn.execute("PRAGMA table_info(jobs)").fetchall()]
+        if cols_now and "origin_chat_id" not in cols_now:
+            logger.info("adding 'origin_chat_id'/'origin_thread_id' columns to jobs")
+            conn.execute("ALTER TABLE jobs ADD COLUMN origin_chat_id INTEGER")
+            conn.execute("ALTER TABLE jobs ADD COLUMN origin_thread_id INTEGER")
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_jobs_pending "
             "ON jobs(status, not_before, created_at)"

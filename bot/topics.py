@@ -84,6 +84,22 @@ def resolve_service_topic(role: str) -> TopicKey | None:
     return None
 
 
+def resolve_job_notice_target(
+    origin_chat_id: int | None,
+    origin_thread_id: int | None,
+) -> TopicKey | None:
+    """Кому адресован нотис по job'у: топику-инициатору делегирования.
+
+    origin_* приходят из строки jobs (их пишет manager_send). Пусты у старых
+    job и у self_notice — тогда fallback на Тимлида, как было до разделения
+    адресатов. Без инициатора любой job будил Тимлида, и тот вклинивался в
+    чужую задачу — вплоть до параллельной сессии в одном топике.
+    """
+    if origin_chat_id is None or origin_thread_id is None:
+        return resolve_teamlead_topic()
+    return origin_chat_id, origin_thread_id
+
+
 def resolve_topic_role(key: TopicKey) -> str:
     """Role of a Jarvis topic for external per-topic MCP credentials.
 

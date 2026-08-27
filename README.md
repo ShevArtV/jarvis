@@ -152,7 +152,9 @@ claude -p "hello"   # проверка, что авторизация работ
 - `JARVIS_TEAMLEAD_CHAT_ID` / `JARVIS_TEAMLEAD_THREAD_ID` — топик Тимлида:
   инженерные job/heartbeat notices и mxBoard lifecycle. Если не заданы,
   инженерные notices падают обратно в Секретаря, чтобы уведомления не терялись
-  до миграции.
+  до миграции. Это **fallback-адресат**: нотис по job уходит топику, который
+  job делегировал (см. «Кому уходит нотис по job»), и в Тимлида — только когда
+  инициатор неизвестен.
 - `JARVIS_LOG_TTL_DAYS` — сколько дней хранить записи `messages_log`,
   завершённые (`done`/`failed`/`cancelled`) `jobs` и завершённые
   `agent_triggers`. Дефолт `30`. `0`, `none`, `off`, `false`, `no` —
@@ -168,8 +170,8 @@ claude -p "hello"   # проверка, что авторизация работ
   / heartbeat jobs.
 - `JARVIS_HEARTBEAT_INTERVAL` — частота сканирования in_progress job'ов
   (секунды). Дефолт `300` (5 мин), минимум `30`.
-- `JARVIS_HEARTBEAT_WARN` — после скольких секунд работы job'а слать в
-  топик Менеджера нотис «работает долго». Дефолт `900` (15 мин).
+- `JARVIS_HEARTBEAT_WARN` — после скольких секунд работы job'а слать
+  инициатору job'а нотис «работает долго». Дефолт `900` (15 мин).
 - `JARVIS_HEARTBEAT_FAIL` — после скольких секунд принудительно помечать
   job как failed. Subprocess сам по себе не убивается — для реального
   прерывания агент Менеджер использует `manager_interrupt`. Дефолт
@@ -569,6 +571,23 @@ Per-topic MCP — часть контракта `Engine.call_stream` (см.
 
 (Это не полный список — есть и write-tools: `manager_send`, `manager_set_engine`,
 `manager_create_topic` и др. См. декораторы `@mcp.tool` в `scripts/jarvis_mcp_server.py`.)
+
+#### Кому уходит нотис по job
+
+`manager_send(as_user=True)` ставит job в очередь топика-исполнителя. Когда job
+отвечает (а также при `manager_interrupt` и при heartbeat-предупреждениях), бот
+шлёт короткий нотис «есть ответ» и будит адресата AUTO-KICK'ом.
+
+Адресат — **топик, который job делегировал**: `manager_send` пишет его в
+`jobs.origin_chat_id` / `jobs.origin_thread_id`. Сервер общий на все топики и
+вызывающего сам не знает, поэтому агент обязан передавать
+`origin_thread_id=<свой thread_id>` (он есть в его `[SYSTEM:]`-блоке). Если
+`origin_*` пусты — нотис уходит по роли `teamlead`, как раньше.
+
+Зачем: до 27.08.2026 адресат был зашит константой, и job, делегированный
+Секретарю, будил ещё и Тимлида. Тот вклинивался в чужую задачу и слал в тот же
+топик свой `manager_send` — две сессии на один топик, `thread-store conflict`
+у codex и два упавших job'а.
 
 ### ActiveCollab
 

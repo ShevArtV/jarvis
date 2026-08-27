@@ -46,6 +46,7 @@ async def _send_manager_notice(
     text: str,
     kind: str = "job_notification",
     target_role: str = "secretary",
+    target: tuple[int, int] | None = None,
 ) -> int | None:
     """Шлёт plain-сообщение в служебный топик, логирует и будит его.
 
@@ -58,8 +59,13 @@ async def _send_manager_notice(
     target_role='secretary' — коммуникационные уведомления/reminders.
     target_role='teamlead' — инженерные job/heartbeat/mxBoard-notices.
     Старое имя функции сохраняется как compatibility API.
+
+    target=(chat_id, thread_id) перебивает роль: нотис по job уходит топику,
+    который его делегировал (jobs.origin_*), а роль остаётся fallback'ом на
+    случай, когда инициатор неизвестен. Без этого любой job будил Тимлида —
+    он вклинивался в чужую задачу и ронял сессию исполнителя.
     """
-    target = resolve_service_topic(target_role)
+    target = target or resolve_service_topic(target_role)
     if not target:
         return None
     chat_id, thread_id = target

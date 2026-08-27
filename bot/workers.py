@@ -39,6 +39,7 @@ from bot.topics import (
     _kill_persistent_worker,
     active_procs,
     persistent_workers,
+    resolve_job_notice_target,
     resolve_secretary_topic,
     resolve_teamlead_topic,
 )
@@ -316,13 +317,15 @@ async def health_worker(app: Application) -> None:
             # WARN: in_progress + claimed_at < warn_thr + ещё не уведомляли.
             with _db() as conn:
                 warn_rows = conn.execute(
-                    "SELECT id, chat_id, thread_id, claimed_at FROM jobs "
+                    "SELECT id, chat_id, thread_id, claimed_at, origin_chat_id, "
+                    "origin_thread_id FROM jobs "
                     "WHERE status='in_progress' AND claimed_at IS NOT NULL "
                     "AND claimed_at < ? AND heartbeat_notified_at IS NULL",
                     (warn_thr,),
                 ).fetchall()
             for r in warn_rows:
                 jid, jchat, jthread, jclaimed = r[0], r[1], r[2], r[3]
+                jtarget = resolve_job_notice_target(r[4], r[5])
                 try:
                     claimed_dt = datetime.fromisoformat(jclaimed)
                     mins = int((now_dt - claimed_dt).total_seconds() / 60)
@@ -346,6 +349,7 @@ async def health_worker(app: Application) -> None:
                 )
                 await _send_manager_notice(
                     app, text, kind="job_heartbeat_warn", target_role="teamlead",
+                    target=jtarget,
                 )
                 with _db() as conn:
                     conn.execute(
@@ -356,13 +360,15 @@ async def health_worker(app: Application) -> None:
             # FAIL: in_progress + claimed_at < fail_thr → помечаем failed.
             with _db() as conn:
                 fail_rows = conn.execute(
-                    "SELECT id, chat_id, thread_id FROM jobs "
+                    "SELECT id, chat_id, thread_id, origin_chat_id, "
+                    "origin_thread_id FROM jobs "
                     "WHERE status='in_progress' AND claimed_at IS NOT NULL "
                     "AND claimed_at < ?",
                     (fail_thr,),
                 ).fetchall()
             for r in fail_rows:
                 jid, jchat, jthread = r[0], r[1], r[2]
+                jtarget = resolve_job_notice_target(r[3], r[4])
                 with _db() as conn:
                     conn.execute(
                         "UPDATE jobs SET status='failed', "
@@ -380,6 +386,7 @@ async def health_worker(app: Application) -> None:
                 )
                 await _send_manager_notice(
                     app, text, kind="job_heartbeat_fail", target_role="teamlead",
+                    target=jtarget,
                 )
 
             await asyncio.sleep(interval)
