@@ -40,6 +40,9 @@ KNOWLEDGE_BASE_README = KNOWLEDGE_BASE / "README.md"
 # Куда писать. Можно переопределить через env (например, CODEX_HOME другой).
 DEFAULT_TARGET = HOME / ".codex" / "AGENTS.md"
 
+# Сколько Codex CLI читает из AGENTS.md; остальное отбрасывает без предупреждения.
+CODEX_LIMIT = 32 * 1024
+
 # Синтаксис импорта Claude: строки вида `@~/path/to/file.md`.
 IMPORT_RE = re.compile(r"^\s*@(~?/[^\s]+\.md)\s*$", re.MULTILINE)
 
@@ -145,6 +148,27 @@ def _build_index(dir_path: Path, label: str) -> str:
     return f"### {label}\n\n{body}\n"
 
 
+def _strip_kb_index(readme: str) -> str:
+    """Выбрасывает из README базы знаний раздел «Индекс».
+
+    Codex читает ОДИН файл и режет его по лимиту (~32 КБ): всё, что не влезло,
+    молча пропадает. Индекс — это перечень файлов БЗ на десятки килобайт, а Codex
+    работает в самой БЗ и видит её каталог сам. Правила читаются раньше перечня,
+    поэтому из копии выпадает перечень, а не они.
+    """
+    m = re.search(r"(?m)^## Индекс\s*$", readme)
+    if not m:
+        return readme
+    tail = re.search(r"(?m)^## (?!Индекс)", readme[m.end():])
+    rest = readme[m.end():][tail.start():] if tail else ""
+    return (readme[:m.start()]
+            + "## Индекс\n\n"
+              "Перечень файлов не копируется: он большой, а Codex работает внутри\n"
+              "`~/projects/knowledge-base/` и видит каталог сам. Полный индекс — в\n"
+              "`~/projects/knowledge-base/README.md`.\n\n"
+            + rest)
+
+
 def _build_memory_section() -> str:
     """Содержимое ВСЕХ memory/*.md + их порядковый индекс."""
     if not MEMORY_DIR.is_dir():
@@ -204,7 +228,15 @@ def build_agents_md() -> str:
     )
 
     agents_body = _read(KNOWLEDGE_BASE_AGENTS)
-    if agents_body:
+    already = agents_body and agents_body[:400] in "\n".join(lines)
+    if already:
+        # CLAUDE.md подключает AGENTS.md через @-импорт, и раздел 1 его уже раскрыл.
+        # Второй экземпляр стоил 11.6 КБ из 69 КБ файла при лимите Codex 32 КБ —
+        # то есть выталкивал за обрез ровно те правила, ради которых файл и собран.
+        lines.append("### knowledge-base/AGENTS.md\n")
+        lines.append("Содержимое уже приведено в разделе 1 (раскрытый `@`-импорт), "
+                     "здесь не повторяется.\n")
+    elif agents_body:
         lines.append("### knowledge-base/AGENTS.md\n")
         lines.append(agents_body.rstrip() + "\n")
     else:
@@ -213,7 +245,7 @@ def build_agents_md() -> str:
     readme_body = _read(KNOWLEDGE_BASE_README)
     if readme_body:
         lines.append("\n### knowledge-base/README.md\n")
-        lines.append(readme_body.rstrip() + "\n")
+        lines.append(_strip_kb_index(readme_body).rstrip() + "\n")
     else:
         lines.append(f"\n### knowledge-base/README.md\n\n(не найден {KNOWLEDGE_BASE_README})\n")
 
@@ -226,8 +258,17 @@ def main() -> int:
 
     content = build_agents_md()
     target.write_text(content, encoding="utf-8")
-    size_kb = len(content.encode("utf-8")) / 1024
-    print(f"[sync_codex_knowledge] wrote {target} ({size_kb:.1f} KB)")
+    size = len(content.encode("utf-8"))
+    print(f"[sync_codex_knowledge] wrote {target} ({size / 1024:.1f} KB)")
+    # Codex обрезает свой AGENTS.md по лимиту молча: агент просто не знает правил
+    # из хвоста и ведёт себя так, будто их не писали. Пусть это будет видно.
+    if size > CODEX_LIMIT:
+        print(
+            f"[sync_codex_knowledge] ⚠️ {size} Б при лимите Codex {CODEX_LIMIT} Б — "
+            f"хвост на {size - CODEX_LIMIT} Б будет молча отрезан. Сокращать источники: "
+            f"{CLAUDE_MD}, {KNOWLEDGE_BASE_AGENTS}, {KNOWLEDGE_BASE_README}.",
+            file=sys.stderr,
+        )
     return 0
 
 
