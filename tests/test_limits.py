@@ -282,6 +282,38 @@ class FormatLimitsBlockTest(unittest.TestCase):
         self.assertIn("сброс уже наступил", body)
         self.assertIn("лимиты подписки opencode не отслеживаются", body)
 
+    def test_countdown_uses_russian_plurals(self) -> None:
+        from engines.limits import _format_countdown
+
+        cases = {
+            1 * 86400 + 1 * 3600 + 1 * 60: "1 день 1 час 1 минуту",
+            2 * 86400 + 3 * 3600 + 22 * 60: "2 дня 3 часа 22 минуты",
+            5 * 86400 + 11 * 3600 + 15 * 60: "5 дней 11 часов 15 минут",
+            11 * 86400: "11 дней",
+            2 * 3600: "2 часа",
+            30: "менее минуты",
+        }
+        for seconds, expected in cases.items():
+            with self.subTest(seconds=seconds):
+                self.assertEqual(_format_countdown(seconds), expected)
+
+    def test_reset_line_contains_countdown(self) -> None:
+        now = datetime(2026, 9, 5, 13, 0, 0, tzinfo=timezone.utc)
+        items = [
+            EngineLimits(
+                engine="claude",
+                windows=[
+                    LimitWindow(
+                        name="5 часов",
+                        used_percent=21,
+                        resets_at=now + timedelta(days=1, hours=2, minutes=5),
+                    )
+                ],
+            )
+        ]
+        body = format_limits_block(items, now=now)
+        self.assertIn("(через 1 день 2 часа 5 минут)", body)
+
     def test_shows_remaining_not_spent(self) -> None:
         now = datetime(2026, 9, 5, 13, 0, 0, tzinfo=timezone.utc)
         items = [

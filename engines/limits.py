@@ -479,6 +479,34 @@ def _format_delta(delta_seconds: float) -> str:
     return f"{days} д"
 
 
+def _plural(number: int, one: str, few: str, many: str) -> str:
+    """Русское склонение: 1 день / 2 дня / 5 дней. 11–14 — всегда «дней»."""
+    if 11 <= number % 100 <= 14:
+        return many
+    last = number % 10
+    if last == 1:
+        return one
+    if 2 <= last <= 4:
+        return few
+    return many
+
+
+def _format_countdown(delta_seconds: float) -> str:
+    """«2 дня 5 часов 13 минут» — нулевые единицы опускаются, но если до сброса
+    меньше минуты, строка не должна выйти пустой."""
+    total_minutes = int(delta_seconds // 60)
+    days, rem = divmod(total_minutes, 1440)
+    hours, minutes = divmod(rem, 60)
+    parts: list[str] = []
+    if days:
+        parts.append(f"{days} {_plural(days, 'день', 'дня', 'дней')}")
+    if hours:
+        parts.append(f"{hours} {_plural(hours, 'час', 'часа', 'часов')}")
+    if minutes:
+        parts.append(f"{minutes} {_plural(minutes, 'минуту', 'минуты', 'минут')}")
+    return " ".join(parts) if parts else "менее минуты"
+
+
 def _format_window_line(window: LimitWindow, now: datetime) -> str:
     """Строка вида «• 5 часов — осталось 69%, сброс 05.09 19:00».
 
@@ -491,10 +519,14 @@ def _format_window_line(window: LimitWindow, now: datetime) -> str:
     line = f"• {window.name} — {left}"
     if window.resets_at is not None:
         local = window.resets_at.astimezone()
-        if (window.resets_at - now).total_seconds() <= 0:
+        delta = (window.resets_at - now).total_seconds()
+        if delta <= 0:
             line += ", сброс уже наступил"
         else:
-            line += f", сброс {local.strftime('%d.%m %H:%M')}"
+            line += (
+                f", сброс {local.strftime('%d.%m %H:%M')}"
+                f" (через {_format_countdown(delta)})"
+            )
     if window.note:
         line += f" ({window.note})"
     return line
