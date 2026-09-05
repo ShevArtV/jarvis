@@ -156,27 +156,48 @@ def init_db() -> None:
                     "ALTER TABLE sessions ADD COLUMN mcp_playwright INTEGER NOT NULL DEFAULT 0"
                 )
             # Idempotent миграция: persistent_claude — per-topic флаг «живой
-            # процесс claude». 0 = off (дефолт): сообщение на сообщение —
-            # отдельный subprocess. 1 = on: один subprocess на сеанс
+            # процесс claude». 1 = on (дефолт): один subprocess на сеанс
             # (--input-format stream-json), сообщение во время активного хода
-            # дописывается в его stdin вместо ожидания очереди. Команда
-            # /persistent тоглит флаг.
+            # дописывается в его stdin вместо ожидания очереди. 0 = off,
+            # выставляется только явным /persistent off. Команда /persistent
+            # тоглит флаг.
             cols_now = [r[1] for r in conn.execute("PRAGMA table_info(sessions)").fetchall()]
             if cols_now and "persistent_claude" not in cols_now:
                 _backup_db_once()
-                logger.info("adding 'persistent_claude' column to sessions (default=0)")
+                logger.info("adding 'persistent_claude' column to sessions (default=1)")
                 conn.execute(
-                    "ALTER TABLE sessions ADD COLUMN persistent_claude INTEGER NOT NULL DEFAULT 0"
+                    "ALTER TABLE sessions ADD COLUMN persistent_claude INTEGER NOT NULL DEFAULT 1"
                 )
             # Idempotent migration: persistent_codex — per-topic flag for a live
             # Codex app-server. Kept separate from persistent_claude to avoid a
             # risky state refactor and preserve existing Claude behavior.
+            # Default is on (1); explicit /persistent off sets 0.
             cols_now = [r[1] for r in conn.execute("PRAGMA table_info(sessions)").fetchall()]
             if cols_now and "persistent_codex" not in cols_now:
                 _backup_db_once()
-                logger.info("adding 'persistent_codex' column to sessions (default=0)")
+                logger.info("adding 'persistent_codex' column to sessions (default=1)")
                 conn.execute(
-                    "ALTER TABLE sessions ADD COLUMN persistent_codex INTEGER NOT NULL DEFAULT 0"
+                    "ALTER TABLE sessions ADD COLUMN persistent_codex INTEGER NOT NULL DEFAULT 1"
+                )
+            # Idempotent миграция: persistent_default_migrated — одноразовый
+            # бэкфилл persistent_claude/persistent_codex в 1 для СУЩЕСТВУЮЩИХ
+            # строк (решение оператора 2026-09-05: включить persistent всем
+            # топикам, кто его поддерживает). Маркер-колонка нужна, чтобы
+            # бэкфилл не повторялся на каждом рестарте бота и не сбрасывал
+            # топики, которые оператор явно выключил командой /persistent off
+            # уже ПОСЛЕ этой миграции.
+            cols_now = [r[1] for r in conn.execute("PRAGMA table_info(sessions)").fetchall()]
+            if cols_now and "persistent_default_migrated" not in cols_now:
+                _backup_db_once()
+                logger.info(
+                    "backfilling persistent_claude/persistent_codex=1 for existing sessions rows"
+                )
+                conn.execute(
+                    "UPDATE sessions SET persistent_claude = 1, persistent_codex = 1"
+                )
+                conn.execute(
+                    "ALTER TABLE sessions ADD COLUMN persistent_default_migrated "
+                    "INTEGER NOT NULL DEFAULT 1"
                 )
             # Idempotent миграция: autocompact_enabled — легаси, автокомпакт
             # убран вместе с переходом на сеансы. Колонку не используем и не
