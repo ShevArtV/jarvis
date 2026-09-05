@@ -14,7 +14,7 @@ from telegram.ext import ContextTypes
 
 import asyncio
 import os
-from bot.formatting import _html_escape
+from bot.formatting import _html_escape, md_to_html
 from bot.sessions import _persistent_column_for_engine, _session_state_line, clear_cwd, close_session, get_actual_model, get_mcp_playwright, get_model, get_persistent_for_engine, get_session, reset_session, set_cwd, touch_session
 from bot.settings import CLAUDE_CWD, DEFAULT_ENGINE_NAME, SESSION_IDLE_MINUTES
 from bot.topics import _key, _kill_persistent_worker, active_procs, persistent_workers, spawn_procs
@@ -194,9 +194,12 @@ async def cmd_tokens(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 async def cmd_usage(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    body = format_limits_block(all_limits())
+    # all_limits() ходит в сеть за свежими цифрами — держать на этом event loop
+    # бота нельзя, иначе на время запроса встают все остальные топики.
+    items = await asyncio.to_thread(all_limits)
+    body = format_limits_block(items)
     body += "\n\nКонтекст текущей сессии: /tokens"
-    await update.message.reply_text("<pre>" + _html_escape(body) + "</pre>", parse_mode=ParseMode.HTML)
+    await update.message.reply_text(md_to_html(body), parse_mode=ParseMode.HTML)
 
 
 async def cmd_close(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

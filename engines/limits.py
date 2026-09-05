@@ -1,4 +1,10 @@
-"""Best-effort чтение остатка лимитов подписки claude/codex/opencode.
+"""Остаток лимитов подписки claude/codex/opencode.
+
+Цифры берутся там же, где их берут сами CLI для своих ``/usage`` и ``/status``:
+живым запросом в API с уже сохранённым на диске OAuth-токеном. Локальные файлы
+(кэш ``~/.claude.json``, rollout'ы codex) остались **фолбэком** на случай
+недоступной сети или протухшего токена — они отражают момент последнего запроса
+CLI и легко показывают позавчерашние цифры, поэтому такой ответ помечается.
 
 Стиль — как в engines/session_usage.py: dataclass'ы, никаких исключений
 наружу, любая ошибка чтения превращается в поле ``note``."""
@@ -7,12 +13,19 @@ from __future__ import annotations
 
 import json
 import os
+import urllib.error
+import urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from engines.session_usage import _codex_sessions_root
+
+HTTP_TIMEOUT = 15.0
+
+CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+CODEX_USAGE_URL = "https://chatgpt.com/backend-api/codex/usage"
 
 
 @dataclass
@@ -30,16 +43,113 @@ class EngineLimits:
     source: str | None = None  # путь к файлу-источнику
     fetched_at: datetime | None = None  # когда данные были собраны CLI (для кэша claude)
     note: str | None = None  # если данных нет — причина
+    live: bool = False  # True — свежий ответ API, False — локальный фолбэк
+
+
+def _fetch_json(url: str, headers: dict[str, str]) -> tuple[Any, str | None]:
+    """GET с готовыми заголовками. Возвращает ``(payload, error)`` — ровно одно
+    из двух непусто. Наружу не бросает ничего."""
+    req = urllib.request.Request(url, headers=headers, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
+            return json.loads(resp.read().decode("utf-8")), None
+    except urllib.error.HTTPError as exc:
+        if exc.code in (401, 403):
+            return None, f"API отклонил токен (HTTP {exc.code})"
+        return None, f"API ответил HTTP {exc.code}"
+    except urllib.error.URLError as exc:
+        return None, f"сеть недоступна: {exc.reason}"
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None, "API вернул не-JSON"
+    except Exception as exc:  # noqa: BLE001 — команда статуса не должна падать
+        return None, f"{type(exc).__name__}: {exc}"
 
 
 def _claude_config_path() -> Path:
     return Path(os.environ.get("CLAUDE_CONFIG_JSON", Path.home() / ".claude.json"))
 
 
+def _claude_credentials_path() -> Path:
+    return Path(
+        os.environ.get("CLAUDE_CREDENTIALS_JSON", Path.home() / ".claude" / ".credentials.json")
+    )
+
+
+CLAUDE_WINDOW_NAMES = (
+    ("five_hour", "5 часов"),
+    ("seven_day", "7 дней"),
+    ("seven_day_opus", "7 дней · opus"),
+    ("seven_day_sonnet", "7 дней · sonnet"),
+)
+
+
+def _claude_windows(source: dict[str, Any]) -> list[LimitWindow]:
+    """Окна из ответа /api/oauth/usage или из кэша — форма у них одинаковая."""
+    windows: list[LimitWindow] = []
+    for key, name in CLAUDE_WINDOW_NAMES:
+        window = source.get(key)
+        if not isinstance(window, dict):
+            continue
+        windows.append(
+            LimitWindow(
+                name=name,
+                used_percent=_as_float(window.get("utilization")),
+                resets_at=_parse_iso(window.get("resets_at")),
+            )
+        )
+    return windows
+
+
 def claude_limits() -> EngineLimits:
-    """Остаток лимитов claude — из кэша CLI ``~/.claude.json`` (ключ
-    ``cachedUsageUtilization``). CLI обновляет этот кэш сам при своих запросах,
-    здесь мы его только читаем."""
+    """Остаток лимитов claude — тем же запросом, что делает TUI-команда
+    ``/usage``: GET /api/oauth/usage с OAuth-токеном из
+    ``~/.claude/.credentials.json``. Не вышло — читаем кэш последнего запроса
+    самого CLI (``~/.claude.json`` → ``cachedUsageUtilization``)."""
+    result = EngineLimits(engine="claude")
+    token, token_error = _claude_token()
+    if token:
+        payload, error = _fetch_json(
+            CLAUDE_USAGE_URL,
+            {
+                "Authorization": f"Bearer {token}",
+                "anthropic-beta": "oauth-2025-04-20",
+                "User-Agent": "claude-cli (jarvis)",
+                "Accept": "application/json",
+            },
+        )
+        if isinstance(payload, dict):
+            result.windows = _claude_windows(payload)
+            result.live = True
+            result.source = CLAUDE_USAGE_URL
+            result.fetched_at = datetime.now(timezone.utc)
+            if not result.windows:
+                result.note = "API ответил, но знакомых окон в ответе нет"
+            return result
+        token_error = error
+    fallback = _claude_limits_from_cache()
+    fallback.note = "; ".join(x for x in (token_error, fallback.note) if x) or None
+    return fallback
+
+
+def _claude_token() -> tuple[str | None, str | None]:
+    path = _claude_credentials_path()
+    if not path.is_file():
+        return None, f"{path} не найден"
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, json.JSONDecodeError) as exc:
+        return None, f"не удалось прочитать {path}: {exc}"
+    oauth = data.get("claudeAiOauth")
+    token = oauth.get("accessToken") if isinstance(oauth, dict) else None
+    if not isinstance(token, str) or not token:
+        return None, "в credentials нет claudeAiOauth.accessToken"
+    return token, None
+
+
+def _claude_limits_from_cache() -> EngineLimits:
+    """Фолбэк: кэш последнего запроса самого CLI. Цифры могут быть старыми —
+    вызывающий обязан показать `fetched_at`."""
     path = _claude_config_path()
     result = EngineLimits(engine="claude", source=str(path))
     if not path.is_file():
@@ -66,23 +176,7 @@ def claude_limits() -> EngineLimits:
         result.note = "ключ utilization отсутствует в cachedUsageUtilization"
         return result
 
-    for key, name in (
-        ("five_hour", "5 часов"),
-        ("seven_day", "7 дней"),
-        ("seven_day_opus", "7 дней (opus)"),
-        ("seven_day_sonnet", "7 дней (sonnet)"),
-    ):
-        window = utilization.get(key)
-        if not isinstance(window, dict):
-            continue
-        result.windows.append(
-            LimitWindow(
-                name=name,
-                used_percent=_as_float(window.get("utilization")),
-                resets_at=_parse_iso(window.get("resets_at")),
-            )
-        )
-
+    result.windows = _claude_windows(utilization)
     if not result.windows:
         result.note = "в utilization нет ни одного известного окна"
     return result
@@ -140,9 +234,114 @@ def _iter_recent_rollouts(root: Path, limit: int):
                     return
 
 
+def _codex_auth_path() -> Path:
+    return Path(os.environ.get("CODEX_AUTH_JSON", Path.home() / ".codex" / "auth.json"))
+
+
+def _codex_token() -> tuple[str | None, str | None, str | None]:
+    """``(access_token, account_id, error)``."""
+    path = _codex_auth_path()
+    if not path.is_file():
+        return None, None, f"{path} не найден"
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, json.JSONDecodeError) as exc:
+        return None, None, f"не удалось прочитать {path}: {exc}"
+    tokens = data.get("tokens")
+    if not isinstance(tokens, dict):
+        return None, None, "в auth.json нет секции tokens"
+    token = tokens.get("access_token")
+    if not isinstance(token, str) or not token:
+        return None, None, "в auth.json нет tokens.access_token"
+    account_id = tokens.get("account_id")
+    return token, account_id if isinstance(account_id, str) else None, None
+
+
+def _codex_api_windows(payload: dict[str, Any]) -> list[LimitWindow]:
+    """Окна из ответа /backend-api/codex/usage.
+
+    ``primary_window``/``secondary_window`` описаны длиной окна в секундах и
+    абсолютным ``reset_at`` (unix). Кроме основного лимита в ответе бывают
+    ``code_review_rate_limit`` и ``additional_rate_limits`` — их окна тоже
+    показываем, помечая источником."""
+    windows: list[LimitWindow] = []
+
+    def add(block: Any, suffix: str = "") -> None:
+        if not isinstance(block, dict):
+            return
+        for key in ("primary_window", "secondary_window"):
+            window = block.get(key)
+            if not isinstance(window, dict):
+                continue
+            reset_at = window.get("reset_at")
+            name = _window_name_from_seconds(window.get("limit_window_seconds"))
+            windows.append(
+                LimitWindow(
+                    name=f"{name} · {suffix}" if suffix else name,
+                    used_percent=_as_float(window.get("used_percent")),
+                    resets_at=(
+                        datetime.fromtimestamp(reset_at, tz=timezone.utc)
+                        if isinstance(reset_at, (int, float)) else None
+                    ),
+                )
+            )
+
+    add(payload.get("rate_limit"))
+    add(payload.get("code_review_rate_limit"), "code review")
+    extra = payload.get("additional_rate_limits")
+    if isinstance(extra, dict):
+        for label, block in extra.items():
+            add(block, str(label))
+    elif isinstance(extra, list):
+        for block in extra:
+            if isinstance(block, dict):
+                add(block, str(block.get("name") or block.get("limit_id") or ""))
+    return windows
+
+
+def _window_name_from_seconds(seconds: Any) -> str:
+    try:
+        minutes = int(seconds) // 60
+    except (TypeError, ValueError):
+        return "окно"
+    return _window_name(minutes)
+
+
 def codex_limits() -> EngineLimits:
-    """Остаток лимитов codex — из последней строки с ``rate_limits`` в самом
-    свежем по mtime файле ``rollout-*.jsonl`` под ~/.codex/sessions."""
+    """Остаток лимитов codex — тем же запросом, что стоит за TUI-командой
+    ``/status``: GET /backend-api/codex/usage с ChatGPT-токеном из
+    ``~/.codex/auth.json``. Не вышло — разбираем локальные rollout'ы."""
+    result = EngineLimits(engine="codex")
+    token, account_id, token_error = _codex_token()
+    if token:
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/json",
+            "User-Agent": "codex_cli_rs (jarvis)",
+            "originator": "codex_cli_rs",
+        }
+        if account_id:
+            headers["chatgpt-account-id"] = account_id
+        payload, error = _fetch_json(CODEX_USAGE_URL, headers)
+        if isinstance(payload, dict):
+            result.windows = _codex_api_windows(payload)
+            result.live = True
+            result.source = CODEX_USAGE_URL
+            result.fetched_at = datetime.now(timezone.utc)
+            if not result.windows:
+                result.note = "API ответил, но окон лимитов в ответе нет"
+            return result
+        token_error = error
+    fallback = _codex_limits_from_rollouts()
+    fallback.note = "; ".join(x for x in (token_error, fallback.note) if x) or None
+    return fallback
+
+
+def _codex_limits_from_rollouts() -> EngineLimits:
+    """Фолбэк: последний непустой ``rate_limits`` в самом свежем по mtime файле
+    ``rollout-*.jsonl`` под ~/.codex/sessions. Цифры — на момент последнего
+    хода codex, а не на сейчас."""
     result = EngineLimits(engine="codex")
     root = _codex_sessions_root()
     if not root.is_dir():
@@ -281,38 +480,39 @@ def _format_delta(delta_seconds: float) -> str:
 
 
 def _format_window_line(window: LimitWindow, now: datetime) -> str:
-    percent_part = "  ?%" if window.used_percent is None else f"{window.used_percent:>3.0f}%"
-    line = f"  {window.name:<10}: {percent_part}"
+    """Строка вида «• 5 часов — осталось 69%, сброс 05.09 19:00».
+
+    Показываем именно ОСТАТОК, а не расход: вопрос к команде всегда «сколько у
+    меня ещё есть». Дата сброса — абсолютная, без «через сколько»."""
+    if window.used_percent is None:
+        left = "остаток неизвестен"
+    else:
+        left = f"осталось {max(0.0, 100.0 - window.used_percent):.0f}%"
+    line = f"• {window.name} — {left}"
     if window.resets_at is not None:
-        delta = (window.resets_at - now).total_seconds()
-        if delta <= 0:
-            line += "  сброс наступил"
+        local = window.resets_at.astimezone()
+        if (window.resets_at - now).total_seconds() <= 0:
+            line += ", сброс уже наступил"
         else:
-            local = window.resets_at.astimezone()
-            if delta < 86400:
-                stamp = local.strftime("%H:%M")
-            else:
-                stamp = local.strftime("%d.%m %H:%M")
-            line += f"  сброс через {_format_delta(delta)} ({stamp})"
+            line += f", сброс {local.strftime('%d.%m %H:%M')}"
     if window.note:
-        line += f"  ({window.note})"
+        line += f" ({window.note})"
     return line
 
 
 def format_limits_block(items: list[EngineLimits], now: datetime | None = None) -> str:
-    """Моноширинный plain-текст со сводкой лимитов — вызывающий сам оборачивает
-    в <pre>."""
+    """Markdown-сводка: заголовок движка и по строке на окно лимита."""
     if now is None:
         now = datetime.now(timezone.utc)
     blocks: list[str] = []
     for item in items:
-        lines = [item.engine]
+        lines = [f"**{item.engine}**"]
         for window in item.windows:
             lines.append(_format_window_line(window, now))
         if item.note:
-            lines.append(f"  {item.note}")
-        if item.fetched_at is not None:
+            lines.append(f"*{item.note}*")
+        if not item.live and item.fetched_at is not None:
             ago = _format_delta((now - item.fetched_at).total_seconds())
-            lines.append(f"  данные из кэша CLI, собраны {ago} назад")
+            lines.append(f"*API недоступен, показан кэш CLI ({ago} назад)*")
         blocks.append("\n".join(lines))
     return "\n\n".join(blocks)

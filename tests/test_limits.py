@@ -11,13 +11,15 @@ from unittest.mock import patch
 from engines.limits import (
     EngineLimits,
     LimitWindow,
+    _claude_limits_from_cache,
+    _codex_limits_from_rollouts,
     claude_limits,
     codex_limits,
     format_limits_block,
 )
 
 
-class ClaudeLimitsTest(unittest.TestCase):
+class ClaudeLimitsFromCacheTest(unittest.TestCase):
     def test_parses_two_windows_with_percent_and_resets_at(self) -> None:
         config = {
             "cachedUsageUtilization": {
@@ -40,7 +42,7 @@ class ClaudeLimitsTest(unittest.TestCase):
             path = Path(tmp) / "claude.json"
             path.write_text(json.dumps(config), encoding="utf-8")
             with patch.dict(os.environ, {"CLAUDE_CONFIG_JSON": str(path)}):
-                result = claude_limits()
+                result = _claude_limits_from_cache()
 
         self.assertEqual(result.engine, "claude")
         self.assertIsNone(result.note)
@@ -63,7 +65,7 @@ class ClaudeLimitsTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "does-not-exist.json"
             with patch.dict(os.environ, {"CLAUDE_CONFIG_JSON": str(path)}):
-                result = claude_limits()
+                result = _claude_limits_from_cache()
         self.assertEqual(result.windows, [])
         self.assertTrue(result.note)
 
@@ -72,12 +74,12 @@ class ClaudeLimitsTest(unittest.TestCase):
             path = Path(tmp) / "claude.json"
             path.write_text("{не json", encoding="utf-8")
             with patch.dict(os.environ, {"CLAUDE_CONFIG_JSON": str(path)}):
-                result = claude_limits()
+                result = _claude_limits_from_cache()
         self.assertEqual(result.windows, [])
         self.assertTrue(result.note)
 
 
-class CodexLimitsTest(unittest.TestCase):
+class CodexLimitsFromRolloutsTest(unittest.TestCase):
     def test_uses_freshest_file_and_last_rate_limits_line(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -140,7 +142,7 @@ class CodexLimitsTest(unittest.TestCase):
             os.utime(newer, (now, now))
 
             with patch.dict(os.environ, {"CODEX_SESSIONS_DIR": str(root)}):
-                result = codex_limits()
+                result = _codex_limits_from_rollouts()
 
         self.assertEqual(result.source, str(newer))
         self.assertEqual(len(result.windows), 1)
@@ -155,9 +157,100 @@ class CodexLimitsTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             missing = Path(tmp) / "sessions"
             with patch.dict(os.environ, {"CODEX_SESSIONS_DIR": str(missing)}):
-                result = codex_limits()
+                result = _codex_limits_from_rollouts()
         self.assertEqual(result.windows, [])
         self.assertTrue(result.note)
+
+
+class ClaudeLimitsLiveTest(unittest.TestCase):
+    def test_live_success_returns_two_windows(self) -> None:
+        payload = {
+            "five_hour": {
+                "utilization": 31.0,
+                "resets_at": "2026-09-05T16:00:00+00:00",
+            },
+            "seven_day": {
+                "utilization": 16.0,
+                "resets_at": "2026-09-08T10:00:00+00:00",
+            },
+        }
+        with (
+            patch("engines.limits._claude_token", return_value=("t", None)),
+            patch("engines.limits._fetch_json", return_value=(payload, None)) as fetch,
+        ):
+            result = claude_limits()
+
+        fetch.assert_called_once()
+        self.assertTrue(result.live)
+        self.assertEqual(len(result.windows), 2)
+        five_hour, seven_day = result.windows
+        self.assertEqual(five_hour.name, "5 часов")
+        self.assertEqual(five_hour.used_percent, 31.0)
+        self.assertEqual(seven_day.name, "7 дней")
+        self.assertEqual(seven_day.used_percent, 16.0)
+
+    def test_api_error_falls_back_to_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            missing_cache = Path(tmp) / "does-not-exist.json"
+            with (
+                patch("engines.limits._claude_token", return_value=("t", None)),
+                patch(
+                    "engines.limits._fetch_json",
+                    return_value=(None, "API отклонил токен (HTTP 401)"),
+                ) as fetch,
+                patch.dict(os.environ, {"CLAUDE_CONFIG_JSON": str(missing_cache)}),
+            ):
+                result = claude_limits()
+
+        fetch.assert_called_once()
+        self.assertFalse(result.live)
+        self.assertIn("API отклонил токен (HTTP 401)", result.note)
+
+
+class CodexLimitsLiveTest(unittest.TestCase):
+    def test_live_success_returns_one_window(self) -> None:
+        payload = {
+            "rate_limit": {
+                "primary_window": {
+                    "used_percent": 100,
+                    "limit_window_seconds": 2592000,
+                    "reset_at": 1790971501,
+                },
+                "secondary_window": None,
+            }
+        }
+        with (
+            patch("engines.limits._codex_token", return_value=("t", None, None)),
+            patch("engines.limits._fetch_json", return_value=(payload, None)) as fetch,
+        ):
+            result = codex_limits()
+
+        fetch.assert_called_once()
+        self.assertTrue(result.live)
+        self.assertEqual(len(result.windows), 1)
+        window = result.windows[0]
+        self.assertIn("30 дней", window.name)
+        self.assertEqual(window.used_percent, 100)
+        self.assertEqual(
+            window.resets_at, datetime.fromtimestamp(1790971501, tz=timezone.utc)
+        )
+
+    def test_api_error_falls_back_to_rollouts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            missing_sessions = Path(tmp) / "sessions"
+            with (
+                patch("engines.limits._codex_token", return_value=("t", None, None)),
+                patch(
+                    "engines.limits._fetch_json",
+                    return_value=(None, "API отклонил токен (HTTP 401)"),
+                ) as fetch,
+                patch.dict(os.environ, {"CODEX_SESSIONS_DIR": str(missing_sessions)}),
+            ):
+                result = codex_limits()
+
+        fetch.assert_called_once()
+        self.assertFalse(result.live)
+        self.assertIn("API отклонил токен (HTTP 401)", result.note)
 
 
 class FormatLimitsBlockTest(unittest.TestCase):
@@ -183,10 +276,35 @@ class FormatLimitsBlockTest(unittest.TestCase):
         ]
         body = format_limits_block(items, now=now)
 
-        self.assertIn("21%", body)
-        self.assertIn("90%", body)
-        self.assertIn("сброс наступил", body)
+        self.assertIn("**claude**", body)
+        self.assertIn("осталось 79%", body)
+        self.assertIn("осталось 10%", body)
+        self.assertIn("сброс уже наступил", body)
         self.assertIn("лимиты подписки opencode не отслеживаются", body)
+
+    def test_shows_remaining_not_spent(self) -> None:
+        now = datetime(2026, 9, 5, 13, 0, 0, tzinfo=timezone.utc)
+        items = [
+            EngineLimits(
+                engine="claude",
+                windows=[LimitWindow(name="5 часов", used_percent=31.0)],
+            ),
+        ]
+        body = format_limits_block(items, now=now)
+        self.assertIn("осталось 69%", body)
+
+    def test_non_live_result_marks_cache(self) -> None:
+        now = datetime(2026, 9, 5, 13, 0, 0, tzinfo=timezone.utc)
+        items = [
+            EngineLimits(
+                engine="claude",
+                windows=[LimitWindow(name="5 часов", used_percent=21)],
+                live=False,
+                fetched_at=now - timedelta(hours=1),
+            ),
+        ]
+        body = format_limits_block(items, now=now)
+        self.assertIn("кэш", body)
 
 
 if __name__ == "__main__":
