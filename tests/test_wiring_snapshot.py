@@ -39,6 +39,7 @@ EXPECTED_HANDLERS = [
     (0, 'CommandHandler', 'spawn', 'cmd_spawn'),
     (0, 'CommandHandler', 'session', 'cmd_session'),
     (0, 'CommandHandler', 'tokens', 'cmd_tokens'),
+    (0, 'CommandHandler', 'usage', 'cmd_usage'),
     (0, 'CommandHandler', 'close', 'cmd_close'),
     (0, 'CommandHandler', 'engine', 'cmd_engine'),
     (0, 'CommandHandler', 'browser', 'cmd_browser'),

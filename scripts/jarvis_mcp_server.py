@@ -1944,7 +1944,7 @@ async def ask_user(
     thread_id: int,
     options: list[str] | None = None,
     chat_id: int | None = None,
-    timeout_seconds: int = 600,
+    timeout_seconds: int = 1800,
     default: str | None = None,
     poll_interval: float = 2.0,
 ) -> dict[str, Any]:
@@ -1952,8 +1952,10 @@ async def ask_user(
     question = (question or "").strip()
     if not question:
         return {"status": "error", "error": "question is empty"}
-    if timeout_seconds <= 0 or timeout_seconds > 3600:
-        timeout_seconds = 600
+    if timeout_seconds <= 0:
+        timeout_seconds = 1800
+    elif timeout_seconds > 3600:
+        timeout_seconds = 3600
     poll_interval = min(max(poll_interval, 1.0), 30.0)
     options = [str(o).strip() for o in (options or []) if str(o).strip()][:8]
     target_chat_id = chat_id if chat_id is not None else _default_chat_id()
@@ -2024,6 +2026,19 @@ async def ask_user(
             "UPDATE ask_requests SET telegram_message_id = ? WHERE id = ?",
             (tg_msg_id, ask_id),
         )
+    # Бот ищет только status='pending', а истёкший вопрос всё равно остаётся
+    # последним сообщением топика — messages_log даёт боту его message_id,
+    # чтобы отличить «ответ на протухший вопрос» от обычного сообщения.
+    try:
+        with _connect() as conn:
+            conn.execute(
+                "INSERT INTO messages_log(chat_id, thread_id, direction, kind, "
+                "text, telegram_message_id, ts) VALUES (?, ?, 'out', 'ask_user', ?, ?, ?)",
+                (target_chat_id, thread_id, question, tg_msg_id, now),
+            )
+    except Exception as exc:
+        logger.warning("ask_user #%s: failed to log question to messages_log: %s",
+                       ask_id, exc)
     logger.info("ask_user #%s posted to thread=%s (options=%d)",
                 ask_id, thread_id, len(options))
 
@@ -2061,7 +2076,13 @@ async def ask_user(
             _telegram_api("editMessageText", {
                 "chat_id": target_chat_id,
                 "message_id": tg_msg_id,
-                "text": f"❓ {question}\n\n⏰ Вопрос истёк — ответа не было.",
+                "text": (
+                    f"❓ {question}\n\n⌛ Вопрос истёк — ответа не было. "
+                    "Можешь всё равно ответить сообщением: передам агенту "
+                    "в ближайшие 15 минут."
+                ),
+                "parse_mode": "HTML",
+                "reply_markup": {"inline_keyboard": []},
             })
         except RuntimeError:
             pass

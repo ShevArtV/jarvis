@@ -19,6 +19,7 @@ from bot.sessions import _persistent_column_for_engine, _session_state_line, cle
 from bot.settings import CLAUDE_CWD, DEFAULT_ENGINE_NAME, SESSION_IDLE_MINUTES
 from bot.topics import _key, _kill_persistent_worker, active_procs, persistent_workers, spawn_procs
 from engines import get_engine_by_name
+from engines.limits import all_limits, format_limits_block
 from engines.process_control import terminate_process_tree
 from engines.session_usage import SessionUsage, inspect_session_usage
 
@@ -189,6 +190,12 @@ async def cmd_tokens(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     )
     if usage.path:
         body += f"\npath        : {usage.path}"
+    await update.message.reply_text("<pre>" + _html_escape(body) + "</pre>", parse_mode=ParseMode.HTML)
+
+
+async def cmd_usage(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    body = format_limits_block(all_limits())
+    body += "\n\nКонтекст текущей сессии: /tokens"
     await update.message.reply_text("<pre>" + _html_escape(body) + "</pre>", parse_mode=ParseMode.HTML)
 
 

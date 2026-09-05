@@ -16,7 +16,7 @@ import asyncio
 import os
 import uuid
 from datetime import datetime
-from bot.asks import _mark_ask_answered, answer_ask, get_pending_ask
+from bot.asks import _mark_ask_answered, answer_ask, get_pending_ask, get_recent_timed_out_ask, mark_ask_late_answered
 from bot.db import log_message
 from bot.delivery import ProgressJournal, deliver_file_markers, extract_file_markers, send_claude_reply, send_to_topic
 from bot.handlers.toggles import _ask_done_confirmation_if_needed, _warn_large_context_if_needed
@@ -56,12 +56,25 @@ async def _resolve_pending_summary(
     return build_context_handoff(key, old_engine_name)
 
 
+STATUS_PROBE = (
+    "Доложи статус текстом: что уже сделал, где остановился, что мешает "
+    "продолжить. Коротко, без новых действий."
+)
+
+
 async def _finish_turn_reply(
     chat, thread_id: int, journal: "ProgressJournal", ok: bool, final_text: str,
     engine_name: str, key: tuple[int, int],
+    retry_cb=None,
 ) -> None:
     """Общий хвост хода: закрыть журнал, отправить финальный ответ и файлы.
-    Общий для разового вызова движка и живого процесса claude (/persistent)."""
+    Общий для разового вызова движка и живого процесса claude (/persistent).
+
+    `retry_cb(prompt) -> (ok, text)` — способ переспросить движок в той же
+    сессии. Нужен, когда ход закончился ничем: «(пустой ответ)» пользователю
+    бесполезен, поэтому сначала просим агента доложить статус и только если и
+    это пусто — печатаем диагностику, по которой понятно, что делать.
+    """
     await journal.finish(final_text)
 
     if not ok and not final_text.strip():
@@ -73,8 +86,40 @@ async def _finish_turn_reply(
         )
 
     cleaned_text, file_markers = extract_file_markers(final_text)
+
+    if not cleaned_text.strip() and not file_markers and retry_cb is not None:
+        logger.info("empty reply, probing status: key=%s engine=%s", key, engine_name)
+        try:
+            await send_to_topic(
+                chat, thread_id,
+                "⚠️ Ответ пришёл пустым — переспрашиваю агента.",
+            )
+        except Exception:
+            logger.exception("failed to send empty-reply notice key=%s", key)
+        retry_text = ""
+        try:
+            _, retry_text = await retry_cb(STATUS_PROBE)
+        except Exception as exc:
+            logger.exception("status probe failed key=%s", key)
+            cleaned_text = f"⚠️ Переспросить не удалось: {exc}"
+        if (retry_text or "").strip():
+            cleaned_text, extra_markers = extract_file_markers(retry_text)
+            file_markers = file_markers + extra_markers
+
     if not cleaned_text.strip():
-        cleaned_text = "(пустой ответ)" if not file_markers else "(см. вложения)"
+        if file_markers:
+            cleaned_text = "(см. вложения)"
+        else:
+            session_id = get_session(*key)[0]
+            cleaned_text = (
+                f"⚠️ {engine_name} закончил ход, не прислав ни текста, ни вложений, "
+                "и на просьбу доложить статус тоже ответил пустотой.\n\n"
+                f"движок: {engine_name}\n"
+                f"сессия: {session_id or '—'}\n"
+                f"шагов в ходе: {journal.total_steps}\n\n"
+                "Что делать: повторить запрос; /new — начать новую сессию; "
+                "/engine — сменить движок."
+            )
     meta = {"type": "claude_response", "engine": engine_name}
     try:
         await send_claude_reply(chat, thread_id, cleaned_text, meta)
@@ -209,7 +254,19 @@ async def _handle_persistent_message(
         clear_pending_summary(*key)
 
     engine_name = get_session(*key)[2]
-    await _finish_turn_reply(chat, thread_id, journal, ok, final_text, engine_name, key)
+
+    async def _probe(probe_prompt: str) -> tuple[bool, str]:
+        """Переспросить живой процесс — он ещё держит контекст хода."""
+        live = persistent_workers.get(key)
+        if live is None or live.dead:
+            return False, ""
+        _is_new, probe_fut = await live.submit(probe_prompt)
+        return await asyncio.wait_for(probe_fut, timeout=timeout)
+
+    await _finish_turn_reply(
+        chat, thread_id, journal, ok, final_text, engine_name, key,
+        retry_cb=_probe if ok else None,
+    )
     logger.info("persistent turn done: key=%s engine=%s ok=%s", key, engine_name, ok)
 
 
@@ -244,8 +301,22 @@ async def _process_prompt(
         logger.info("ask #%s already closed, treating as normal message",
                     pending_ask["id"])
 
+    # Grace-окно: вопрос агента истёк по таймауту, а пользователь отвечает на
+    # него текстом только сейчас. Агент уже пошёл дальше, поэтому это обычный
+    # промпт — но без пометки он читается как реплика из ниоткуда.
+    late_ask_note = None
+    if user_text.strip():
+        late_ask = get_recent_timed_out_ask(chat.id, thread_id)
+        if late_ask is not None and mark_ask_late_answered(late_ask["id"], user_text.strip()):
+            question = (late_ask["question"] or "").strip().replace("\n", " ")
+            late_ask_note = (
+                "[Это ответ на твой вопрос «" + question[:200] + "», "
+                "истёкший по таймауту — ты его уже не ждёшь.]"
+            )
+            logger.info("ask #%s answered late by text: key=%s", late_ask["id"], key)
+
     # Reply-to контекст и вложения → meta_block
-    extra_lines: list[str] = []
+    extra_lines: list[str] = [late_ask_note] if late_ask_note else []
     reply = update.message.reply_to_message if update.message else None
     if reply is not None:
         ctx = load_message_context(chat.id, reply.message_id)
@@ -371,9 +442,10 @@ async def _process_prompt_locked(
         journal = ProgressJournal(chat, thread_id)
         await journal.start()
 
+        sid_after = session_id
         try:
             with engine_model_scope(engine.name, model):
-                ok, final_text, _sid_after = await call_llm_stream(
+                ok, final_text, sid_after = await call_llm_stream(
                     engine, session_id, prompt, key, cwd, journal.append,
                 )
             if ok and pending_summary:
@@ -382,7 +454,21 @@ async def _process_prompt_locked(
             logger.exception("llm call crashed: key=%s engine=%s", key, engine.name)
             ok, final_text = False, f"Внутренняя ошибка: {exc}"
 
-        await _finish_turn_reply(chat, thread_id, journal, ok, final_text, engine.name, key)
+        async def _probe(probe_prompt: str) -> tuple[bool, str]:
+            """Переспросить движок в той же сессии — резюм с диска, без журнала."""
+            async def _drop(_chunk: str) -> None:
+                return None
+
+            with engine_model_scope(engine.name, model):
+                probe_ok, probe_text, _sid = await call_llm_stream(
+                    engine, sid_after or session_id, probe_prompt, key, cwd, _drop,
+                )
+            return probe_ok, probe_text
+
+        await _finish_turn_reply(
+            chat, thread_id, journal, ok, final_text, engine.name, key,
+            retry_cb=_probe if ok else None,
+        )
 
         logger.info("lock released: key=%s ok=%s engine=%s", key, ok, engine.name)
     finally:

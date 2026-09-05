@@ -140,6 +140,58 @@ def load_message_context(chat_id: int, message_id: int) -> dict | None:
         return ctx
 
 
+# Последнее известное сообщение топика: key -> telegram_message_id.
+# Нужен журналу хода: он правит СВОЁ сообщение, и если ниже него уже успело
+# уехать что-то ещё (вопрос ask_user, ответ бота, реплика пользователя),
+# трансляция продолжается в сообщение, которое уехало вверх и которого не
+# видно на экране. Реестр даёт журналу повод отцепиться и начать новое
+# сообщение внизу топика.
+last_topic_message: dict[TopicKey, int] = {}
+
+
+def note_topic_message(chat_id: int | None, thread_id: int, message_id: int | None) -> None:
+    """Запомнить, что в топик уехало сообщение с таким id.
+
+    Реестр вспомогательный: если id по какой-то причине неизвестен, это не
+    повод ронять саму отправку.
+    """
+    if not message_id or chat_id is None:
+        return
+    key = (chat_id, thread_id or 0)
+    if message_id > last_topic_message.get(key, 0):
+        last_topic_message[key] = message_id
+
+
+def latest_topic_message_id(chat_id: int, thread_id: int) -> int:
+    """Самое свежее известное сообщение топика.
+
+    Реестр в памяти знает только про то, что отправил сам бот. Вопросы
+    ask_user шлёт ДРУГОЙ процесс (MCP-сервер), а входящие реплики
+    пользователя пишет хендлер, — поэтому сверяемся ещё и с БД.
+    """
+    thread_id = thread_id or 0
+    best = last_topic_message.get((chat_id, thread_id), 0)
+    try:
+        with _db() as conn:
+            row = conn.execute(
+                "SELECT MAX(telegram_message_id) FROM messages_log "
+                "WHERE chat_id = ? AND thread_id = ?",
+                (chat_id, thread_id),
+            ).fetchone()
+            if row and row[0]:
+                best = max(best, int(row[0]))
+            row = conn.execute(
+                "SELECT MAX(telegram_message_id) FROM ask_requests "
+                "WHERE chat_id = ? AND thread_id = ?",
+                (chat_id, thread_id),
+            ).fetchone()
+            if row and row[0]:
+                best = max(best, int(row[0]))
+    except Exception:
+        logger.debug("latest_topic_message_id: db lookup failed", exc_info=True)
+    return best
+
+
 def _key(update: Update) -> tuple[int, int]:
     chat_id = update.effective_chat.id
     msg = update.message or update.effective_message
