@@ -1,7 +1,8 @@
 """Remote MCP servers attached per topic role.
 
-Jarvis knows two topic roles — ``manager`` (the orchestrating topic) and
-``agent`` (every project/execution topic). This module lets an external
+Jarvis knows service topic roles — ``secretary`` / ``teamlead`` — plus
+``agent`` (every project/execution topic). The old ``manager`` role remains
+a compatibility alias for manager-level credentials. This module lets an external
 integration declare remote MCP servers whose credentials differ per role, so
 one Telegram forum can talk to the same service under two identities without
 either identity leaking into the other's topics.
@@ -20,8 +21,10 @@ every role using the top-level ``headers``)::
           "name": "mxboard",
           "url": "https://example.org/rest-mcp.php",
           "roles": {
-            "manager": {"headers": {"Authorization": "Bearer <manager-token>"}},
-            "agent":   {"headers": {"Authorization": "Bearer <agent-token>"}}
+            "manager":   {"headers": {"Authorization": "Bearer <manager-token>"}},
+            "secretary": {"headers": {"Authorization": "Bearer <manager-token>"}},
+            "teamlead":  {"headers": {"Authorization": "Bearer <manager-token>"}},
+            "agent":     {"headers": {"Authorization": "Bearer <agent-token>"}}
           }
         }
       ]
@@ -50,8 +53,14 @@ logger = logging.getLogger(__name__)
 HOME = Path.home()
 
 ROLE_MANAGER = "manager"
+ROLE_SECRETARY = "secretary"
+ROLE_TEAMLEAD = "teamlead"
 ROLE_AGENT = "agent"
-ROLES = (ROLE_MANAGER, ROLE_AGENT)
+ROLES = (ROLE_MANAGER, ROLE_SECRETARY, ROLE_TEAMLEAD, ROLE_AGENT)
+ROLE_COMPAT_ALIASES = {
+    ROLE_SECRETARY: (ROLE_MANAGER,),
+    ROLE_TEAMLEAD: (ROLE_MANAGER,),
+}
 
 _NAME_RE = re.compile(r"[A-Za-z0-9_-]+")
 # Only remote HTTP servers: a per-role identity is a credential, and stdio
@@ -153,9 +162,15 @@ def _server_for_role(raw: Any, role: str, index: int) -> dict[str, Any] | None:
     if roles is None:
         role_entry = {}
     elif isinstance(roles, dict):
-        if role not in roles:
+        role_key = role
+        if role_key not in roles:
+            for alias in ROLE_COMPAT_ALIASES.get(role, ()):
+                if alias in roles:
+                    role_key = alias
+                    break
+        if role_key not in roles:
             return None
-        role_entry = roles[role]
+        role_entry = roles[role_key]
         if role_entry is None or role_entry is False:
             return None
     else:
@@ -236,10 +251,10 @@ def opencode_mcp_servers(role: str) -> dict[str, dict[str, Any]]:
 
 
 def create_codex_profile(role: str) -> tuple[str, Path] | None:
-    """Write a temporary Codex profile-v2 config; ``None`` if nothing to attach.
+    """Write a temporary Codex profile config; ``None`` if nothing to attach.
 
     Codex ``-c`` overrides would put credentials into process argv. A named
-    profile keeps argv clean: Jarvis passes only ``--profile-v2 <name>`` and
+    profile keeps argv clean: Jarvis passes only ``--profile <name>`` and
     deletes the generated file once Codex has loaded it.
     """
     specs = servers_for_role(role)
@@ -292,7 +307,7 @@ def create_codex_profile(role: str) -> tuple[str, Path] | None:
 
 
 def codex_inline_config_flags(role: str) -> list[str]:
-    """``-c`` flags for Codex entry points that cannot use profile-v2.
+    """``-c`` flags for Codex entry points that cannot use config profiles.
 
     Only the persistent app-server needs this; it puts credentials into argv,
     which is why ``create_codex_profile`` is preferred everywhere else.

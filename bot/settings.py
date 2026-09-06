@@ -58,6 +58,12 @@ FILE_MARKER_RE = re.compile(
     re.MULTILINE,
 )
 
+# Миниапп доски QueueWarden: URL нужен для web_app-кнопки в личке (там разрешён
+# только https-адрес), а короткое имя — для ссылки t.me в группах/форумах, где
+# web_app-кнопки запрещены и миниапп открывается прямой ссылкой на приложение.
+BOARD_MINIAPP_URL = os.environ.get("BOARD_MINIAPP_URL", "https://queuewarden.ru/miniapp")
+BOARD_MINIAPP_SHORT_NAME = os.environ.get("BOARD_MINIAPP_SHORT_NAME", "qwboard")
+
 DB_PATH = os.path.join(BASE_DIR, "bot_state.db")
 MEDIA_DIR = os.path.join(BASE_DIR, "temp", "media")
 os.makedirs(MEDIA_DIR, exist_ok=True)

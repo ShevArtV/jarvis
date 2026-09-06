@@ -41,7 +41,12 @@ from bot.sessions import (
     get_session,
 )
 from bot.settings import CLAUDE_CWD
-from bot.topics import _key, _lock_for, active_procs, resolve_manager_topic
+from bot.topics import (
+    _key,
+    _lock_for,
+    active_procs,
+    resolve_job_notice_target,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -125,6 +130,11 @@ async def _run_manager_job(app: Application, job: dict) -> tuple[bool, int | Non
     source = job.get("source") or "manager"
     is_self_kick = source == "self_notice"
     key = (chat_id, thread_id)
+    # Кому отчитываться об этом job'е: топику, который его делегировал.
+    # origin_* пусты у старых job и у self_notice — тогда fallback на Тимлида,
+    # как было до разделения адресатов.
+    origin_chat_id = job.get("origin_chat_id")
+    origin_thread_id = job.get("origin_thread_id")
     bot = app.bot
     try:
         chat = await bot.get_chat(chat_id)
@@ -157,7 +167,7 @@ async def _run_manager_job(app: Application, job: dict) -> tuple[bool, int | Non
         prompt_parts: list[str] = []  # [SYSTEM:]-блок уходит через системный канал движка
         if pending_summary:
             prompt_parts.append("[Контекст:]\n" + pending_summary)
-        mgr_target = resolve_manager_topic()
+        mgr_target = resolve_job_notice_target(origin_chat_id, origin_thread_id)
         if is_self_kick:
             prompt_parts.append(
                 f"[SYSTEM NOTE: это AUTO-KICK для Менеджера (job_id={job_id}, "
@@ -189,9 +199,9 @@ async def _run_manager_job(app: Application, job: dict) -> tuple[bool, int | Non
                 f"[SYSTEM NOTE: задача делегирована Менеджером через MCP "
                 f"(job_id={job_id}). Финальный ответ этого turn'а идёт в "
                 f"этот топик (thread_id={thread_id}, cwd={effective_cwd}). "
-                f"Бот сам пришлёт Менеджеру короткий нотис «есть ответ» "
-                f"после твоего bot_reply — отдельно слать manager_send не "
-                f"нужно.\n\n"
+                f"Бот сам пришлёт инициатору задачи (thread_id="
+                f"{mgr_thread_id}) короткий нотис «есть ответ» после твоего "
+                f"bot_reply — отдельно слать manager_send не нужно.\n\n"
                 f"Правила:\n"
                 f"1. Нетривиальная задача (любая правка кода / архитектурное "
                 f"решение / >1 файла) — сначала предложи план, не начинай "
@@ -206,7 +216,7 @@ async def _run_manager_job(app: Application, job: dict) -> tuple[bool, int | Non
                 f"git revert и сообщить ❌ в финальном ответе. Если файла "
                 f"smoke-check нет — задай уточняющий вопрос через #ask.\n"
                 f"4. (опционально) По завершении CODE-задачи можешь "
-                f"дополнительно прислать богатый отчёт в Менеджеров топик: "
+                f"дополнительно прислать богатый отчёт в топик инициатора: "
                 f"mcp__jarvis__manager_send(thread_id={mgr_thread_id}, "
                 f"as_user=false, text='#job_{job_id} ✅ <одна строка> — "
                 f"src: thread_id={thread_id}, cwd={effective_cwd}'). Это "
@@ -315,6 +325,8 @@ async def _run_manager_job(app: Application, job: dict) -> tuple[bool, int | Non
                 f"вопрос обычным manager_send(as_user=True) — агент resume "
                 f"той же сессии и увидит контекст до прерывания.",
                 kind="job_interrupted",
+                target_role="teamlead",
+                target=mgr_target,
             )
             logger.info("manager job %s: interrupted by manager", job_id)
             return False, None, "interrupted by manager request"
@@ -345,7 +357,7 @@ async def _run_manager_job(app: Application, job: dict) -> tuple[bool, int | Non
         # есть ответ. Не зависит от того, прислал ли агент сам что-то
         # через mcp__jarvis__manager_send. Не шлём для self_kick — Менеджер
         # сам себе нотис не нужен, он уже разбирает свой inbox.
-        if not is_self_kick and resolve_manager_topic() != (chat_id, thread_id):
+        if not is_self_kick and mgr_target and mgr_target != (chat_id, thread_id):
             with _db() as conn_:
                 row = conn_.execute(
                     "SELECT topic_title, cwd FROM sessions "
@@ -362,7 +374,10 @@ async def _run_manager_job(app: Application, job: dict) -> tuple[bool, int | Non
                 f"Действие: прочитай через "
                 f"manager_inbox(thread_id={thread_id}) или зайди в сам топик."
             )
-            await _send_manager_notice(app, notice_text, kind="job_notification")
+            await _send_manager_notice(
+                app, notice_text, kind="job_notification", target_role="teamlead",
+                target=mgr_target,
+            )
 
         logger.info("manager job %s done: ok=%s files=%d engine=%s",
                     job_id, ok, len(file_markers), engine.name)

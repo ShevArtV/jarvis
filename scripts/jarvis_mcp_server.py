@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
-"""Jarvis Manager MCP server — read-only tools for the Manager agent.
+"""Jarvis Manager MCP server — cross-topic and controlled external tools.
 
-Stage 1 ships two tools:
-- `manager_topics`: list every topic Jarvis knows about (sessions table).
-- `manager_inbox`: read the messages_log for one topic.
-
-The server is intentionally read-only at this stage. Create/send tools land in
-later stages once the bot grows the matching ingest plumbing.
+The server exposes Jarvis state, reminders and selected integrations to the
+Secretary/Manager. Tool descriptions explicitly mark external write actions;
+the role instructions require an explicit operator request before using them.
 
 Wired into each engine (claude/codex/opencode) by `engines/jarvis_mcp.py`.
 """
@@ -61,41 +58,141 @@ def _connect() -> sqlite3.Connection:
     return conn
 
 
-def _telegram_token() -> str:
-    """Read TELEGRAM_TOKEN from env or the bot's .env file.
+def _env_or_dotenv(name: str) -> str | None:
+    """Настройка из окружения, иначе из .env бота.
 
-    The bot already loads .env via python-dotenv; the MCP server runs
-    standalone, so we duplicate that lookup here. .env path is resolved
-    relative to JARVIS_DB_PATH's parent so a non-default DB also works.
+    Бот читает .env через python-dotenv; MCP-сервер запускается отдельно и
+    окружение бота наследует не всегда, поэтому смотрим в файл сами. Путь к
+    .env — рядом с БД, так что нестандартный --db тоже работает.
     """
-    token = os.environ.get("TELEGRAM_TOKEN")
-    if token:
-        return token
-    if _DB_PATH is not None:
-        env_path = _DB_PATH.parent / ".env"
-        if env_path.exists():
-            for line in env_path.read_text(encoding="utf-8").splitlines():
-                line = line.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                k, _, v = line.partition("=")
-                if k.strip() == "TELEGRAM_TOKEN":
-                    return v.strip().strip('"').strip("'")
-    raise RuntimeError("TELEGRAM_TOKEN not found (env / .env)")
+    value = os.environ.get(name)
+    if value:
+        return value
+    if _DB_PATH is None:
+        return None
+    env_path = _DB_PATH.parent / ".env"
+    if not env_path.exists():
+        return None
+    for line in env_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, raw = line.partition("=")
+        if key.strip() == name:
+            return raw.strip().strip('"').strip("'") or None
+    return None
+
+
+def _telegram_token() -> str:
+    """Read TELEGRAM_TOKEN from env or the bot's .env file."""
+    token = _env_or_dotenv("TELEGRAM_TOKEN")
+    if not token:
+        raise RuntimeError("TELEGRAM_TOKEN not found (env / .env)")
+    return token
+
+
+def _activecollab_client():
+    """Build an ActiveCollab client from the bot environment without logging secrets."""
+    url = _env_or_dotenv("ACTIVE_COLLAB_URL")
+    token = _env_or_dotenv("ACTIVE_COLLAB_TOKEN")
+    if not url or not token:
+        raise RuntimeError(
+            "ActiveCollab is not configured: set ACTIVE_COLLAB_URL and "
+            "ACTIVE_COLLAB_TOKEN in Jarvis .env"
+        )
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from integrations.activecollab import ActiveCollabClient  # type: ignore
+    return ActiveCollabClient(url, token)
+
+
+def _activecollab_check_updates() -> dict[str, Any]:
+    """Fetch the user's ActiveCollab delta and persist the observed IDs."""
+    client = _activecollab_client()
+    all_tasks = client.my_tasks(include_completed=True)
+    open_tasks = [task for task in all_tasks if not task.get("is_completed")]
+    task_ids = {
+        task["id"] for task in all_tasks if isinstance(task.get("id"), int)
+    }
+    task_by_id = {
+        task["id"]: task for task in all_tasks if isinstance(task.get("id"), int)
+    }
+    comment_notifications = client.comment_notifications_for(task_ids)
+    for notification in comment_notifications:
+        task = task_by_id.get(notification.get("task_id"))
+        if task is not None:
+            notification["project_id"] = task.get("project_id")
+            notification["project_name"] = task.get("project_name")
+            notification["task_name"] = task.get("name")
+    now = datetime.utcnow().isoformat()
+
+    with _connect() as conn:
+        initialized = conn.execute(
+            "SELECT 1 FROM integration_sync_state "
+            "WHERE integration='activecollab' AND state_key='updates_initialized'"
+        ).fetchone() is not None
+
+        new_tasks: list[dict[str, Any]] = []
+        for task in open_tasks:
+            task_id = task.get("id")
+            if not isinstance(task_id, int):
+                continue
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO integration_seen_items "
+                "(integration, kind, item_id, seen_at) VALUES "
+                "('activecollab', 'task', ?, ?)",
+                (task_id, now),
+            )
+            if initialized and cur.rowcount == 1:
+                new_tasks.append(task)
+
+        new_comments: list[dict[str, Any]] = []
+        for notification in comment_notifications:
+            notification_id = notification.get("id")
+            if not isinstance(notification_id, int):
+                continue
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO integration_seen_items "
+                "(integration, kind, item_id, seen_at) VALUES "
+                "('activecollab', 'comment_notification', ?, ?)",
+                (notification_id, now),
+            )
+            if initialized and cur.rowcount == 1:
+                new_comments.append(notification)
+
+        conn.execute(
+            "INSERT INTO integration_sync_state "
+            "(integration, state_key, state_value, updated_at) VALUES "
+            "('activecollab', 'updates_initialized', '1', ?) "
+            "ON CONFLICT(integration, state_key) DO UPDATE SET "
+            "state_value=excluded.state_value, updated_at=excluded.updated_at",
+            (now,),
+        )
+
+    return {
+        "initial_check": not initialized,
+        "open_tasks": open_tasks if not initialized else [],
+        "new_tasks": new_tasks,
+        "new_comment_notifications": new_comments,
+    }
 
 
 def _default_chat_id() -> int:
     """Resolve chat_id for create-topic when caller omits it.
 
-    Priority: JARVIS_MANAGER_CHAT_ID env → single most-frequent chat_id in
+    Priority: explicit service-topic env → single most-frequent chat_id in
     sessions. Errors if the bot serves multiple chats and no env was set.
     """
-    raw = os.environ.get("JARVIS_MANAGER_CHAT_ID")
-    if raw:
-        try:
-            return int(raw)
-        except ValueError as exc:
-            raise RuntimeError(f"JARVIS_MANAGER_CHAT_ID is not int: {raw!r}") from exc
+    for name in (
+        "JARVIS_SECRETARY_CHAT_ID",
+        "JARVIS_MANAGER_CHAT_ID",
+        "JARVIS_TEAMLEAD_CHAT_ID",
+    ):
+        raw = _env_or_dotenv(name)
+        if raw:
+            try:
+                return int(raw)
+            except ValueError as exc:
+                raise RuntimeError(f"{name} is not int: {raw!r}") from exc
     with _connect() as conn:
         # Forum chats only — private DMs always have thread_id=0 and can't host
         # topics. If the bot serves a single forum chat, that's the answer.
@@ -106,32 +203,54 @@ def _default_chat_id() -> int:
     if not rows:
         raise RuntimeError(
             "no forum topics in sessions yet — pass chat_id explicitly or "
-            "set JARVIS_MANAGER_CHAT_ID"
+            "set JARVIS_SECRETARY_CHAT_ID/JARVIS_MANAGER_CHAT_ID"
         )
     if len(rows) > 1:
         raise RuntimeError(
             "multiple forum chats present; pass chat_id explicitly or set "
-            "JARVIS_MANAGER_CHAT_ID"
+            "JARVIS_SECRETARY_CHAT_ID/JARVIS_MANAGER_CHAT_ID"
         )
     return rows[0]["chat_id"]
 
 
+def _thread_id_from_env(names: tuple[str, ...], label: str) -> int:
+    for name in names:
+        raw = _env_or_dotenv(name)
+        if not raw:
+            continue
+        try:
+            return int(raw)
+        except ValueError as exc:
+            raise RuntimeError(f"{name} is not int: {raw!r}") from exc
+    joined = " or ".join(names)
+    raise RuntimeError(
+        f"{label} topic is not configured; pass thread_id explicitly or set {joined}"
+    )
+
+
+def _secretary_thread_id() -> int:
+    """Secretary topic thread_id; old JARVIS_MANAGER_THREAD_ID is its alias."""
+    return _thread_id_from_env(
+        ("JARVIS_SECRETARY_THREAD_ID", "JARVIS_MANAGER_THREAD_ID"),
+        "Secretary",
+    )
+
+
+def _teamlead_thread_id() -> int:
+    """Teamlead topic thread_id; falls back to Secretary until configured."""
+    try:
+        return _thread_id_from_env(("JARVIS_TEAMLEAD_THREAD_ID",), "Teamlead")
+    except RuntimeError:
+        return _secretary_thread_id()
+
+
 def _manager_thread_id() -> int:
-    """Manager topic thread_id from JARVIS_MANAGER_THREAD_ID.
+    """Compatibility alias: old Manager defaults now point to Secretary.
 
     Until 2026-07-25 this was a SQL lookup for a cwd naming convention private
     to the author, which raised «Manager topic not found» for everyone else.
     """
-    raw = os.environ.get("JARVIS_MANAGER_THREAD_ID")
-    if not raw:
-        raise RuntimeError(
-            "Manager topic is not configured; pass thread_id explicitly or set "
-            "JARVIS_MANAGER_THREAD_ID"
-        )
-    try:
-        return int(raw)
-    except ValueError as exc:
-        raise RuntimeError(f"JARVIS_MANAGER_THREAD_ID is not int: {raw!r}") from exc
+    return _secretary_thread_id()
 
 
 def _telegram_api(method: str, params: dict[str, Any]) -> dict[str, Any]:
@@ -232,9 +351,11 @@ def _row_to_topic(row: sqlite3.Row, last: dict[tuple[int, int], str]) -> dict[st
 mcp = FastMCP(
     name="jarvis-manager",
     instructions=(
-        "Read-only access to Jarvis bot state for the Manager agent. "
+        "Access to Jarvis bot state and controlled Manager actions. "
         "Use manager_topics to see every active topic and its cwd/engine. "
-        "Use manager_inbox to read recent user/bot messages for a topic."
+        "Use manager_inbox to read recent user/bot messages for a topic. "
+        "ActiveCollab tools marked as external writes require an explicit "
+        "operator request for the exact task and action."
     ),
 )
 
@@ -635,6 +756,23 @@ def manager_create_topic(
     }
 
 
+_JOBS_ORIGIN_COLS: bool | None = None
+
+
+def _jobs_has_origin_columns(conn) -> bool:
+    """Есть ли в jobs колонки origin_* (миграция bot/db.py).
+
+    Сервер и бот — разные процессы: если MCP поднялся на БД, где миграция ещё
+    не отработала, INSERT с origin_* уронил бы manager_send целиком. Тогда
+    пишем по-старому, а нотис уйдёт по роли.
+    """
+    global _JOBS_ORIGIN_COLS
+    if _JOBS_ORIGIN_COLS is None:
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(jobs)").fetchall()]
+        _JOBS_ORIGIN_COLS = "origin_chat_id" in cols and "origin_thread_id" in cols
+    return _JOBS_ORIGIN_COLS
+
+
 @mcp.tool(
     name="manager_send",
     description=(
@@ -653,7 +791,13 @@ def manager_create_topic(
         "when publishing formatted content (news digest and the like), so links "
         "hide behind words instead of showing raw URLs. Only with as_user=False. "
         "If Telegram rejects the markup, the message is re-sent as plain text "
-        "rather than lost."
+        "rather than lost.\n"
+        "ALWAYS pass origin_thread_id=<your own thread_id> (it is stated in your "
+        "[SYSTEM:] block as «Твой топик: chat_id=…, thread_id=…») when "
+        "as_user=True. The bot reports the answer, the heartbeat warnings and "
+        "the interrupt notice for that job back to this topic. Omit it and the "
+        "notice falls back to the Teamlead topic, which then wakes up and "
+        "interferes with a task that is not his."
     ),
 )
 def manager_send(
@@ -663,6 +807,8 @@ def manager_send(
     as_user: bool = True,
     delay_seconds: int = 0,
     parse_mode: str | None = None,
+    origin_thread_id: int | None = None,
+    origin_chat_id: int | None = None,
 ) -> dict[str, Any]:
     """Queue or deliver a message into the topic."""
     text = text.strip()
@@ -673,6 +819,10 @@ def manager_send(
     if delay_seconds > 0 and not as_user:
         raise ValueError("delay_seconds only makes sense with as_user=True")
     target_chat_id = chat_id if chat_id is not None else _default_chat_id()
+    # Топик-инициатор: сюда бот вернёт нотис об ответе на этот job. Сервер
+    # общий на все топики и вызывающего сам не знает — его передаёт агент.
+    if origin_thread_id is not None and origin_chat_id is None:
+        origin_chat_id = _default_chat_id()
 
     with _connect() as conn:
         row = conn.execute(
@@ -707,12 +857,28 @@ def manager_send(
                     (now, target_chat_id, thread_id, now),
                 ).fetchall()
                 cancelled_ids = [r[0] for r in cancelled]
-            cur = conn.execute(
-                "INSERT INTO jobs(chat_id, thread_id, text, source, status, "
-                "created_at, not_before) "
-                "VALUES (?, ?, ?, 'manager', 'pending', ?, ?)",
-                (target_chat_id, thread_id, text, now, not_before),
-            )
+            if _jobs_has_origin_columns(conn):
+                cur = conn.execute(
+                    "INSERT INTO jobs(chat_id, thread_id, text, source, status, "
+                    "created_at, not_before, origin_chat_id, origin_thread_id) "
+                    "VALUES (?, ?, ?, 'manager', 'pending', ?, ?, ?, ?)",
+                    (
+                        target_chat_id, thread_id, text, now, not_before,
+                        origin_chat_id if origin_thread_id is not None else None,
+                        origin_thread_id,
+                    ),
+                )
+            else:
+                logger.warning(
+                    "jobs.origin_* missing — restart the bot to migrate; "
+                    "notice for this job falls back to the service role"
+                )
+                cur = conn.execute(
+                    "INSERT INTO jobs(chat_id, thread_id, text, source, status, "
+                    "created_at, not_before) "
+                    "VALUES (?, ?, ?, 'manager', 'pending', ?, ?)",
+                    (target_chat_id, thread_id, text, now, not_before),
+                )
             job_id = cur.lastrowid
             conn.execute(
                 "INSERT INTO messages_log(chat_id, thread_id, direction, kind, "
@@ -735,6 +901,8 @@ def manager_send(
             "cancelled_scheduled": cancelled_ids,
             "engine": row["engine"],
             "cwd": row["cwd"],
+            "origin_chat_id": origin_chat_id if origin_thread_id is not None else None,
+            "origin_thread_id": origin_thread_id,
         }
 
     # as_user=False — just deliver a bot message, no LLM trigger.
@@ -821,7 +989,8 @@ def manager_cancel_job(job_id: int) -> dict[str, Any]:
 @mcp.tool(
     name="manager_remind_add",
     description=(
-        "Создаёт напоминание для Менеджера. Формат schedule (простой текст):\n"
+        "Создаёт напоминание для Секретаря (старое имя manager_* сохранено "
+        "для совместимости). Формат schedule (простой текст):\n"
         "  daily HH:MM              - каждый день\n"
         "  weekday HH:MM            - Пн-Пт\n"
         "  weekend HH:MM            - Сб-Вс\n"
@@ -830,7 +999,7 @@ def manager_cancel_job(job_id: int) -> dict[str, Any]:
         "  once YYYY-MM-DD HH:MM    - one-time\n"
         "Все времена в Europe/Moscow (можно переопределить через "
         "JARVIS_REMINDERS_TZ). В назначенное время бот шлёт в топик "
-        "Менеджера '🔔 Напоминание #N: <text>' и активирует Менеджера "
+        "Секретаря '🔔 Напоминание #N: <text>' и активирует Секретаря "
         "через auto-kick. Возвращает id, next_fire_at."
     ),
 )
@@ -928,6 +1097,125 @@ def manager_remind_list(
             "created_at": r["created_at"],
         })
     return {"count": len(reminders), "reminders": reminders}
+
+
+@mcp.tool(
+    name="manager_activecollab_my_tasks",
+    description=(
+        "Возвращает задачи, назначенные пользователю токена ActiveCollab. "
+        "По умолчанию только незавершённые; каждая запись содержит проект и "
+        "текущую стадию (task list). Только чтение."
+    ),
+)
+def manager_activecollab_my_tasks(include_completed: bool = False) -> dict[str, Any]:
+    """List tasks assigned to the authenticated ActiveCollab user."""
+    tasks = _activecollab_client().my_tasks(include_completed=include_completed)
+    return {"count": len(tasks), "tasks": tasks}
+
+
+@mcp.tool(
+    name="manager_activecollab_task",
+    description=(
+        "Читает задачу ActiveCollab и её комментарии. Нужны project_id и task_id; "
+        "бери их из manager_activecollab_my_tasks или ссылки на задачу. Только чтение."
+    ),
+)
+def manager_activecollab_task(project_id: int, task_id: int) -> dict[str, Any]:
+    """Return one task, including its comments and subscribers."""
+    return _activecollab_client().task(project_id, task_id)
+
+
+@mcp.tool(
+    name="manager_activecollab_stages",
+    description=(
+        "Возвращает допустимые стадии задачи (task lists) проекта ActiveCollab. "
+        "Используй перед переносом, если целевая стадия не названа точно. Только чтение."
+    ),
+)
+def manager_activecollab_stages(project_id: int) -> dict[str, Any]:
+    """List the project task lists used as workflow stages."""
+    stages = _activecollab_client().stages(project_id)
+    return {"count": len(stages), "stages": stages}
+
+
+@mcp.tool(
+    name="manager_activecollab_job_types",
+    description=(
+        "Возвращает доступные типы работ ActiveCollab для трекинга времени. "
+        "Только чтение."
+    ),
+)
+def manager_activecollab_job_types() -> dict[str, Any]:
+    """List ActiveCollab job types available to the current user."""
+    job_types = _activecollab_client().job_types()
+    return {"count": len(job_types), "job_types": job_types}
+
+
+@mcp.tool(
+    name="manager_activecollab_check_updates",
+    description=(
+        "Проверяет новые незавершённые задачи пользователя и новые уведомления "
+        "о комментариях к его задачам. Запоминает уже увиденные ID в локальной "
+        "SQLite БД: первый вызов возвращает стартовую сводку, следующие — только "
+        "дельту. Этот tool предназначен для reminder-чеклиста Секретаря."
+    ),
+)
+def manager_activecollab_check_updates() -> dict[str, Any]:
+    """Return new ActiveCollab tasks/comment notifications since the last check."""
+    return _activecollab_check_updates()
+
+
+@mcp.tool(
+    name="manager_activecollab_add_comment",
+    description=(
+        "Создаёт комментарий к задаче ActiveCollab. ВНЕШНЕЕ WRITE-ДЕЙСТВИЕ: "
+        "вызывай только после явного одобрения оператора с конкретной задачей "
+        "и текстом комментария."
+    ),
+)
+def manager_activecollab_add_comment(task_id: int, body: str) -> dict[str, Any]:
+    """Post an explicitly approved comment to an ActiveCollab task."""
+    return _activecollab_client().add_comment(task_id, body)
+
+
+@mcp.tool(
+    name="manager_activecollab_track_time",
+    description=(
+        "Добавляет учёт времени к задаче ActiveCollab. ВНЕШНЕЕ WRITE-ДЕЙСТВИЕ: "
+        "вызывай только после явного одобрения оператора с задачей, длительностью, "
+        "датой и типом работы. value: например '1:30' или '1.5'; record_date: YYYY-MM-DD."
+    ),
+)
+def manager_activecollab_track_time(
+    project_id: int,
+    task_id: int,
+    value: str,
+    record_date: str,
+    job_type_id: int,
+    summary: str | None = None,
+    billable_status: int | None = None,
+) -> dict[str, Any]:
+    """Create an explicitly approved ActiveCollab time record."""
+    return _activecollab_client().track_time(
+        project_id, task_id, value, record_date, job_type_id, summary, billable_status,
+    )
+
+
+@mcp.tool(
+    name="manager_activecollab_move_task",
+    description=(
+        "Переносит задачу ActiveCollab на стадию по её точному названию, например "
+        "'В работе' или 'Можно тестировать'. ВНЕШНЕЕ WRITE-ДЕЙСТВИЕ: вызывай "
+        "только после явного одобрения оператора с конкретной задачей и стадией."
+    ),
+)
+def manager_activecollab_move_task(
+    project_id: int,
+    task_id: int,
+    stage_name: str,
+) -> dict[str, Any]:
+    """Move a task to an explicitly approved workflow stage."""
+    return _activecollab_client().move_to_stage_name(project_id, task_id, stage_name)
 
 
 @mcp.tool(
@@ -1131,6 +1419,343 @@ def manager_close_session(
     }
 
 
+# Топики, которые нельзя ни свернуть, ни удалить: General (у него нет своего
+# message_thread_id — 0/1 адресуют корень форума) и топик Менеджера, иначе
+# оркестратор заглушил бы сам себя, и вернуть его было бы некому.
+def _guard_topic_admin(chat_id: int, thread_id: int, action: str) -> None:
+    if thread_id <= 1:
+        raise RuntimeError(
+            f"thread_id={thread_id} is the forum's General topic — {action} "
+            "would hit the whole chat, not a topic. Refusing."
+        )
+    # Через _env_or_dotenv, а не os.environ: MCP-сервер поднимается отдельным
+    # процессом и окружение бота наследует не всегда. Читай guard только из
+    # переменных — он бы молча не сработал там, где .env есть, а env пуст,
+    # и топик Менеджера удалялся бы как обычный.
+    raw_manager = _env_or_dotenv("JARVIS_MANAGER_THREAD_ID")
+    if raw_manager and raw_manager.strip().isdigit():
+        if int(raw_manager) == thread_id:
+            raise RuntimeError(
+                f"thread_id={thread_id} is the Manager's own topic — {action} "
+                "would cut off the orchestrator. Refusing."
+            )
+
+
+async def _await_bot_close(
+    chat_id: int, thread_id: int, timeout: float = 10.0, poll: float = 1.0,
+) -> bool:
+    """Закрыть сеанс топика и дождаться, пока бот это исполнит.
+
+    MCP-процесс не видит active_procs / persistent_workers — их знает только
+    бот, поэтому единственный канал — close_requested в sessions. Ждём, пока
+    close_requests_worker погасит флаг: до этого момента процессы топика ещё
+    живы, и удалять топик в Telegram рано — осиротевший процесс пошёл бы
+    писать в несуществующий тред.
+
+    True — бот подтвердил; False — не дождались (бот не запущен / занят).
+    """
+    manager_close_session(
+        thread_id=thread_id, chat_id=chat_id, interrupt_active=True,
+    )
+    deadline = time.monotonic() + max(timeout, 0.0)
+    while True:
+        with _connect() as conn:
+            row = conn.execute(
+                "SELECT close_requested FROM sessions "
+                "WHERE chat_id = ? AND thread_id = ?",
+                (chat_id, thread_id),
+            ).fetchone()
+        if row is None or row["close_requested"] is None:
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        await asyncio.sleep(poll)
+
+
+# Топик уже мог быть удалён руками в Telegram — тогда строка в sessions
+# осиротела, и чистка БД как раз то, что нужно. Отличаем этот случай от
+# «нет прав» / «бот не админ»: те обязаны прерывать операцию.
+_GONE_MARKERS = (
+    "thread not found",
+    "topic_id_invalid",
+    "message thread not found",
+    "topic_deleted",
+    "chat not found",
+)
+
+
+def _telegram_topic_gone(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return any(marker in text for marker in _GONE_MARKERS)
+
+
+@mcp.tool(
+    name="manager_archive_topic",
+    description=(
+        "Свернуть топик в Telegram (closeForumTopic) — мягкая архивация: "
+        "история и настройки топика остаются, писать в него нельзя, в списке "
+        "он уходит в свёрнутые. Это ДЕФОЛТНЫЙ способ убрать временный топик "
+        "после финальной стадии задачи: в отличие от manager_delete_topic "
+        "операция обратима — reopen=True разворачивает топик обратно "
+        "(reopenForumTopic).\n\n"
+        "Перед сворачиванием сеанс топика закрывается, как manager_close_"
+        "session, и инструмент ждёт (до wait_seconds), пока бот добьёт живые "
+        "процессы — иначе идущая задача продолжала бы писать в закрытый "
+        "топик. Строка в sessions сохраняется: cwd/engine/model на месте, "
+        "после reopen топик работает как раньше.\n\n"
+        "Отказ на топике Менеджера и на General."
+    ),
+)
+async def manager_archive_topic(
+    thread_id: int,
+    chat_id: int | None = None,
+    reopen: bool = False,
+    wait_seconds: float = 10.0,
+) -> dict[str, Any]:
+    """Свернуть (или развернуть обратно) форум-топик, сохранив его состояние."""
+    target_chat_id = chat_id if chat_id is not None else _default_chat_id()
+    _guard_topic_admin(target_chat_id, thread_id, "reopen" if reopen else "archive")
+
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT cwd, engine, model, topic_title FROM sessions "
+            "WHERE chat_id = ? AND thread_id = ?",
+            (target_chat_id, thread_id),
+        ).fetchone()
+    if row is None:
+        raise RuntimeError(
+            f"topic chat_id={target_chat_id} thread_id={thread_id} is not "
+            "tracked — nothing to archive (use manager_topics to list)."
+        )
+
+    if reopen:
+        _telegram_api(
+            "reopenForumTopic",
+            {"chat_id": target_chat_id, "message_thread_id": thread_id},
+        )
+        logger.info(
+            "manager_archive_topic reopened chat=%s thread=%s",
+            target_chat_id, thread_id,
+        )
+        return {
+            "chat_id": target_chat_id,
+            "thread_id": thread_id,
+            "title": row["topic_title"],
+            "cwd": row["cwd"],
+            "engine": row["engine"],
+            "state": "open",
+            "session_closed": False,
+            "bot_confirmed": None,
+            "message": (
+                "Topic reopened. Its session stays closed — the next message "
+                "or manager_send starts a fresh one."
+            ),
+        }
+
+    bot_confirmed = await _await_bot_close(
+        target_chat_id, thread_id, timeout=wait_seconds,
+    )
+    _telegram_api(
+        "closeForumTopic",
+        {"chat_id": target_chat_id, "message_thread_id": thread_id},
+    )
+    logger.info(
+        "manager_archive_topic archived chat=%s thread=%s bot_confirmed=%s",
+        target_chat_id, thread_id, bot_confirmed,
+    )
+    return {
+        "chat_id": target_chat_id,
+        "thread_id": thread_id,
+        "title": row["topic_title"],
+        "cwd": row["cwd"],
+        "engine": row["engine"],
+        "model": row["model"],
+        "state": "closed",
+        "session_closed": True,
+        "bot_confirmed": bot_confirmed,
+        "message": (
+            "Topic archived (folded in Telegram); history and settings kept. "
+            + (
+                ""
+                if bot_confirmed
+                else "WARNING: the bot did not confirm the session close in "
+                     "time — it may be down, and the topic's live processes "
+                     "may still be running. "
+            )
+            + "Call again with reopen=true to unfold it."
+        ),
+    }
+
+
+@mcp.tool(
+    name="manager_delete_topic",
+    description=(
+        "УДАЛИТЬ форум-топик вместе со всеми его сообщениями "
+        "(deleteForumTopic) и убрать его состояние из БД бота. "
+        "НЕОБРАТИМО: Telegram не умеет восстанавливать удалённый топик. "
+        "Для штатного завершения временного топика предпочитай "
+        "manager_archive_topic — он обратим; удаляй только когда топик "
+        "действительно больше не нужен и оператор этого хочет.\n\n"
+        "Порядок: сеанс закрывается, инструмент ждёт (до wait_seconds), пока "
+        "бот добьёт живые процессы топика, и только потом удаляет тред — "
+        "иначе процесс пережил бы топик и писал в пустоту. Затем чистит БД: "
+        "строку sessions, напоминания топика, а pending job'ы, триггеры и "
+        "вопросы ask_user переводит в cancelled, чтобы они не выстрелили в "
+        "несуществующий тред. messages_log по умолчанию СОХРАНЯЕТСЯ (это "
+        "переписка, её подчистит cleanup_worker по TTL); purge_log=true "
+        "удаляет и его.\n\n"
+        "Отказ на топике Менеджера и на General, а также если в топике есть "
+        "in_progress job или бот не подтвердил закрытие — обойти можно "
+        "force=true, но тогда убедись, что бот запущен и топик не в работе. "
+        "Если топик уже удалён руками в Telegram, инструмент всё равно "
+        "почистит осиротевшее состояние в БД."
+    ),
+)
+async def manager_delete_topic(
+    thread_id: int,
+    chat_id: int | None = None,
+    purge_log: bool = False,
+    force: bool = False,
+    wait_seconds: float = 10.0,
+) -> dict[str, Any]:
+    """Delete a forum topic and drop the bot state bound to it."""
+    target_chat_id = chat_id if chat_id is not None else _default_chat_id()
+    _guard_topic_admin(target_chat_id, thread_id, "deletion")
+
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT cwd, engine, model, topic_title FROM sessions "
+            "WHERE chat_id = ? AND thread_id = ?",
+            (target_chat_id, thread_id),
+        ).fetchone()
+        if row is None:
+            raise RuntimeError(
+                f"topic chat_id={target_chat_id} thread_id={thread_id} is not "
+                "tracked — nothing to delete (use manager_topics to list)."
+            )
+        busy = [
+            r["id"] for r in conn.execute(
+                "SELECT id FROM jobs WHERE chat_id = ? AND thread_id = ? "
+                "AND status = 'in_progress'",
+                (target_chat_id, thread_id),
+            ).fetchall()
+        ]
+    if busy and not force:
+        raise RuntimeError(
+            f"topic thread_id={thread_id} has in_progress job(s) {busy} — "
+            "the task would die mid-run. Wait for it, or pass force=true if "
+            "the topic is meant to go away anyway."
+        )
+
+    bot_confirmed = await _await_bot_close(
+        target_chat_id, thread_id, timeout=wait_seconds,
+    )
+    if not bot_confirmed and not force:
+        raise RuntimeError(
+            f"the bot did not confirm the session close within {wait_seconds}s "
+            "— it may be down, and this topic's live processes would outlive "
+            "the topic. Start the bot and retry, or pass force=true to delete "
+            "anyway."
+        )
+
+    telegram_deleted = True
+    warning: str | None = None
+    try:
+        _telegram_api(
+            "deleteForumTopic",
+            {"chat_id": target_chat_id, "message_thread_id": thread_id},
+        )
+    except RuntimeError as exc:
+        if not _telegram_topic_gone(exc):
+            raise
+        telegram_deleted = False
+        warning = (
+            f"Telegram says the topic is already gone ({exc}); cleaned up the "
+            "orphaned state in the DB anyway."
+        )
+        logger.info("manager_delete_topic: topic already gone (%s)", exc)
+
+    now = datetime.utcnow().isoformat()
+    with _connect() as conn:
+        cancelled_jobs = [
+            r[0] for r in conn.execute(
+                "UPDATE jobs SET status='cancelled', finished_at=?, "
+                "error='topic deleted' "
+                "WHERE chat_id=? AND thread_id=? AND status='pending' "
+                "RETURNING id",
+                (now, target_chat_id, thread_id),
+            ).fetchall()
+        ]
+        try:
+            cancelled_triggers = [
+                r[0] for r in conn.execute(
+                    "UPDATE agent_triggers SET status='cancelled', finished_at=?, "
+                    "error='topic deleted' "
+                    "WHERE chat_id=? AND thread_id=? AND status='pending' "
+                    "RETURNING id",
+                    (now, target_chat_id, thread_id),
+                ).fetchall()
+            ]
+        except sqlite3.OperationalError:
+            # Старая БД без agent_triggers — интеграций с трекером тут просто нет.
+            cancelled_triggers = []
+        cancelled_asks = [
+            r[0] for r in conn.execute(
+                "UPDATE ask_requests SET status='cancelled', answered_at=? "
+                "WHERE chat_id=? AND thread_id=? AND status='pending' "
+                "RETURNING id",
+                (now, target_chat_id, thread_id),
+            ).fetchall()
+        ]
+        deleted_reminders = conn.execute(
+            "DELETE FROM reminders WHERE chat_id=? AND thread_id=?",
+            (target_chat_id, thread_id),
+        ).rowcount
+        deleted_log = 0
+        if purge_log:
+            deleted_log = conn.execute(
+                "DELETE FROM messages_log WHERE chat_id=? AND thread_id=?",
+                (target_chat_id, thread_id),
+            ).rowcount
+        conn.execute(
+            "DELETE FROM sessions WHERE chat_id=? AND thread_id=?",
+            (target_chat_id, thread_id),
+        )
+
+    logger.info(
+        "manager_delete_topic chat=%s thread=%s title=%r telegram_deleted=%s "
+        "jobs=%s triggers=%s asks=%s reminders=%s log=%s",
+        target_chat_id, thread_id, row["topic_title"], telegram_deleted,
+        cancelled_jobs, cancelled_triggers, cancelled_asks,
+        deleted_reminders, deleted_log,
+    )
+    return {
+        "chat_id": target_chat_id,
+        "thread_id": thread_id,
+        "title": row["topic_title"],
+        "cwd": row["cwd"],
+        "engine": row["engine"],
+        "telegram_deleted": telegram_deleted,
+        "bot_confirmed": bot_confirmed,
+        "forced": bool(force),
+        "interrupted_jobs": busy,
+        "cancelled_jobs": cancelled_jobs,
+        "cancelled_triggers": cancelled_triggers,
+        "cancelled_asks": cancelled_asks,
+        "deleted_reminders": deleted_reminders,
+        "deleted_log_rows": deleted_log,
+        "log_kept": not purge_log,
+        "warning": warning,
+        "message": (
+            "Topic deleted and its bot state removed. "
+            + ("Message log kept (cleanup_worker prunes it by TTL). "
+               if not purge_log else "Message log purged too. ")
+            + "This cannot be undone — recreate with manager_create_topic if "
+              "the project needs a topic again."
+        ),
+    }
+
+
 @mcp.tool(
     name="manager_dismiss_notice",
     description=(
@@ -1319,7 +1944,7 @@ async def ask_user(
     thread_id: int,
     options: list[str] | None = None,
     chat_id: int | None = None,
-    timeout_seconds: int = 600,
+    timeout_seconds: int = 1800,
     default: str | None = None,
     poll_interval: float = 2.0,
 ) -> dict[str, Any]:
@@ -1327,8 +1952,10 @@ async def ask_user(
     question = (question or "").strip()
     if not question:
         return {"status": "error", "error": "question is empty"}
-    if timeout_seconds <= 0 or timeout_seconds > 3600:
-        timeout_seconds = 600
+    if timeout_seconds <= 0:
+        timeout_seconds = 1800
+    elif timeout_seconds > 3600:
+        timeout_seconds = 3600
     poll_interval = min(max(poll_interval, 1.0), 30.0)
     options = [str(o).strip() for o in (options or []) if str(o).strip()][:8]
     target_chat_id = chat_id if chat_id is not None else _default_chat_id()
@@ -1348,7 +1975,10 @@ async def ask_user(
             "error": (
                 f"Ты работаешь над задачей {task_tag} из внешнего трекера "
                 f"({source}) — вопросы в чат отключены. Напиши комментарий в "
-                "задаче и заверши ход: ответ придёт следующим триггером. Перед "
+                "задаче и заверши ход: ответ придёт следующим триггером. "
+                "ОБЯЗАТЕЛЬНО упомяни адресата по логину — «@<логин>» в тексте "
+                "комментария: комментарий без упоминания никого не будит, и "
+                "вопрос повиснет. Логин постановщика виден в карточке. Перед "
                 "опасным действием так же остановись и спроси комментарием, не "
                 "делай его на своё усмотрение."
             ),
@@ -1396,6 +2026,19 @@ async def ask_user(
             "UPDATE ask_requests SET telegram_message_id = ? WHERE id = ?",
             (tg_msg_id, ask_id),
         )
+    # Бот ищет только status='pending', а истёкший вопрос всё равно остаётся
+    # последним сообщением топика — messages_log даёт боту его message_id,
+    # чтобы отличить «ответ на протухший вопрос» от обычного сообщения.
+    try:
+        with _connect() as conn:
+            conn.execute(
+                "INSERT INTO messages_log(chat_id, thread_id, direction, kind, "
+                "text, telegram_message_id, ts) VALUES (?, ?, 'out', 'ask_user', ?, ?, ?)",
+                (target_chat_id, thread_id, question, tg_msg_id, now),
+            )
+    except Exception as exc:
+        logger.warning("ask_user #%s: failed to log question to messages_log: %s",
+                       ask_id, exc)
     logger.info("ask_user #%s posted to thread=%s (options=%d)",
                 ask_id, thread_id, len(options))
 
@@ -1433,7 +2076,13 @@ async def ask_user(
             _telegram_api("editMessageText", {
                 "chat_id": target_chat_id,
                 "message_id": tg_msg_id,
-                "text": f"❓ {question}\n\n⏰ Вопрос истёк — ответа не было.",
+                "text": (
+                    f"❓ {question}\n\n⌛ Вопрос истёк — ответа не было. "
+                    "Можешь всё равно ответить сообщением: передам агенту "
+                    "в ближайшие 15 минут."
+                ),
+                "parse_mode": "HTML",
+                "reply_markup": {"inline_keyboard": []},
             })
         except RuntimeError:
             pass

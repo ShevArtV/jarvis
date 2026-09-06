@@ -27,39 +27,91 @@ from bot.settings import int_env
 
 logger = logging.getLogger(__name__)
 
-def resolve_manager_topic() -> tuple[int, int] | None:
-    """Return (chat_id, thread_id) of the Manager's topic, or None.
+TopicKey = tuple[int, int]
 
-    Two uses: the «report back to Manager» instruction in the SYSTEM NOTE of
-    delegated jobs, and the topic role that decides which credentials an
-    external MCP server gets (see resolve_topic_role).
 
-    Set both JARVIS_MANAGER_CHAT_ID and JARVIS_MANAGER_THREAD_ID to enable it.
-    Without them Jarvis has no Manager topic — a single-topic install does not
-    need one. (Until 2026-07-25 this fell back to a SQL lookup for a directory
-    layout private to the author, which silently did nothing for anyone else.)
-    """
-    raw_chat = os.environ.get("JARVIS_MANAGER_CHAT_ID")
-    raw_thread = os.environ.get("JARVIS_MANAGER_THREAD_ID")
+def _resolve_topic_from_env(prefix: str) -> TopicKey | None:
+    raw_chat = os.environ.get(f"JARVIS_{prefix}_CHAT_ID")
+    raw_thread = os.environ.get(f"JARVIS_{prefix}_THREAD_ID")
     if not (raw_chat and raw_thread):
         return None
     try:
         return int(raw_chat), int(raw_thread)
     except ValueError:
         logger.warning(
-            "JARVIS_MANAGER_{CHAT,THREAD}_ID not int: %r/%r", raw_chat, raw_thread,
+            "JARVIS_%s_{CHAT,THREAD}_ID not int: %r/%r",
+            prefix, raw_chat, raw_thread,
         )
         return None
 
 
-def resolve_topic_role(key: tuple[int, int]) -> str:
-    """Role of a Jarvis topic: 'manager' for the orchestrating topic, else 'agent'.
+def resolve_secretary_topic() -> TopicKey | None:
+    """Return the Secretary topic, or None.
+
+    The old Manager topic becomes Secretary. New installs may set explicit
+    JARVIS_SECRETARY_* variables; existing installs keep working through
+    JARVIS_MANAGER_* as the compatibility alias.
+    """
+    return _resolve_topic_from_env("SECRETARY") or _resolve_topic_from_env("MANAGER")
+
+
+def resolve_teamlead_topic() -> TopicKey | None:
+    """Return the Teamlead topic, or fall back to Secretary/legacy Manager.
+
+    Engineering notices must not disappear while the new topic is being wired.
+    Once JARVIS_TEAMLEAD_* is configured, they stop waking Secretary.
+    """
+    return _resolve_topic_from_env("TEAMLEAD") or resolve_secretary_topic()
+
+
+def resolve_manager_topic() -> TopicKey | None:
+    """Compatibility alias for the old Manager topic, now Secretary.
+
+    Existing MCP tools, docs and tests still use the manager naming. Keep the
+    API stable while the human-facing role is split into Secretary + Teamlead.
+    """
+    return resolve_secretary_topic()
+
+
+def resolve_service_topic(role: str) -> TopicKey | None:
+    """Resolve a service role target used for notices/auto-kick."""
+    role = (role or "").strip().lower()
+    if role in {"teamlead", "lead", "engineering"}:
+        return resolve_teamlead_topic()
+    if role in {"secretary", "manager", "communications", "communication"}:
+        return resolve_secretary_topic()
+    logger.warning("unknown service topic role %r", role)
+    return None
+
+
+def resolve_job_notice_target(
+    origin_chat_id: int | None,
+    origin_thread_id: int | None,
+) -> TopicKey | None:
+    """Кому адресован нотис по job'у: топику-инициатору делегирования.
+
+    origin_* приходят из строки jobs (их пишет manager_send). Пусты у старых
+    job и у self_notice — тогда fallback на Тимлида, как было до разделения
+    адресатов. Без инициатора любой job будил Тимлида, и тот вклинивался в
+    чужую задачу — вплоть до параллельной сессии в одном топике.
+    """
+    if origin_chat_id is None or origin_thread_id is None:
+        return resolve_teamlead_topic()
+    return origin_chat_id, origin_thread_id
+
+
+def resolve_topic_role(key: TopicKey) -> str:
+    """Role of a Jarvis topic for external per-topic MCP credentials.
 
     The selected LLM engine is irrelevant here — the role belongs to the topic.
     External MCP servers use it to pick credentials, so that one forum can act
     under two identities without either leaking into the other's topics.
     """
-    return "manager" if resolve_manager_topic() == key else "agent"
+    if _resolve_topic_from_env("TEAMLEAD") == key:
+        return "teamlead"
+    if resolve_secretary_topic() == key:
+        return "secretary"
+    return "agent"
 
 
 def save_message_context(chat_id: int, message_id: int, ctx: dict) -> None:
@@ -86,6 +138,58 @@ def load_message_context(chat_id: int, message_id: int) -> dict | None:
             return None
         ctx["_created_at"] = row[1]
         return ctx
+
+
+# Последнее известное сообщение топика: key -> telegram_message_id.
+# Нужен журналу хода: он правит СВОЁ сообщение, и если ниже него уже успело
+# уехать что-то ещё (вопрос ask_user, ответ бота, реплика пользователя),
+# трансляция продолжается в сообщение, которое уехало вверх и которого не
+# видно на экране. Реестр даёт журналу повод отцепиться и начать новое
+# сообщение внизу топика.
+last_topic_message: dict[TopicKey, int] = {}
+
+
+def note_topic_message(chat_id: int | None, thread_id: int, message_id: int | None) -> None:
+    """Запомнить, что в топик уехало сообщение с таким id.
+
+    Реестр вспомогательный: если id по какой-то причине неизвестен, это не
+    повод ронять саму отправку.
+    """
+    if not message_id or chat_id is None:
+        return
+    key = (chat_id, thread_id or 0)
+    if message_id > last_topic_message.get(key, 0):
+        last_topic_message[key] = message_id
+
+
+def latest_topic_message_id(chat_id: int, thread_id: int) -> int:
+    """Самое свежее известное сообщение топика.
+
+    Реестр в памяти знает только про то, что отправил сам бот. Вопросы
+    ask_user шлёт ДРУГОЙ процесс (MCP-сервер), а входящие реплики
+    пользователя пишет хендлер, — поэтому сверяемся ещё и с БД.
+    """
+    thread_id = thread_id or 0
+    best = last_topic_message.get((chat_id, thread_id), 0)
+    try:
+        with _db() as conn:
+            row = conn.execute(
+                "SELECT MAX(telegram_message_id) FROM messages_log "
+                "WHERE chat_id = ? AND thread_id = ?",
+                (chat_id, thread_id),
+            ).fetchone()
+            if row and row[0]:
+                best = max(best, int(row[0]))
+            row = conn.execute(
+                "SELECT MAX(telegram_message_id) FROM ask_requests "
+                "WHERE chat_id = ? AND thread_id = ?",
+                (chat_id, thread_id),
+            ).fetchone()
+            if row and row[0]:
+                best = max(best, int(row[0]))
+    except Exception:
+        logger.debug("latest_topic_message_id: db lookup failed", exc_info=True)
+    return best
 
 
 def _key(update: Update) -> tuple[int, int]:

@@ -8,17 +8,18 @@ from __future__ import annotations
 
 import logging
 
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, WebAppInfo
 from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 
 import asyncio
 import os
-from bot.formatting import _html_escape
+from bot.formatting import _html_escape, md_to_html
 from bot.sessions import _persistent_column_for_engine, _session_state_line, clear_cwd, close_session, get_actual_model, get_mcp_playwright, get_model, get_persistent_for_engine, get_session, reset_session, set_cwd, touch_session
-from bot.settings import CLAUDE_CWD, DEFAULT_ENGINE_NAME, SESSION_IDLE_MINUTES
+from bot.settings import BOARD_MINIAPP_SHORT_NAME, BOARD_MINIAPP_URL, CLAUDE_CWD, DEFAULT_ENGINE_NAME, SESSION_IDLE_MINUTES
 from bot.topics import _key, _kill_persistent_worker, active_procs, persistent_workers, spawn_procs
 from engines import get_engine_by_name
+from engines.limits import all_limits, format_limits_block
 from engines.process_control import terminate_process_tree
 from engines.session_usage import SessionUsage, inspect_session_usage
 
@@ -192,6 +193,15 @@ async def cmd_tokens(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await update.message.reply_text("<pre>" + _html_escape(body) + "</pre>", parse_mode=ParseMode.HTML)
 
 
+async def cmd_usage(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # all_limits() ходит в сеть за свежими цифрами — держать на этом event loop
+    # бота нельзя, иначе на время запроса встают все остальные топики.
+    items = await asyncio.to_thread(all_limits)
+    body = format_limits_block(items)
+    body += "\n\nКонтекст текущей сессии: /tokens"
+    await update.message.reply_text(md_to_html(body), parse_mode=ParseMode.HTML)
+
+
 async def cmd_close(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Закрыть сеанс — как закрыть окно терминала. Топик (cwd, движок, модель)
     остаётся, контекст сессии — нет. Следующее сообщение откроет новый сеанс."""
@@ -281,6 +291,33 @@ async def cmd_where(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         f"cwd: {effective}" + (" (дефолт)" if not cwd else " (bound)")
     )
+
+
+async def cmd_board(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/board — открыть миниапп доски QueueWarden.
+
+    В личке доступна web_app-кнопка (открывает миниапп прямо в Telegram).
+    В группах/форумах web_app-кнопки запрещены Telegram — там ссылка на
+    именованное приложение вида t.me/<bot>/<short_name>.
+    """
+    if not update.message:
+        return
+    if not BOARD_MINIAPP_URL:
+        await update.message.reply_text(
+            "Миниапп доски не настроен: задайте BOARD_MINIAPP_URL в .env."
+        )
+        return
+    is_private = update.effective_chat is not None and update.effective_chat.type == "private"
+    if is_private:
+        keyboard = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("Открыть доску", web_app=WebAppInfo(url=BOARD_MINIAPP_URL))]]
+        )
+    else:
+        link = f"https://t.me/{context.bot.username}/{BOARD_MINIAPP_SHORT_NAME}"
+        keyboard = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("Открыть доску", url=link)]]
+        )
+    await update.message.reply_text("Доска QueueWarden", reply_markup=keyboard)
 
 
 async def cmd_spawn(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

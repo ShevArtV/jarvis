@@ -353,7 +353,10 @@ def _persistent_column_for_engine(engine_name: str) -> str | None:
 
 
 def get_persistent_for_engine(chat_id: int, thread_id: int, engine_name: str) -> bool:
-    """True if /persistent is enabled for this topic and engine."""
+    """Persistent включён по умолчанию для движков, которые его поддерживают
+    (claude, codex): NULL в колонке и отсутствие строки топика трактуются как
+    ВКЛЮЧЕНО. Выключается только явным /persistent off (значение 0). Движки
+    без поддержки persistent всегда возвращают False."""
     column = _persistent_column_for_engine(engine_name)
     if column is None:
         return False
@@ -362,7 +365,7 @@ def get_persistent_for_engine(chat_id: int, thread_id: int, engine_name: str) ->
             f"SELECT {column} FROM sessions WHERE chat_id = ? AND thread_id = ?",
             (chat_id, thread_id),
         ).fetchone()
-    return bool(row[0]) if row and row[0] is not None else False
+    return bool(row[0]) if row and row[0] is not None else True
 
 
 def set_persistent_for_engine(

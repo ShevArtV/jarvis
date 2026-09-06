@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from telegram import Update
 from telegram.constants import ParseMode
@@ -21,6 +21,9 @@ from bot.db import _db
 from bot.formatting import _html_escape
 
 logger = logging.getLogger(__name__)
+
+GRACE_MINUTES = 15
+
 
 def get_pending_ask(chat_id: int, thread_id: int) -> dict | None:
     """Незакрытый вопрос топика (последний, если их вдруг несколько)."""
@@ -34,6 +37,34 @@ def get_pending_ask(chat_id: int, thread_id: int) -> dict | None:
     return dict(row) if row is not None else None
 
 
+def get_recent_timed_out_ask(
+    chat_id: int, thread_id: int, within_minutes: int = GRACE_MINUTES,
+) -> dict | None:
+    """Вопрос, истёкший по таймауту не более within_minutes назад.
+
+    Окно считается от МОМЕНТА ИСТЕЧЕНИЯ (``answered_at`` — его проставляет
+    MCP-сервер, закрывая вопрос по таймауту), а не от создания: ждать ответа
+    вопрос мог полчаса, и по ``created_at`` grace-окно не наступало бы вовсе.
+    """
+    with _db() as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT * FROM ask_requests WHERE chat_id = ? AND thread_id = ? "
+            "AND status = 'timed_out' ORDER BY id DESC LIMIT 1",
+            (chat_id, thread_id),
+        ).fetchone()
+    if row is None:
+        return None
+    ask = dict(row)
+    try:
+        expired_at = datetime.fromisoformat(ask["answered_at"] or ask["created_at"])
+    except (TypeError, ValueError):
+        return None
+    if datetime.utcnow() - expired_at > timedelta(minutes=within_minutes):
+        return None
+    return ask
+
+
 def answer_ask(
     ask_id: int, answer: str, via: str, option_index: int | None = None,
 ) -> bool:
@@ -44,6 +75,17 @@ def answer_ask(
             "option_index = ?, via = ?, answered_at = ? "
             "WHERE id = ? AND status = 'pending'",
             (answer, option_index, via, datetime.utcnow().isoformat(), ask_id),
+        )
+    return cur.rowcount == 1
+
+
+def mark_ask_late_answered(ask_id: int, answer: str) -> bool:
+    """Пометить истёкший вопрос как отвеченный задним числом."""
+    with _db() as conn:
+        cur = conn.execute(
+            "UPDATE ask_requests SET status = 'answered_late', answer = ?, "
+            "via = 'text_late', answered_at = ? WHERE id = ? AND status = 'timed_out'",
+            (answer, datetime.utcnow().isoformat(), ask_id),
         )
     return cur.rowcount == 1
 

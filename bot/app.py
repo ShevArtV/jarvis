@@ -19,6 +19,7 @@ from telegram import (
     MenuButtonCommands,
 )
 from telegram.ext import (
+    AIORateLimiter,
     Application,
     CallbackQueryHandler,
     CommandHandler,
@@ -35,6 +36,7 @@ from bot.asks import on_ask_answer
 from bot.delivery import _send_manager_notice
 from bot.handlers.commands import (
     cmd_bind,
+    cmd_board,
     cmd_close,
     cmd_reset,
     cmd_session,
@@ -43,6 +45,7 @@ from bot.handlers.commands import (
     cmd_stop,
     cmd_tokens,
     cmd_unbind,
+    cmd_usage,
     cmd_where,
     unauthorized_handler,
 )
@@ -85,11 +88,13 @@ BOT_COMMANDS: list[BotCommand] = [
     BotCommand("new", "закрыть сеанс и сразу открыть новый"),
     BotCommand("session", "session-id, cwd, движок и состояние сеанса"),
     BotCommand("tokens", "оценка размера текущей сессии"),
+    BotCommand("usage", "остаток лимитов подписки claude и codex"),
     BotCommand("stop", "прервать текущий запрос"),
     BotCommand("spawn", "одноразовая параллельная сессия — /spawn <prompt>"),
     BotCommand("bind", "привязать топик к каталогу — /bind <abs path>"),
     BotCommand("unbind", "снять привязку cwd, вернуть дефолт"),
     BotCommand("where", "показать эффективный cwd"),
+    BotCommand("board", "открыть доску QueueWarden (миниапп)"),
     BotCommand("persistent", "живой процесс claude/codex: сообщения на лету"),
     BotCommand("start", "приветствие и состояние топика"),
 ]
@@ -185,10 +190,15 @@ def build_application(
     # concurrent_updates=True: без этого PTB обрабатывает апдейты последовательно,
     # и per-key asyncio.Lock не даёт параллельности между разными топиками —
     # второй топик ждёт, пока освободится воркер PTB, а не сам lock.
+    # rate_limiter: Telegram троттлит отправку в один чат (~20 сообщений в
+    # минуту) и отвечает RetryAfter. Без лимитера PTB просто пробрасывал ошибку
+    # наверх — и ответ агента терялся молча. AIORateLimiter выдерживает паузы
+    # сам и повторяет запрос, а не роняет его.
     app = (
         Application.builder()
         .token(token if token is not None else TELEGRAM_TOKEN)
         .concurrent_updates(True)
+        .rate_limiter(AIORateLimiter(max_retries=3))
         .post_init(_post_init)
         .build()
     )
@@ -204,6 +214,7 @@ def build_application(
     app.add_handler(CommandHandler("spawn", cmd_spawn, filters=allowed))
     app.add_handler(CommandHandler("session", cmd_session, filters=allowed))
     app.add_handler(CommandHandler("tokens", cmd_tokens, filters=allowed))
+    app.add_handler(CommandHandler("usage", cmd_usage, filters=allowed))
     app.add_handler(CommandHandler("close", cmd_close, filters=allowed))
     app.add_handler(CommandHandler("engine", cmd_engine, filters=allowed))
     app.add_handler(CommandHandler("browser", cmd_browser, filters=allowed))
@@ -211,6 +222,7 @@ def build_application(
     app.add_handler(CommandHandler("bind", cmd_bind, filters=allowed))
     app.add_handler(CommandHandler("unbind", cmd_unbind, filters=allowed))
     app.add_handler(CommandHandler("where", cmd_where, filters=allowed))
+    app.add_handler(CommandHandler("board", cmd_board, filters=allowed))
 
     app.add_handler(MessageHandler(allowed & filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(allowed & filters.Document.ALL, handle_document))

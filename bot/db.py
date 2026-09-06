@@ -156,27 +156,48 @@ def init_db() -> None:
                     "ALTER TABLE sessions ADD COLUMN mcp_playwright INTEGER NOT NULL DEFAULT 0"
                 )
             # Idempotent миграция: persistent_claude — per-topic флаг «живой
-            # процесс claude». 0 = off (дефолт): сообщение на сообщение —
-            # отдельный subprocess. 1 = on: один subprocess на сеанс
+            # процесс claude». 1 = on (дефолт): один subprocess на сеанс
             # (--input-format stream-json), сообщение во время активного хода
-            # дописывается в его stdin вместо ожидания очереди. Команда
-            # /persistent тоглит флаг.
+            # дописывается в его stdin вместо ожидания очереди. 0 = off,
+            # выставляется только явным /persistent off. Команда /persistent
+            # тоглит флаг.
             cols_now = [r[1] for r in conn.execute("PRAGMA table_info(sessions)").fetchall()]
             if cols_now and "persistent_claude" not in cols_now:
                 _backup_db_once()
-                logger.info("adding 'persistent_claude' column to sessions (default=0)")
+                logger.info("adding 'persistent_claude' column to sessions (default=1)")
                 conn.execute(
-                    "ALTER TABLE sessions ADD COLUMN persistent_claude INTEGER NOT NULL DEFAULT 0"
+                    "ALTER TABLE sessions ADD COLUMN persistent_claude INTEGER NOT NULL DEFAULT 1"
                 )
             # Idempotent migration: persistent_codex — per-topic flag for a live
             # Codex app-server. Kept separate from persistent_claude to avoid a
             # risky state refactor and preserve existing Claude behavior.
+            # Default is on (1); explicit /persistent off sets 0.
             cols_now = [r[1] for r in conn.execute("PRAGMA table_info(sessions)").fetchall()]
             if cols_now and "persistent_codex" not in cols_now:
                 _backup_db_once()
-                logger.info("adding 'persistent_codex' column to sessions (default=0)")
+                logger.info("adding 'persistent_codex' column to sessions (default=1)")
                 conn.execute(
-                    "ALTER TABLE sessions ADD COLUMN persistent_codex INTEGER NOT NULL DEFAULT 0"
+                    "ALTER TABLE sessions ADD COLUMN persistent_codex INTEGER NOT NULL DEFAULT 1"
+                )
+            # Idempotent миграция: persistent_default_migrated — одноразовый
+            # бэкфилл persistent_claude/persistent_codex в 1 для СУЩЕСТВУЮЩИХ
+            # строк (решение оператора 2026-09-05: включить persistent всем
+            # топикам, кто его поддерживает). Маркер-колонка нужна, чтобы
+            # бэкфилл не повторялся на каждом рестарте бота и не сбрасывал
+            # топики, которые оператор явно выключил командой /persistent off
+            # уже ПОСЛЕ этой миграции.
+            cols_now = [r[1] for r in conn.execute("PRAGMA table_info(sessions)").fetchall()]
+            if cols_now and "persistent_default_migrated" not in cols_now:
+                _backup_db_once()
+                logger.info(
+                    "backfilling persistent_claude/persistent_codex=1 for existing sessions rows"
+                )
+                conn.execute(
+                    "UPDATE sessions SET persistent_claude = 1, persistent_codex = 1"
+                )
+                conn.execute(
+                    "ALTER TABLE sessions ADD COLUMN persistent_default_migrated "
+                    "INTEGER NOT NULL DEFAULT 1"
                 )
             # Idempotent миграция: autocompact_enabled — легаси, автокомпакт
             # убран вместе с переходом на сеансы. Колонку не используем и не
@@ -334,6 +355,16 @@ def init_db() -> None:
             conn.execute(
                 "ALTER TABLE jobs ADD COLUMN cancel_requested TEXT"
             )
+        # Idempotent миграция: origin_* — топик, который делегировал задачу
+        # (manager_send его передаёт). Нужен, чтобы safety/heartbeat-нотис об
+        # ответе уходил инициатору, а не константному Тимлиду: до этого любой
+        # job будил топик Тимлида, и тот вклинивался в чужую задачу.
+        # NULL = инициатор неизвестен → fallback на служебную роль teamlead.
+        cols_now = [r[1] for r in conn.execute("PRAGMA table_info(jobs)").fetchall()]
+        if cols_now and "origin_chat_id" not in cols_now:
+            logger.info("adding 'origin_chat_id'/'origin_thread_id' columns to jobs")
+            conn.execute("ALTER TABLE jobs ADD COLUMN origin_chat_id INTEGER")
+            conn.execute("ALTER TABLE jobs ADD COLUMN origin_thread_id INTEGER")
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_jobs_pending "
             "ON jobs(status, not_before, created_at)"
@@ -401,6 +432,34 @@ def init_db() -> None:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_reminders_due "
             "ON reminders(enabled, next_fire_at)"
+        )
+        # Состояние polling-интеграций. Сейчас его использует ActiveCollab MCP,
+        # чтобы не повторять уже доложенные Секретарю задачи и уведомления.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS integration_seen_items (
+                integration TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                item_id INTEGER NOT NULL,
+                seen_at TEXT NOT NULL,
+                PRIMARY KEY (integration, kind, item_id)
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_integration_seen_items "
+            "ON integration_seen_items(integration, kind, item_id)"
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS integration_sync_state (
+                integration TEXT NOT NULL,
+                state_key TEXT NOT NULL,
+                state_value TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (integration, state_key)
+            )
+            """
         )
         # imap_state: UIDs уже отправленных нотисов, чтобы не дублировать.
         conn.execute(

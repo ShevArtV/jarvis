@@ -36,7 +36,8 @@ def claim_next_job(
     """
     now = datetime.utcnow().isoformat()
     sql = (
-        "SELECT id, chat_id, thread_id, text, source FROM jobs "
+        "SELECT id, chat_id, thread_id, text, source, origin_chat_id, "
+        "origin_thread_id FROM jobs "
         "WHERE status = 'pending' AND (not_before IS NULL OR not_before <= ?)"
     )
     params = [now]
@@ -62,6 +63,10 @@ def claim_next_job(
         "thread_id": row[2],
         "text": row[3],
         "source": row[4],
+        # Топик-инициатор делегирования: нотис об ответе идёт ему, а не
+        # константной служебной роли. NULL у старых job и self_notice.
+        "origin_chat_id": row[5],
+        "origin_thread_id": row[6],
     }
 
 

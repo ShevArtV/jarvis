@@ -29,6 +29,10 @@ logger = logging.getLogger(__name__)
 CLAUDE_BIN = os.environ.get("CLAUDE_BIN", "claude")
 CLAUDE_TIMEOUT = int(os.environ.get("CLAUDE_TIMEOUT", "3600"))
 INTERMEDIATE_MIN_INTERVAL = 2.0
+# Claude Code implements its native Grep tool with bundled ugrep.  A pathological
+# regex against minified assets previously exhausted host memory, so Jarvis uses
+# Bash/rg for searches instead.
+CLAUDE_DISALLOWED_TOOLS = ["Grep"]
 
 # Алиасы последних моделей: CLI принимает их всегда, независимо от аккаунта.
 DEFAULT_CLAUDE_MODELS = ["opus", "sonnet", "haiku"]
@@ -268,6 +272,7 @@ async def start_persistent(
     cmd = [
         CLAUDE_BIN, "--print",
         "--permission-mode", "bypassPermissions",
+        "--disallowedTools", *CLAUDE_DISALLOWED_TOOLS,
         "--input-format", "stream-json",
         "--output-format", "stream-json",
         "--verbose",
@@ -432,6 +437,7 @@ class ClaudeEngine:
         cmd = [
             CLAUDE_BIN, "--print",
             "--permission-mode", "bypassPermissions",
+            "--disallowedTools", *CLAUDE_DISALLOWED_TOOLS,
             "--input-format", "text",
             "--output-format", "stream-json",
             "--verbose",
