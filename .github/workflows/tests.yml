@@ -58,7 +58,7 @@ jobs:
 
           init_db()
           app = build_application(token="123456:fake", allowed_user_ids={1})
-          assert len(app.handlers[0]) == 26, len(app.handlers[0])
+          assert len(app.handlers[0]) == 28, len(app.handlers[0])
           assert resolve_manager_topic() is None
           assert _mcp_config_flags(False, "agent") == []
           print("fresh install OK:", len(app.handlers[0]), "handlers")
