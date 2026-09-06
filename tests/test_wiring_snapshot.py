@@ -47,6 +47,7 @@ EXPECTED_HANDLERS = [
     (0, 'CommandHandler', 'bind', 'cmd_bind'),
     (0, 'CommandHandler', 'unbind', 'cmd_unbind'),
     (0, 'CommandHandler', 'where', 'cmd_where'),
+    (0, 'CommandHandler', 'board', 'cmd_board'),
     (0, 'MessageHandler', '-', 'handle_photo'),
     (0, 'MessageHandler', '-', 'handle_document'),
     (0, 'MessageHandler', '-', 'handle_text'),

@@ -36,6 +36,7 @@ from bot.asks import on_ask_answer
 from bot.delivery import _send_manager_notice
 from bot.handlers.commands import (
     cmd_bind,
+    cmd_board,
     cmd_close,
     cmd_reset,
     cmd_session,
@@ -93,6 +94,7 @@ BOT_COMMANDS: list[BotCommand] = [
     BotCommand("bind", "привязать топик к каталогу — /bind <abs path>"),
     BotCommand("unbind", "снять привязку cwd, вернуть дефолт"),
     BotCommand("where", "показать эффективный cwd"),
+    BotCommand("board", "открыть доску QueueWarden (миниапп)"),
     BotCommand("persistent", "живой процесс claude/codex: сообщения на лету"),
     BotCommand("start", "приветствие и состояние топика"),
 ]
@@ -220,6 +222,7 @@ def build_application(
     app.add_handler(CommandHandler("bind", cmd_bind, filters=allowed))
     app.add_handler(CommandHandler("unbind", cmd_unbind, filters=allowed))
     app.add_handler(CommandHandler("where", cmd_where, filters=allowed))
+    app.add_handler(CommandHandler("board", cmd_board, filters=allowed))
 
     app.add_handler(MessageHandler(allowed & filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(allowed & filters.Document.ALL, handle_document))
