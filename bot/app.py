@@ -44,9 +44,11 @@ from bot.handlers.commands import (
     cmd_start,
     cmd_stop,
     cmd_tokens,
+    cmd_throttle,
     cmd_unbind,
     cmd_usage,
     cmd_where,
+    on_throttle_action,
     unauthorized_handler,
 )
 from bot.handlers.engine import (
@@ -89,6 +91,7 @@ BOT_COMMANDS: list[BotCommand] = [
     BotCommand("session", "session-id, cwd, движок и состояние сеанса"),
     BotCommand("tokens", "оценка размера текущей сессии"),
     BotCommand("usage", "остаток лимитов подписки claude и codex"),
+    BotCommand("throttle", "очередь отложенных автотриггеров"),
     BotCommand("stop", "прервать текущий запрос"),
     BotCommand("spawn", "одноразовая параллельная сессия — /spawn <prompt>"),
     BotCommand("bind", "привязать топик к каталогу — /bind <abs path>"),
@@ -215,6 +218,7 @@ def build_application(
     app.add_handler(CommandHandler("session", cmd_session, filters=allowed))
     app.add_handler(CommandHandler("tokens", cmd_tokens, filters=allowed))
     app.add_handler(CommandHandler("usage", cmd_usage, filters=allowed))
+    app.add_handler(CommandHandler("throttle", cmd_throttle, filters=allowed))
     app.add_handler(CommandHandler("close", cmd_close, filters=allowed))
     app.add_handler(CommandHandler("engine", cmd_engine, filters=allowed))
     app.add_handler(CommandHandler("browser", cmd_browser, filters=allowed))
@@ -228,6 +232,7 @@ def build_application(
     app.add_handler(MessageHandler(allowed & filters.Document.ALL, handle_document))
     app.add_handler(MessageHandler(allowed & filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(CallbackQueryHandler(on_cancel_queue, pattern=r"^cancel_queue:"))
+    app.add_handler(CallbackQueryHandler(on_throttle_action, pattern=r"^throttle_(now|cancel):"))
     app.add_handler(CallbackQueryHandler(on_engine_select, pattern=r"^engine_select:"))
     app.add_handler(CallbackQueryHandler(on_model_select, pattern=r"^model_select:"))
     app.add_handler(CallbackQueryHandler(on_engine_carry, pattern=r"^engine_carry:"))

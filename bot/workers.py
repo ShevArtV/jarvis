@@ -16,6 +16,7 @@ import os
 import time
 from datetime import datetime, timedelta
 
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application
 
 from engines.process_control import terminate_process_tree
@@ -30,7 +31,9 @@ from bot.queues import (
     claim_next_job,
     cleanup_old_log_entries,
     finish_job,
+    defer_agent_trigger,
 )
+from engines.throttle import WORK_TZ, engine_pace_decision
 from bot.reminders import compute_next_fire, parse_reminder_schedule
 from bot.sessions import clear_close_request, close_session, get_session
 from bot.settings import CLAUDE_CWD
@@ -481,6 +484,28 @@ async def _run_agent_trigger_slot(
 ) -> None:
     trigger_id = trigger["id"]
     try:
+        # The decision is intentionally made after claim, immediately before a
+        # process can start: direct work in another topic may have spent quota.
+        engine = get_session(trigger["chat_id"], trigger["thread_id"])[2]
+        decision = await asyncio.to_thread(engine_pace_decision, engine)
+        # A manual "start now" skips only the pace rule. It never bypasses a
+        # provider window already at 100%, and usage is still fetched now.
+        hard_exhausted = decision.used_percent is not None and decision.used_percent >= 100
+        if decision.defer_until is not None and (not trigger.get("throttle_force") or hard_exhausted):
+            chat = await app.bot.get_chat(trigger["chat_id"])
+            used = "—" if decision.used_percent is None else f"{decision.used_percent:.1f}%"
+            allowed = "—" if decision.allowed_percent is None else f"{decision.allowed_percent:.1f}%"
+            text = (f"⏱️ Автотриггер #{trigger_id} отложен: {decision.reason}.\n"
+                    f"Лимит: {used} при плане {allowed}.\n"
+                    f"Повторная проверка: {decision.defer_until.astimezone(WORK_TZ).strftime('%d.%m %H:%M')}.\n"
+                    "Перед запуском лимит будет запрошен заново.")
+            keyboard = InlineKeyboardMarkup([[
+                InlineKeyboardButton("▶️ Запустить сейчас", callback_data=f"throttle_now:{trigger_id}"),
+                InlineKeyboardButton("❌ Отменить", callback_data=f"throttle_cancel:{trigger_id}"),
+            ]])
+            sent = await send_to_topic(chat, trigger["thread_id"], text, reply_markup=keyboard)
+            defer_agent_trigger(trigger_id, decision.defer_until, decision.reason or "pace", getattr(sent, "message_id", None))
+            return
         ok, err_text = await _process_agent_trigger(app, trigger)
         finish_agent_trigger(
             trigger_id,

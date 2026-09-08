@@ -40,6 +40,7 @@ EXPECTED_HANDLERS = [
     (0, 'CommandHandler', 'session', 'cmd_session'),
     (0, 'CommandHandler', 'tokens', 'cmd_tokens'),
     (0, 'CommandHandler', 'usage', 'cmd_usage'),
+    (0, 'CommandHandler', 'throttle', 'cmd_throttle'),
     (0, 'CommandHandler', 'close', 'cmd_close'),
     (0, 'CommandHandler', 'engine', 'cmd_engine'),
     (0, 'CommandHandler', 'browser', 'cmd_browser'),
@@ -52,6 +53,7 @@ EXPECTED_HANDLERS = [
     (0, 'MessageHandler', '-', 'handle_document'),
     (0, 'MessageHandler', '-', 'handle_text'),
     (0, 'CallbackQueryHandler', '^cancel_queue:', 'on_cancel_queue'),
+    (0, 'CallbackQueryHandler', '^throttle_(now|cancel):', 'on_throttle_action'),
     (0, 'CallbackQueryHandler', '^engine_select:', 'on_engine_select'),
     (0, 'CallbackQueryHandler', '^model_select:', 'on_model_select'),
     (0, 'CallbackQueryHandler', '^engine_carry:', 'on_engine_carry'),
@@ -77,7 +79,8 @@ EXPECTED_LAYOUT = {
     "bot.db": ["DB_PATH", "init_db", "log_message", "_db"],
     "bot.queues": [
         "claim_next_job", "finish_job", "claim_next_agent_trigger",
-        "finish_agent_trigger", "cleanup_old_log_entries",
+        "finish_agent_trigger", "defer_agent_trigger", "trigger_now",
+        "cancel_agent_triggers", "list_throttled_triggers", "cleanup_old_log_entries",
     ],
     "bot.topics": [
         "_key", "_lock_for", "resolve_manager_topic", "resolve_topic_role",
