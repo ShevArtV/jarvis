@@ -22,8 +22,6 @@ from engines import get_engine_by_name
 from engines.limits import all_limits, format_limits_block
 from engines.process_control import terminate_process_tree
 from engines.session_usage import SessionUsage, inspect_session_usage
-from engines.throttle import pace_decision
-from bot.queues import cancel_agent_triggers, list_throttled_triggers, trigger_now
 
 
 
@@ -56,8 +54,6 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/browser [on|off] — браузер (Playwright MCP) для топика, on-demand\n"
         "/persistent [on|off] — живой процесс claude/codex: сообщения на лету, без очереди\n"
         "/tokens — оценка размера текущей сессии\n"
-        "/usage — остаток лимитов и темп расхода\n"
-        "/throttle — очередь отложенных автотриггеров\n"
         f"/close — закрыть сеанс (сам закроется после {SESSION_IDLE_MINUTES} мин простоя)\n"
         "/new, /reset — закрыть сеанс и сразу открыть новый\n"
         "/stop — прервать текущий запрос (сеанс сохраняется)\n"
@@ -202,58 +198,8 @@ async def cmd_usage(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # бота нельзя, иначе на время запроса встают все остальные топики.
     items = await asyncio.to_thread(all_limits)
     body = format_limits_block(items)
-    pace_lines = []
-    for item in items:
-        pace = pace_decision(item)
-        if pace.used_percent is not None and pace.allowed_percent is not None:
-            state = "в темпе" if pace.defer_until is None else "пауза автотриггеров"
-            pace_lines.append(
-                f"{item.engine}: {pace.used_percent:.1f}% / допустимо {pace.allowed_percent:.1f}% — {state}"
-            )
-    if pace_lines:
-        body += "\n\nСпидометр (Пн–Сб 09:00–21:00, резерв 10%):\n" + "\n".join(pace_lines)
     body += "\n\nКонтекст текущей сессии: /tokens"
     await update.message.reply_text(md_to_html(body), parse_mode=ParseMode.HTML)
-
-
-async def cmd_throttle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Inspect or clean the persisted automatic-trigger throttle queue."""
-    args = context.args or []
-    chat_id = update.effective_chat.id
-    if args and args[0] == "clear":
-        n = cancel_agent_triggers(chat_id)
-        await update.message.reply_text(f"🧹 Очищено отложенных автотриггеров: {n}.")
-        return
-    if args and args[0] == "cancel" and len(args) == 2 and args[1].isdigit():
-        n = cancel_agent_triggers(chat_id, int(args[1]))
-        await update.message.reply_text("❌ Отменено." if n else "Триггер не найден в очереди.")
-        return
-    rows = list_throttled_triggers(chat_id)
-    if not rows:
-        await update.message.reply_text("⏱️ Отложенных автотриггеров нет.")
-        return
-    lines = ["⏱️ Очередь автотриггеров:"]
-    for trigger_id, thread_id, due, reason in rows:
-        lines.append(f"#{trigger_id} · топик {thread_id} · {due} · {reason}")
-    lines.append("\n/throttle cancel <id> — отменить один\n/throttle clear — очистить всю очередь")
-    await update.message.reply_text("\n".join(lines))
-
-
-async def on_throttle_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    await query.answer()
-    kind, raw_id = query.data.split(":", 1)
-    if not raw_id.isdigit():
-        return
-    trigger_id = int(raw_id)
-    if kind == "throttle_now":
-        if trigger_now(trigger_id):
-            await query.edit_message_text("▶️ Принудительный запуск запрошен. Перед стартом лимит проверяется заново.")
-        else:
-            await query.edit_message_text("Триггер уже не находится в очереди.")
-    elif kind == "throttle_cancel":
-        n = cancel_agent_triggers(query.message.chat_id, trigger_id)
-        await query.edit_message_text("❌ Автотриггер отменён." if n else "Триггер уже не находится в очереди.")
 
 
 async def cmd_close(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

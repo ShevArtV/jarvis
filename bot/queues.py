@@ -96,10 +96,10 @@ def claim_next_agent_trigger(
     """
     now = datetime.utcnow().isoformat()
     sql = (
-        "SELECT id, chat_id, thread_id, text, source, throttle_force FROM agent_triggers "
-        "WHERE status = 'pending' AND (not_before IS NULL OR not_before <= ?)"
+        "SELECT id, chat_id, thread_id, text, source FROM agent_triggers "
+        "WHERE status = 'pending'"
     )
-    params: list[int | str] = [now]
+    params: list[int | str] = []
     for chat_id, thread_id in (exclude_keys or ()):
         sql += " AND NOT (chat_id = ? AND thread_id = ?)"
         params.extend([chat_id, thread_id])
@@ -121,45 +121,7 @@ def claim_next_agent_trigger(
         "thread_id": row[2],
         "text": row[3],
         "source": row[4],
-        "throttle_force": bool(row[5]),
     }
-
-
-def defer_agent_trigger(trigger_id: int, not_before: datetime, reason: str,
-                        notice_message_id: int | None = None) -> None:
-    with _db() as conn:
-        conn.execute(
-            "UPDATE agent_triggers SET status='pending', claimed_at=NULL, not_before=?, "
-            "throttle_reason=?, throttle_notice_message_id=?, throttle_force=0 WHERE id=?",
-            (not_before.isoformat(), reason, notice_message_id, trigger_id),
-        )
-
-
-def trigger_now(trigger_id: int) -> bool:
-    with _db() as conn:
-        return conn.execute(
-            "UPDATE agent_triggers SET not_before=NULL, throttle_force=1 WHERE id=? AND status='pending'",
-            (trigger_id,),
-        ).rowcount == 1
-
-
-def cancel_agent_triggers(chat_id: int, trigger_id: int | None = None) -> int:
-    sql = "UPDATE agent_triggers SET status='cancelled', finished_at=? WHERE status='pending' AND chat_id=?"
-    params: list[object] = [datetime.utcnow().isoformat(), chat_id]
-    if trigger_id is not None:
-        sql += " AND id=?"
-        params.append(trigger_id)
-    with _db() as conn:
-        return conn.execute(sql, params).rowcount
-
-
-def list_throttled_triggers(chat_id: int) -> list[tuple]:
-    with _db() as conn:
-        return conn.execute(
-            "SELECT id, thread_id, not_before, throttle_reason FROM agent_triggers "
-            "WHERE status='pending' AND not_before IS NOT NULL AND chat_id=? ORDER BY not_before",
-            (chat_id,),
-        ).fetchall()
 
 
 def finish_agent_trigger(

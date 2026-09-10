@@ -389,11 +389,7 @@ def init_db() -> None:
                 finished_at TEXT,
                 error TEXT,
                 result_message_id INTEGER,
-                role TEXT,
-                not_before TEXT,
-                throttle_reason TEXT,
-                throttle_notice_message_id INTEGER,
-                throttle_force INTEGER NOT NULL DEFAULT 0
+                role TEXT
             )
             """
         )
@@ -409,14 +405,9 @@ def init_db() -> None:
         if cols_now and "role" not in cols_now:
             logger.info("adding 'role' column to agent_triggers")
             conn.execute("ALTER TABLE agent_triggers ADD COLUMN role TEXT")
-        for column, sql_type in (("not_before", "TEXT"), ("throttle_reason", "TEXT"),
-                                 ("throttle_notice_message_id", "INTEGER"),
-                                 ("throttle_force", "INTEGER NOT NULL DEFAULT 0")):
-            if cols_now and column not in cols_now:
-                conn.execute(f"ALTER TABLE agent_triggers ADD COLUMN {column} {sql_type}")
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_agent_triggers_pending "
-            "ON agent_triggers(status, not_before, created_at)"
+            "ON agent_triggers(status, created_at)"
         )
         # Напоминания Менеджеру (cron-light). schedule — простой текст,
         # парсится в _parse_schedule(): daily HH:MM, weekday HH:MM,
