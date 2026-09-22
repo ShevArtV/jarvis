@@ -91,10 +91,69 @@ def _mcp_config_flags(mcp_playwright: bool, mcp_topic_role: str | None) -> list[
     return ["--mcp-config", json.dumps(config, ensure_ascii=False)]
 
 
-def _accumulate_assistant_event(ev: dict, buffer_intermediate: list[str]) -> None:
-    """Извлечь шаги журнала (текст/размышления/tool_use) из assistant-события
+# Встроенные инструменты: значок + поле input, которое объясняет шаг.
+_TOOL_LABELS = {
+    "Bash": ("💻", ("description", "command")),
+    "Read": ("📖", ("file_path",)),
+    "Write": ("📝", ("file_path",)),
+    "Edit": ("✏️", ("file_path",)),
+    "MultiEdit": ("✏️", ("file_path",)),
+    "NotebookEdit": ("✏️", ("notebook_path",)),
+    "Grep": ("🔎", ("pattern",)),
+    "Glob": ("🔎", ("pattern",)),
+    "WebFetch": ("🌐", ("url",)),
+    "WebSearch": ("🌐", ("query",)),
+    "Agent": ("🤖", ("description",)),
+    "Task": ("🤖", ("description",)),
+    "Skill": ("📚", ("skill",)),
+}
+_PATH_KEYS = {"file_path", "notebook_path", "path"}
+# MCP: первое непустое поле из списка — то, что отличает один вызов от другого.
+_MCP_KEYS = ("question", "query", "text", "message", "url", "file_path", "path",
+             "task_id", "thread_id")
+_MCP_ICONS = {"ask_user": "❓", "codegraph_explore": "🔎", "kb_explore": "🔎",
+              "manager_inbox": "📨", "manager_send": "📨"}
+
+
+def _short_value(key: str, value: object, cwd: str | None) -> str:
+    text = " ".join(str(value).split())
+    if key in _PATH_KEYS and cwd and text.startswith(cwd.rstrip("/") + "/"):
+        text = text[len(cwd.rstrip("/")) + 1:]
+    return text[:120]
+
+
+def _tool_step(name: str, inp: object, cwd: str | None = None) -> str:
+    """Строка журнала для tool_use: что делается, а не техническое имя."""
+    inp = inp if isinstance(inp, dict) else {}
+    if name.startswith("mcp__"):
+        _, _, rest = name.partition("mcp__")
+        server, _, tool = rest.partition("__")
+        if tool == "ask_user" and inp.get("question"):
+            return f"❓ Спрашиваю: «{_short_value('question', inp['question'], cwd)}»"
+        icon = _MCP_ICONS.get(tool, "🔌")
+        label = f"{icon} {server} · {tool}" if tool else f"{icon} {server}"
+        for key in _MCP_KEYS:
+            if inp.get(key) not in (None, ""):
+                value = _short_value(key, inp[key], cwd)
+                return f"{label} (thread {value})" if key == "thread_id" else f"{label}: {value}"
+        return label
+    icon, keys = _TOOL_LABELS.get(name, ("🔧", ("command", "file_path", "path", "pattern", "url", "description")))
+    for key in keys:
+        if inp.get(key):
+            value = _short_value(key, inp[key], cwd)
+            return f"{icon} {value}" if name in _TOOL_LABELS else f"{icon} {name} {value}"
+    return f"{icon} {name}"
+
+
+def _accumulate_assistant_event(
+    ev: dict, buffer_intermediate: list[str], cwd: str | None = None,
+) -> None:
+    """Извлечь шаги журнала (текст/tool_use) из assistant-события
     stream-json. Общая логика для одноразового ``call_stream`` и живого
-    ``PersistentClaudeWorker`` — событие одно и то же в обоих режимах."""
+    ``PersistentClaudeWorker`` — событие одно и то же в обоих режимах.
+
+    Блоки thinking пропускаются: Claude Code отдаёт их с пустым текстом,
+    строка «размышляет…» в журнале ничего не сообщала."""
     msg = ev.get("message", {}) or {}
     for block in msg.get("content", []) or []:
         btype = block.get("type")
@@ -102,21 +161,10 @@ def _accumulate_assistant_event(ev: dict, buffer_intermediate: list[str]) -> Non
             txt = (block.get("text") or "").strip()
             if txt:
                 buffer_intermediate.append(txt[:800])
-        elif btype == "thinking":
-            # См. call_stream: Claude Code не отдаёт текст рассуждений наружу.
-            buffer_intermediate.append("💭 размышляет…")
         elif btype == "tool_use":
-            name = block.get("name", "?")
-            inp = block.get("input") or {}
-            summary = ""
-            if isinstance(inp, dict):
-                for k in ("command", "file_path", "path",
-                          "pattern", "url", "description"):
-                    if k in inp and inp[k]:
-                        s = str(inp[k])
-                        summary = f" {k}={s[:120]}"
-                        break
-            buffer_intermediate.append(f"🔧 {name}{summary}")
+            buffer_intermediate.append(
+                _tool_step(block.get("name", "?"), block.get("input"), cwd)
+            )
 
 
 class PersistentClaudeWorker:
@@ -217,7 +265,7 @@ class PersistentClaudeWorker:
                     continue
                 etype = ev.get("type")
                 if etype == "assistant":
-                    _accumulate_assistant_event(ev, self._buffer)
+                    _accumulate_assistant_event(ev, self._buffer, self.cwd)
                     await self._flush()
                 elif etype == "result":
                     await self._flush(force=True)
@@ -527,7 +575,7 @@ class ClaudeEngine:
                         m = msg.get("model")
                         if isinstance(m, str) and m:
                             actual_model = m
-                    _accumulate_assistant_event(ev, buffer_intermediate)
+                    _accumulate_assistant_event(ev, buffer_intermediate, effective_cwd)
                     await flush_intermediate()
                 elif etype == "result":
                     r = ev.get("result")
