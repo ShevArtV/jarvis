@@ -102,6 +102,24 @@ class RichMessageTest(unittest.TestCase):
             "\n\n- [ ] Купить огурцы\n- [x] Купить помидоры",
         )
 
+    def test_live_block_names(self) -> None:
+        # Сырой rich_message из лога бота, 22.09.2026.
+        live = {"blocks": [
+            {"type": "heading", "text": "H1", "size": 1},
+            {"type": "heading", "text": "H2", "size": 2},
+            {"type": "blockquote", "blocks": [{"type": "paragraph", "text": "Цитата"},
+                                              {"type": "paragraph", "text": ""}], "credit": "Иван"},
+            {"type": "pre", "text": "const a = 1;", "language": "javascript"},
+            {"type": "pullquote", "text": "Сноска", "credit": "Пётр"},
+            {"type": "footer", "text": "Мелкий"},
+            {"type": "paragraph", "text": {"type": "underline", "text": "Ещё"}},
+        ]}
+        self.assertEqual(
+            rich_message_to_markdown(live),
+            "# H1\n\n## H2\n\n> Цитата\n>\n> — Иван\n\n```javascript\nconst a = 1;\n```"
+            "\n\n> Сноска\n>\n> — Пётр\n\nМелкий\n\nЕщё",
+        )
+
     def test_plain_message_is_not_rich(self) -> None:
         msg = Message.de_json({"message_id": 1, "date": 0, "chat": {"id": 1, "type": "private"}, "text": "hi"}, None)
         self.assertFalse(RICH_MESSAGE.filter(msg))

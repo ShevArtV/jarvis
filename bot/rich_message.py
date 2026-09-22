@@ -94,9 +94,14 @@ def _block(block: Any, indent: str = "") -> str:
     text = rich_text(block.get("text"))
     children = "\n\n".join(_blocks(block.get("blocks"), indent))
 
+    # Живой Telegram (22.09.2026) шлёт имена не из документации: heading+size,
+    # pre, blockquote, pullquote; у цитат — автор в credit.
+    if kind == "heading":
+        level = block.get("size") if isinstance(block.get("size"), int) else 2
+        return f"{'#' * min(max(level, 1), 6)} {text}"
     if kind == "section_heading":
         return f"## {text}"
-    if kind == "preformatted":
+    if kind in ("preformatted", "pre"):
         return f"```{block.get('language') or ''}\n{text}\n```"
     if kind == "divider":
         return "---"
@@ -119,8 +124,12 @@ def _block(block: Any, indent: str = "") -> str:
             lines.append(f"{indent}{bullet} {head}".rstrip())
             lines.extend(children)
         return "\n".join(lines)
-    if kind in ("block_quotation", "pull_quotation", "expandable_block_quotation"):
-        return _quote("\n\n".join(x for x in (text, children) if x))
+    if kind in ("block_quotation", "pull_quotation", "expandable_block_quotation",
+                "blockquote", "pullquote"):
+        credit = rich_text(block.get("credit"))
+        return _quote("\n\n".join(
+            x for x in (text, children, f"— {credit}" if credit else "") if x
+        ))
     if kind == "details":
         header = rich_text(block.get("header"))
         return "\n\n".join(x for x in (f"**{header}**" if header else "", children) if x)
