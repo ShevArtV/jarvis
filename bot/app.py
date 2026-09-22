@@ -83,6 +83,7 @@ from bot.workers import (
     persistent_reaper,
     reminders_worker,
 )
+from integrations.queuewarden_bot import queuewarden_notifications_worker
 
 logger = logging.getLogger(__name__)
 
@@ -169,6 +170,11 @@ async def _post_init(application: Application) -> None:
     # Reminders: cron-light напоминания для Менеджера.
     reminders_task = asyncio.create_task(reminders_worker(application))
     application.bot_data["reminders_worker_task"] = reminders_task
+
+    # Канал QueueWarden «Бот»: long-poll уведомлений → триггеры Секретарю.
+    # Без QUEUEWARDEN_MCP_TOKEN или при JARVIS_QW_NOTIFICATIONS=0 сразу выходит.
+    queuewarden_task = asyncio.create_task(queuewarden_notifications_worker(application))
+    application.bot_data["queuewarden_notifications_task"] = queuewarden_task
 
     # Общий callback для отправки нотисов в топик Менеджера.
     async def _notice(text: str, kind: str = "job_notification") -> None:

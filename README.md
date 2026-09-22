@@ -640,6 +640,16 @@ Per-topic MCP — часть контракта `Engine.call_stream` (см.
 топик свой `manager_send` — две сессии на один топик, `thread-store conflict`
 у codex и два упавших job'а.
 
+### QueueWarden: канал уведомлений «Бот»
+
+`integrations/queuewarden_bot.py` держит long-poll `GET {QUEUEWARDEN_URL}/api/bot/notifications?wait=25`
+токеном учётки-моста `QUEUEWARDEN_MCP_TOKEN` (база по умолчанию `https://queuewarden.ru`).
+Каждое уведомление — отдельный `agent_triggers` с `source='queuewarden'` в топик Секретаря
+(переопределение — `JARVIS_QW_NOTICE_CHAT_ID`/`JARVIS_QW_NOTICE_THREAD_ID`): агент разбирает его
+через MCP `queuewarden` и шлёт оператору короткое резюме. Повторы гасятся по `notificationId`
+(отметка в `integration_seen_items` в одной транзакции с триггером), ack — только после коммита.
+Нет токена или `JARVIS_QW_NOTIFICATIONS=0` — воркер выключен; 404 (канал не выложен) — тихо ждёт.
+
 ### ActiveCollab
 
 Если в локальном `.env` заданы `ACTIVE_COLLAB_URL` и `ACTIVE_COLLAB_TOKEN`,
@@ -756,6 +766,7 @@ journalctl --user -u jarvis-bot -f
 - `config.py` — чтение `.env`, токен и whitelist.
 - `webhook_server.py` — HTTP-приём внешних уведомлений.
 - `imap_watcher.py` — вотчер почты (см. `JARVIS_IMAP_*`).
+- `integrations/queuewarden_bot.py` — long-poll уведомлений QueueWarden (см. выше).
 - `engines/` — адаптеры CLI, Playwright MCP, topic-MCP, кэш моделей (см. выше).
 - `scripts/jarvis_mcp_server.py` — Jarvis Manager MCP (`ask_user`, `manager_*`).
 - `scripts/sync_codex_knowledge.py` — личная утилита автора; для установки не нужна.

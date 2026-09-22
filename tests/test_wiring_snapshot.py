@@ -80,7 +80,7 @@ EXPECTED_LAYOUT = {
     "bot.db": ["DB_PATH", "init_db", "log_message", "_db"],
     "bot.queues": [
         "claim_next_job", "finish_job", "claim_next_agent_trigger",
-        "finish_agent_trigger", "cleanup_old_log_entries",
+        "finish_agent_trigger", "enqueue_agent_trigger", "cleanup_old_log_entries",
     ],
     "bot.topics": [
         "_key", "_lock_for", "resolve_manager_topic", "resolve_topic_role",
@@ -114,6 +114,7 @@ EXPECTED_LAYOUT = {
         "close_requests_worker", "health_worker", "jobs_worker",
         "agent_triggers_worker", "_apply_close_request",
     ],
+    "integrations.queuewarden_bot": ["queuewarden_notifications_worker"],
     "bot.app": ["build_application", "_post_init", "BOT_COMMANDS"],
     "telegram_bot": ["main"],
 }

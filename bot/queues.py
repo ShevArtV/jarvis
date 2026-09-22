@@ -124,6 +124,40 @@ def claim_next_agent_trigger(
     }
 
 
+def enqueue_agent_trigger(
+    chat_id: int,
+    thread_id: int,
+    text: str,
+    source: str,
+    role: str | None = None,
+    seen_key: tuple[str, str, int | str] | None = None,
+) -> int | None:
+    """Поставить внешний триггер в очередь. Возвращает id триггера.
+
+    ``seen_key`` — ``(integration, kind, item_id)`` для источников с доставкой
+    at-least-once: отметка в ``integration_seen_items`` и сам триггер пишутся
+    одной транзакцией. Если отметка уже есть — это повторная доставка, триггер
+    не ставится и возвращается None. Ошибка записи откатывает обе строки, так
+    что «отметили, но не поставили» не бывает.
+    """
+    now = datetime.utcnow().isoformat()
+    with _db() as conn:
+        if seen_key is not None:
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO integration_seen_items"
+                "(integration, kind, item_id, seen_at) VALUES (?, ?, ?, ?)",
+                (*seen_key, now),
+            )
+            if cur.rowcount != 1:
+                return None
+        cur = conn.execute(
+            "INSERT INTO agent_triggers(chat_id, thread_id, text, source, role, "
+            "status, created_at) VALUES (?, ?, ?, ?, ?, 'pending', ?)",
+            (chat_id, thread_id, text, source, role, now),
+        )
+        return int(cur.lastrowid)
+
+
 def finish_agent_trigger(
     trigger_id: int,
     status: str,
