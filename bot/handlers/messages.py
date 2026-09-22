@@ -13,6 +13,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
 import asyncio
+import json
 import os
 import uuid
 from datetime import datetime
@@ -20,6 +21,7 @@ from bot.asks import _mark_ask_answered, answer_ask, get_pending_ask, get_recent
 from bot.db import log_message
 from bot.delivery import ProgressJournal, deliver_file_markers, extract_file_markers, send_claude_reply, send_to_topic
 from bot.handlers.toggles import _ask_done_confirmation_if_needed, _warn_large_context_if_needed
+from bot.rich_message import get_rich_message, rich_message_to_markdown
 from bot.llm import _build_reply_context_prefix, build_system_prefix, call_llm_stream
 from bot.sessions import _parse_transfer_marker, _persistent_column_for_engine, build_context_handoff, clear_pending_summary, ensure_active_session, get_mcp_playwright, get_model, get_pending_summary, get_persistent_for_engine, get_session, update_session_id
 from bot.settings import CLAUDE_CWD, MEDIA_DIR
@@ -482,6 +484,18 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if not update.message or not update.message.text:
         return
     await _process_prompt(update, update.message.text.strip())
+
+
+async def handle_rich_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Rich Message (Bot API 10.1+): текст в блоках, ``message.text`` пуст."""
+    rich = get_rich_message(update.message)
+    if rich is None:
+        return
+    logger.info("rich_message raw: %s", json.dumps(rich, ensure_ascii=False)[:4000])
+    text = rich_message_to_markdown(rich)
+    if not text:
+        return
+    await _process_prompt(update, text)
 
 
 async def _download_tg_file(update: Update, file_id: str, suggested_name: str) -> str:

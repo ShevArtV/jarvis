@@ -51,6 +51,7 @@ EXPECTED_HANDLERS = [
     (0, 'MessageHandler', '-', 'handle_photo'),
     (0, 'MessageHandler', '-', 'handle_document'),
     (0, 'MessageHandler', '-', 'handle_text'),
+    (0, 'MessageHandler', '-', 'handle_rich_message'),
     (0, 'CallbackQueryHandler', '^cancel_queue:', 'on_cancel_queue'),
     (0, 'CallbackQueryHandler', '^engine_select:', 'on_engine_select'),
     (0, 'CallbackQueryHandler', '^model_select:', 'on_model_select'),

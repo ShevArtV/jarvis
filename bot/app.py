@@ -33,6 +33,7 @@ from imap_watcher import run_imap_watcher
 from webhook_server import run_webhook_server
 
 from bot.asks import on_ask_answer
+from bot.rich_message import RICH_MESSAGE
 from bot.delivery import _send_manager_notice
 from bot.handlers.commands import (
     cmd_bind,
@@ -58,6 +59,7 @@ from bot.handlers.engine import (
 from bot.handlers.messages import (
     handle_document,
     handle_photo,
+    handle_rich_message,
     handle_text,
     on_cancel_queue,
 )
@@ -227,6 +229,7 @@ def build_application(
     app.add_handler(MessageHandler(allowed & filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(allowed & filters.Document.ALL, handle_document))
     app.add_handler(MessageHandler(allowed & filters.TEXT & ~filters.COMMAND, handle_text))
+    app.add_handler(MessageHandler(allowed & RICH_MESSAGE, handle_rich_message))
     app.add_handler(CallbackQueryHandler(on_cancel_queue, pattern=r"^cancel_queue:"))
     app.add_handler(CallbackQueryHandler(on_engine_select, pattern=r"^engine_select:"))
     app.add_handler(CallbackQueryHandler(on_model_select, pattern=r"^model_select:"))
