@@ -29,7 +29,9 @@ from bot.topics import _key, _kill_persistent_worker, _lock_for, load_message_co
 from engines import engine_model_scope, get_engine_by_name
 from engines.claude_engine import CLAUDE_TIMEOUT, start_persistent as start_persistent_claude
 from engines.codex_engine import CODEX_TIMEOUT
+from engines.opencode_engine import OPENCODE_TIMEOUT
 from engines.persistent_codex import start_persistent as start_persistent_codex
+from engines.persistent_opencode import start_persistent as start_persistent_opencode
 
 
 
@@ -198,6 +200,14 @@ async def _handle_persistent_message(
                 )
                 if worker.session_id and worker.session_id != session_id:
                     update_session_id(key[0], key[1], "codex", worker.session_id)
+            elif engine_name == "opencode":
+                worker = await start_persistent_opencode(
+                    key=key, session_id=session_id, cwd=effective_cwd, model=model,
+                    system_prefix=system_prefix, mcp_playwright=mcp_playwright,
+                    mcp_topic_role=mcp_topic_role,
+                )
+                if worker.session_id and worker.session_id != session_id:
+                    update_session_id(key[0], key[1], "opencode", worker.session_id)
             else:
                 raise RuntimeError(f"persistent is not supported for {engine_name}")
         except Exception as exc:
@@ -237,7 +247,9 @@ async def _handle_persistent_message(
     journal = ProgressJournal(chat, thread_id)
     await journal.start()
     worker.on_intermediate = journal.append
-    timeout = CODEX_TIMEOUT if get_session(*key)[2] == "codex" else CLAUDE_TIMEOUT
+    timeout = {"codex": CODEX_TIMEOUT, "opencode": OPENCODE_TIMEOUT}.get(
+        get_session(*key)[2], CLAUDE_TIMEOUT,
+    )
     try:
         ok, final_text = await asyncio.wait_for(fut, timeout=timeout)
     except asyncio.TimeoutError:

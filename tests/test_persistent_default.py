@@ -72,6 +72,14 @@ class PersistentDefaultOnTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = self._fresh_db(tmp)
             with patch.object(bot_db, "DB_PATH", db_path):
+                self.assertFalse(bot_sessions.get_persistent_for_engine(1, 1, "aider"))
+
+    def test_opencode_defaults_to_enabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = self._fresh_db(tmp)
+            with patch.object(bot_db, "DB_PATH", db_path):
+                self.assertTrue(bot_sessions.get_persistent_for_engine(1, 1, "opencode"))
+                bot_sessions.set_persistent_for_engine(1, 1, "opencode", False)
                 self.assertFalse(bot_sessions.get_persistent_for_engine(1, 1, "opencode"))
 
     def test_schema_columns_default_to_one(self) -> None:
@@ -84,6 +92,7 @@ class PersistentDefaultOnTest(unittest.TestCase):
                 }
             self.assertEqual(defaults["persistent_claude"], "1")
             self.assertEqual(defaults["persistent_codex"], "1")
+            self.assertEqual(defaults["persistent_opencode"], "1")
 
     def test_init_db_backfills_existing_rows_to_enabled(self) -> None:
         """До миграции часть боевых топиков стояла на persistent=0 — оператор

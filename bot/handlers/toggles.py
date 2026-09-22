@@ -163,9 +163,8 @@ async def _apply_persistent(key: tuple[int, int], enable: bool) -> str:
     _session_id, _cwd, engine_name = get_session(*key)
     if enable and _persistent_column_for_engine(engine_name) is None:
         return (
-            f"⚠️ Живой процесс поддержан для claude и codex, а у топика "
-            f"движок `{engine_name}`. Переключи `/engine claude` или "
-            "`/engine codex` и включай после."
+            f"⚠️ Живой процесс поддержан для claude, codex и opencode, а у "
+            f"топика движок `{engine_name}`. Переключи `/engine` и включай после."
         )
     set_persistent_for_engine(key[0], key[1], engine_name, enable)
     logger.info(
@@ -176,6 +175,9 @@ async def _apply_persistent(key: tuple[int, int], enable: bool) -> str:
         if engine_name == "codex":
             transport = "codex app-server"
             append = "через turn/steer"
+        elif engine_name == "opencode":
+            transport = "opencode serve"
+            append = "через prompt_async"
         else:
             transport = engine_name
             append = "через stdin stream-json"
@@ -194,7 +196,7 @@ async def _apply_persistent(key: tuple[int, int], enable: bool) -> str:
 
 async def cmd_persistent(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """/persistent — статус + кнопка; /persistent on|off — включить/выключить
-    живой процесс claude/codex для топика (сообщения во время работы агента
+    живой процесс claude/codex/opencode для топика (сообщения во время работы агента
     подхватываются на лету, а не ждут своей очереди)."""
     key = _key(update)
     args = [a.strip().lower() for a in (context.args or [])]
@@ -206,7 +208,7 @@ async def cmd_persistent(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         if _persistent_column_for_engine(engine_name) is None:
             await update.message.reply_text(
                 f"Живой процесс не поддержан для `{engine_name}`. "
-                "Доступно для `claude` и `codex`."
+                "Доступно для `claude`, `codex` и `opencode`."
             )
             return
         await update.message.reply_text(

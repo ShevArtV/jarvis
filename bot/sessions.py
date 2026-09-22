@@ -349,6 +349,8 @@ def _persistent_column_for_engine(engine_name: str) -> str | None:
         return "persistent_claude"
     if engine_name == "codex":
         return "persistent_codex"
+    if engine_name == "opencode":
+        return "persistent_opencode"
     return None
 
 

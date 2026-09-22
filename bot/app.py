@@ -101,7 +101,7 @@ BOT_COMMANDS: list[BotCommand] = [
     BotCommand("unbind", "снять привязку cwd, вернуть дефолт"),
     BotCommand("where", "показать эффективный cwd"),
     BotCommand("board", "открыть доску QueueWarden (миниапп)"),
-    BotCommand("persistent", "живой процесс claude/codex: сообщения на лету"),
+    BotCommand("persistent", "живой процесс агента: сообщения на лету"),
     BotCommand("start", "приветствие и состояние топика"),
 ]
 

@@ -52,7 +52,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Команды:\n"
         "/engine [name] — показать/переключить движок (claude|codex|opencode)\n"
         "/browser [on|off] — браузер (Playwright MCP) для топика, on-demand\n"
-        "/persistent [on|off] — живой процесс claude/codex: сообщения на лету, без очереди\n"
+        "/persistent [on|off] — живой процесс claude/codex/opencode: сообщения на лету, без очереди\n"
         "/tokens — оценка размера текущей сессии\n"
         f"/close — закрыть сеанс (сам закроется после {SESSION_IDLE_MINUTES} мин простоя)\n"
         "/new, /reset — закрыть сеанс и сразу открыть новый\n"

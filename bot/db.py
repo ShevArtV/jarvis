@@ -179,6 +179,16 @@ def init_db() -> None:
                 conn.execute(
                     "ALTER TABLE sessions ADD COLUMN persistent_codex INTEGER NOT NULL DEFAULT 1"
                 )
+            # Idempotent миграция: persistent_opencode — живой `opencode serve`
+            # на топик. Дефолт on (1), как у claude/codex по решению оператора
+            # 2026-09-05; явный /persistent off ставит 0.
+            cols_now = [r[1] for r in conn.execute("PRAGMA table_info(sessions)").fetchall()]
+            if cols_now and "persistent_opencode" not in cols_now:
+                _backup_db_once()
+                logger.info("adding 'persistent_opencode' column to sessions (default=1)")
+                conn.execute(
+                    "ALTER TABLE sessions ADD COLUMN persistent_opencode INTEGER NOT NULL DEFAULT 1"
+                )
             # Idempotent миграция: persistent_default_migrated — одноразовый
             # бэкфилл persistent_claude/persistent_codex в 1 для СУЩЕСТВУЮЩИХ
             # строк (решение оператора 2026-09-05: включить persistent всем
