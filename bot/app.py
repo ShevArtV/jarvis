@@ -13,6 +13,7 @@ import asyncio
 import logging
 
 from telegram import (
+    Update,
     BotCommand,
     BotCommandScopeAllGroupChats,
     BotCommandScopeAllPrivateChats,
@@ -24,6 +25,7 @@ from telegram.ext import (
     CallbackQueryHandler,
     CommandHandler,
     MessageHandler,
+    TypeHandler,
     filters,
 )
 
@@ -61,6 +63,8 @@ from bot.handlers.messages import (
     handle_photo,
     handle_rich_message,
     handle_text,
+    handle_unhandled_message,
+    log_incoming_update,
     on_cancel_queue,
 )
 from bot.handlers.toggles import (
@@ -209,6 +213,9 @@ def build_application(
         user_id=allowed_user_ids if allowed_user_ids is not None else ALLOWED_USER_IDS
     )
 
+    # Группа -1: журнал всех входящих до любых обработчиков (не блокирует их).
+    app.add_handler(TypeHandler(Update, log_incoming_update), group=-1)
+
     app.add_handler(CommandHandler("start", cmd_start, filters=allowed))
     app.add_handler(CommandHandler("new", cmd_reset, filters=allowed))
     app.add_handler(CommandHandler("reset", cmd_reset, filters=allowed))
@@ -230,6 +237,7 @@ def build_application(
     app.add_handler(MessageHandler(allowed & filters.Document.ALL, handle_document))
     app.add_handler(MessageHandler(allowed & filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(allowed & RICH_MESSAGE, handle_rich_message))
+    app.add_handler(MessageHandler(allowed & filters.UpdateType.MESSAGE, handle_unhandled_message))
     app.add_handler(CallbackQueryHandler(on_cancel_queue, pattern=r"^cancel_queue:"))
     app.add_handler(CallbackQueryHandler(on_engine_select, pattern=r"^engine_select:"))
     app.add_handler(CallbackQueryHandler(on_model_select, pattern=r"^model_select:"))

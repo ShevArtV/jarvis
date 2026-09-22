@@ -486,6 +486,62 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await _process_prompt(update, update.message.text.strip())
 
 
+# Типы, которые бот не обрабатывает, но пользователь мог прислать осознанно:
+# на них отвечаем, а не молчим. Сервисные сообщения (закреп, новый топик…)
+# сюда не входят — их тихо пропускаем.
+UNSUPPORTED_KINDS = (
+    "voice", "video_note", "video", "audio", "sticker", "animation",
+    "location", "venue", "contact", "poll", "dice", "story", "game",
+)
+
+
+def message_kind(message) -> str:
+    """Короткое имя содержимого сообщения — для лога входящих и ответа
+    «не принимаю». Порядок важен: у анимации есть и document."""
+    if message is None:
+        return "-"
+    if message.api_kwargs.get("rich_message"):
+        return "rich_message"
+    for kind in ("text", "photo", *UNSUPPORTED_KINDS, "document"):
+        if getattr(message, kind, None):
+            return kind
+    return "other"
+
+
+async def log_incoming_update(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Группа -1: одна строка на каждый апдейт, до всех обработчиков.
+    Если сообщение «не дошло» — по журналу видно, пришло ли оно вообще."""
+    msg = update.effective_message
+    logger.info(
+        "update %s: chat=%s thread=%s msg=%s user=%s kind=%s edited=%s",
+        update.update_id,
+        update.effective_chat.id if update.effective_chat else None,
+        msg.message_thread_id if msg else None,
+        msg.message_id if msg else None,
+        update.effective_user.id if update.effective_user else None,
+        message_kind(msg) if msg else ("callback" if update.callback_query else "other"),
+        update.edited_message is not None,
+    )
+
+
+async def handle_unhandled_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Последний обработчик для своих сообщений: то, что не поймали
+    остальные, не должно пропадать молча."""
+    msg = update.message
+    if msg is None:
+        return
+    if msg.text:
+        # Начинается с «/», но такой команды нет (/model, /home/...):
+        # filters.COMMAND отсёк его от handle_text — отдаём агенту как текст.
+        await _process_prompt(update, msg.text.strip())
+        return
+    kind = message_kind(msg)
+    if kind not in UNSUPPORTED_KINDS:
+        return
+    logger.info("unsupported message kind=%s key=%s", kind, _key(update))
+    await msg.reply_text(f"⚠️ Бот не принимает такие сообщения: {kind}. Пришли текстом, фото или файлом.")
+
+
 async def handle_rich_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Rich Message (Bot API 10.1+): текст в блоках, ``message.text`` пуст."""
     rich = get_rich_message(update.message)

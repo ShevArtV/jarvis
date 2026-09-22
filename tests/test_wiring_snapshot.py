@@ -32,6 +32,7 @@ import telegram_bot
 # PTB проверяет хендлеры в порядке регистрации, поэтому перестановка
 # unauthorized_handler выше остальных отключила бы бота целиком.
 EXPECTED_HANDLERS = [
+    (-1, 'TypeHandler', '-', 'log_incoming_update'),
     (0, 'CommandHandler', 'start', 'cmd_start'),
     (0, 'CommandHandler', 'new', 'cmd_reset'),
     (0, 'CommandHandler', 'reset', 'cmd_reset'),
@@ -52,6 +53,7 @@ EXPECTED_HANDLERS = [
     (0, 'MessageHandler', '-', 'handle_document'),
     (0, 'MessageHandler', '-', 'handle_text'),
     (0, 'MessageHandler', '-', 'handle_rich_message'),
+    (0, 'MessageHandler', '-', 'handle_unhandled_message'),
     (0, 'CallbackQueryHandler', '^cancel_queue:', 'on_cancel_queue'),
     (0, 'CallbackQueryHandler', '^engine_select:', 'on_engine_select'),
     (0, 'CallbackQueryHandler', '^model_select:', 'on_model_select'),
