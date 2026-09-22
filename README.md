@@ -644,7 +644,7 @@ Per-topic MCP — часть контракта `Engine.call_stream` (см.
 
 `integrations/queuewarden_bot.py` держит long-poll `GET {QUEUEWARDEN_URL}/api/bot/notifications?wait=25`
 токеном учётки-моста `QUEUEWARDEN_MCP_TOKEN` (база по умолчанию `https://queuewarden.ru`).
-Каждое уведомление — отдельный `agent_triggers` с `source='queuewarden'` в топик Секретаря
+Каждое уведомление — отдельный `agent_triggers` с `source='queuewarden'` в топик Тимлида
 (переопределение — `JARVIS_QW_NOTICE_CHAT_ID`/`JARVIS_QW_NOTICE_THREAD_ID`): агент разбирает его
 через MCP `queuewarden` и шлёт оператору короткое резюме. Повторы гасятся по `notificationId`
 (отметка в `integration_seen_items` в одной транзакции с триггером), ack — только после коммита.

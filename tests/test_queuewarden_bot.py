@@ -1,4 +1,4 @@
-"""Канал QueueWarden «Бот»: long-poll → agent_triggers Секретарю, дедуп, ack.
+"""Канал QueueWarden «Бот»: long-poll → agent_triggers Тимлиду, дедуп, ack.
 
 HTTP мокается через httpx.MockTransport, БД — временный файл: живую
 bot_state.db тесты не трогают.
@@ -25,8 +25,8 @@ BASE = "https://qw.test"
 ENV = {
     "QUEUEWARDEN_MCP_TOKEN": "tok",
     "QUEUEWARDEN_URL": BASE,
-    "JARVIS_SECRETARY_CHAT_ID": str(TOPIC[0]),
-    "JARVIS_SECRETARY_THREAD_ID": str(TOPIC[1]),
+    "JARVIS_TEAMLEAD_CHAT_ID": str(TOPIC[0]),
+    "JARVIS_TEAMLEAD_THREAD_ID": str(TOPIC[1]),
     "JARVIS_QW_NOTIFICATIONS": "1",
 }
 
@@ -272,7 +272,7 @@ class WorkerDisabledTest(unittest.TestCase):
 
     def test_no_topic_exits(self) -> None:
         server = self._run({
-            "JARVIS_SECRETARY_CHAT_ID": None, "JARVIS_SECRETARY_THREAD_ID": None,
+            "JARVIS_TEAMLEAD_CHAT_ID": None, "JARVIS_TEAMLEAD_THREAD_ID": None, "JARVIS_SECRETARY_CHAT_ID": None, "JARVIS_SECRETARY_THREAD_ID": None,
             "JARVIS_MANAGER_CHAT_ID": None, "JARVIS_MANAGER_THREAD_ID": None,
             "JARVIS_QW_NOTICE_CHAT_ID": None, "JARVIS_QW_NOTICE_THREAD_ID": None,
         })

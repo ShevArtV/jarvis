@@ -1,9 +1,9 @@
-"""Канал уведомлений QueueWarden «Бот»: long-poll → внешний триггер Секретарю.
+"""Канал уведомлений QueueWarden «Бот»: long-poll → внешний триггер Тимлиду.
 
 Бот заходит токеном учётки-моста (``QUEUEWARDEN_MCP_TOKEN``) и сам забирает
 свои уведомления: ``GET /api/bot/notifications?wait=25`` держит запрос, пока
 нечего отдать. Каждое уведомление становится отдельным ``agent_triggers``
-(source='queuewarden') в топике Секретаря; агент разбирает его через MCP
+(source='queuewarden') в топике Тимлида; агент разбирает его через MCP
 ``queuewarden`` и присылает оператору короткое резюме.
 
 Доставка at-least-once: неподтверждённое приходит снова. Поэтому ack уходит
@@ -22,7 +22,7 @@ from typing import Any
 import httpx
 
 from bot.queues import enqueue_agent_trigger
-from bot.topics import TopicKey, _resolve_topic_from_env, resolve_secretary_topic
+from bot.topics import TopicKey, _resolve_topic_from_env, resolve_teamlead_topic
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +30,7 @@ DEFAULT_URL = "https://queuewarden.ru"
 SOURCE = "queuewarden"
 SEEN_INTEGRATION = "queuewarden"
 SEEN_KIND = "bot_notification"
-# Секретарь разбирает уведомление и может спросить оператора — роль не
+# Тимлид разбирает уведомление и может спросить оператора — роль не
 # 'executor', иначе гард ask_user закроет ему чат.
 TRIGGER_ROLE = "manager"
 
@@ -53,8 +53,8 @@ def _enabled() -> bool:
 
 
 def resolve_notice_topic() -> TopicKey | None:
-    """Топик для уведомлений: env JARVIS_QW_NOTICE_* или Секретарь."""
-    return _resolve_topic_from_env("QW_NOTICE") or resolve_secretary_topic()
+    """Топик для уведомлений: env JARVIS_QW_NOTICE_* или Тимлид (фолбэк — Секретарь)."""
+    return _resolve_topic_from_env("QW_NOTICE") or resolve_teamlead_topic()
 
 
 def parse_notifications(payload: Any) -> list[dict]:
@@ -203,8 +203,8 @@ async def queuewarden_notifications_worker(app: Any) -> None:
         return
     topic = resolve_notice_topic()
     if topic is None:
-        logger.warning("queuewarden_notifications_worker: no Secretary topic "
-                       "(JARVIS_SECRETARY_*/JARVIS_QW_NOTICE_*) — off")
+        logger.warning("queuewarden_notifications_worker: no Teamlead/Secretary topic "
+                       "(JARVIS_TEAMLEAD_*/JARVIS_SECRETARY_*/JARVIS_QW_NOTICE_*) — off")
         return
     base = (os.environ.get("QUEUEWARDEN_URL") or DEFAULT_URL).strip().rstrip("/")
     logger.info("queuewarden_notifications_worker started (%s → topic %s)", base, topic)
