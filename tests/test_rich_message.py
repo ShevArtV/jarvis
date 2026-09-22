@@ -83,6 +83,25 @@ class RichMessageTest(unittest.TestCase):
         )
         self.assertEqual(rich_message_files(live), [("big", "photo.jpg")])
 
+    def test_live_table_and_checklist(self) -> None:
+        # Сырой rich_message из лога бота, 22.09.2026.
+        live = {"blocks": [
+            {"type": "table", "cells": [
+                [{"text": "Товар", "align": "left"}, {"text": "Цена", "align": "left"}],
+                [{"text": "Подушка", "align": "left"}, {"text": "250₽", "align": "left"}],
+            ], "caption": {"type": "bold", "text": "Таблица"}, "is_bordered": True},
+            {"type": "list", "items": [
+                {"label": "•", "blocks": [{"type": "paragraph", "text": " Купить огурцы"}], "has_checkbox": True},
+                {"label": "•", "blocks": [{"type": "paragraph", "text": " Купить помидоры"}],
+                 "has_checkbox": True, "is_checked": True},
+            ]},
+        ]}
+        self.assertEqual(
+            rich_message_to_markdown(live),
+            "**Таблица**\n\n| Товар | Цена |\n| --- | --- |\n| Подушка | 250₽ |"
+            "\n\n- [ ] Купить огурцы\n- [x] Купить помидоры",
+        )
+
     def test_plain_message_is_not_rich(self) -> None:
         msg = Message.de_json({"message_id": 1, "date": 0, "chat": {"id": 1, "type": "private"}, "text": "hi"}, None)
         self.assertFalse(RICH_MESSAGE.filter(msg))

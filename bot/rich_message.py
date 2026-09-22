@@ -110,10 +110,12 @@ def _block(block: Any, indent: str = "") -> str:
             # Живой Telegram (22.09.2026) шлёт не text, а label + blocks:
             # {"label": "1.", "blocks": [{"type": "paragraph", ...}]}.
             bullet = item.get("label") or (f"{i}." if block.get("ordered") else "-")
-            head = rich_text(item.get("text"))
+            if item.get("has_checkbox"):
+                bullet = "- [x]" if item.get("is_checked") else "- [ ]"
+            head = rich_text(item.get("text")).strip()
             children = _blocks(item.get("blocks"), indent + "  ")
             if not head and children and "\n" not in children[0]:
-                head = children.pop(0)
+                head = children.pop(0).strip()
             lines.append(f"{indent}{bullet} {head}".rstrip())
             lines.extend(children)
         return "\n".join(lines)
@@ -123,17 +125,23 @@ def _block(block: Any, indent: str = "") -> str:
         header = rich_text(block.get("header"))
         return "\n\n".join(x for x in (f"**{header}**" if header else "", children) if x)
     if kind == "table":
+        # Живой Telegram (22.09.2026): cells — массив строк из ячеек, а не
+        # rows[].cells из документации. Поддерживаем оба вида.
+        raw_rows = block.get("cells") or [
+            r.get("cells") or [] for r in block.get("rows") or [] if isinstance(r, dict)
+        ]
         rows = []
-        for row in block.get("rows") or []:
+        for row in raw_rows:
             cells = [
                 rich_text(c.get("text")) or " ".join(_blocks(c.get("blocks")))
-                for c in (row.get("cells") or []) if isinstance(c, dict)
+                for c in (row if isinstance(row, list) else []) if isinstance(c, dict)
             ]
             rows.append("| " + " | ".join(cells) + " |")
         if rows:
             cols = rows[0].count("|") - 1
             rows.insert(1, "|" + " --- |" * cols)
-        return "\n".join(rows)
+        title = rich_text(block.get("caption"))
+        return "\n".join(([title, ""] if title else []) + rows)
     if kind in _MEDIA_BLOCKS:
         caption = rich_text((block.get("caption") or {}).get("text"))
         label = f"[{_MEDIA_BLOCKS[kind]}]"
