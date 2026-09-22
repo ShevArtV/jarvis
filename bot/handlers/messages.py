@@ -21,7 +21,7 @@ from bot.asks import _mark_ask_answered, answer_ask, get_pending_ask, get_recent
 from bot.db import log_message
 from bot.delivery import ProgressJournal, deliver_file_markers, extract_file_markers, send_claude_reply, send_to_topic
 from bot.handlers.toggles import _ask_done_confirmation_if_needed, _warn_large_context_if_needed
-from bot.rich_message import get_rich_message, rich_message_to_markdown
+from bot.rich_message import get_rich_message, rich_message_files, rich_message_to_markdown
 from bot.llm import _build_reply_context_prefix, build_system_prefix, call_llm_stream
 from bot.sessions import _parse_transfer_marker, _persistent_column_for_engine, build_context_handoff, clear_pending_summary, ensure_active_session, get_mcp_playwright, get_model, get_pending_summary, get_persistent_for_engine, get_session, update_session_id
 from bot.settings import CLAUDE_CWD, MEDIA_DIR
@@ -493,9 +493,11 @@ async def handle_rich_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
     logger.info("rich_message raw: %s", json.dumps(rich, ensure_ascii=False)[:4000])
     text = rich_message_to_markdown(rich)
-    if not text:
+    files = rich_message_files(rich)
+    if not text and not files:
         return
-    await _process_prompt(update, text)
+    paths = [await _download_tg_file(update, file_id, name) for file_id, name in files]
+    await _process_prompt(update, text or "(опиши вложение)", attachments=paths or None)
 
 
 async def _download_tg_file(update: Update, file_id: str, suggested_name: str) -> str:

@@ -2,7 +2,7 @@ import unittest
 
 from telegram import Message
 
-from bot.rich_message import RICH_MESSAGE, get_rich_message, rich_message_to_markdown
+from bot.rich_message import RICH_MESSAGE, get_rich_message, rich_message_files, rich_message_to_markdown
 
 
 def _p(text):
@@ -65,6 +65,23 @@ class RichMessageTest(unittest.TestCase):
         self.assertIsNone(msg.text)
         self.assertEqual(get_rich_message(msg), RICH)
         self.assertTrue(RICH_MESSAGE.filter(msg))
+
+    def test_live_list_and_photo(self) -> None:
+        # Сырой rich_message из лога бота, 22.09.2026 (file_id укорочены).
+        live = {"blocks": [
+            {"type": "paragraph", "text": "## Заголовок "},
+            {"type": "photo", "photo": [{"file_id": "small"}, {"file_id": "big"}],
+             "caption": {"text": "Картинка"}},
+            {"type": "list", "items": [
+                {"label": "1.", "blocks": [{"type": "paragraph", "text": "Пункт 1"}], "type": "1", "value": 1},
+                {"label": "2.", "blocks": [{"type": "paragraph", "text": "Пункт 2"}], "type": "1", "value": 2},
+            ]},
+        ]}
+        self.assertEqual(
+            rich_message_to_markdown(live),
+            "## Заголовок \n\n[фото] Картинка\n\n1. Пункт 1\n2. Пункт 2",
+        )
+        self.assertEqual(rich_message_files(live), [("big", "photo.jpg")])
 
     def test_plain_message_is_not_rich(self) -> None:
         msg = Message.de_json({"message_id": 1, "date": 0, "chat": {"id": 1, "type": "private"}, "text": "hi"}, None)

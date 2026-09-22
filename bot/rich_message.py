@@ -107,9 +107,15 @@ def _block(block: Any, indent: str = "") -> str:
         for i, item in enumerate(block.get("items") or [], start=1):
             if not isinstance(item, dict):
                 continue
-            bullet = f"{i}." if block.get("ordered") else "-"
-            lines.append(f"{indent}{bullet} {rich_text(item.get('text'))}")
-            lines.extend(_blocks(item.get("blocks"), indent + "  "))
+            # Живой Telegram (22.09.2026) шлёт не text, а label + blocks:
+            # {"label": "1.", "blocks": [{"type": "paragraph", ...}]}.
+            bullet = item.get("label") or (f"{i}." if block.get("ordered") else "-")
+            head = rich_text(item.get("text"))
+            children = _blocks(item.get("blocks"), indent + "  ")
+            if not head and children and "\n" not in children[0]:
+                head = children.pop(0)
+            lines.append(f"{indent}{bullet} {head}".rstrip())
+            lines.extend(children)
         return "\n".join(lines)
     if kind in ("block_quotation", "pull_quotation", "expandable_block_quotation"):
         return _quote("\n\n".join(x for x in (text, children) if x))
@@ -140,3 +146,31 @@ def _block(block: Any, indent: str = "") -> str:
 
 def rich_message_to_markdown(rich: dict) -> str:
     return "\n\n".join(_blocks(rich.get("blocks"))).strip()
+
+
+def rich_message_files(rich: dict) -> list[tuple[str, str]]:
+    """(file_id, имя) фото и документов из блоков — чтобы агент увидел
+    вложения, а не только пометку ``[фото]``. Фото — самый крупный размер."""
+    found: list[tuple[str, str]] = []
+
+    def walk(node: Any) -> None:
+        if isinstance(node, list):
+            for x in node:
+                walk(x)
+            return
+        if not isinstance(node, dict):
+            return
+        kind = node.get("type")
+        if kind == "photo" and isinstance(node.get("photo"), list) and node["photo"]:
+            biggest = node["photo"][-1]
+            if isinstance(biggest, dict) and biggest.get("file_id"):
+                found.append((biggest["file_id"], "photo.jpg"))
+        elif kind == "document" and isinstance(node.get("document"), dict):
+            doc = node["document"]
+            if doc.get("file_id"):
+                found.append((doc["file_id"], doc.get("file_name") or "document"))
+        for key in ("blocks", "items", "rows", "cells"):
+            walk(node.get(key))
+
+    walk(rich.get("blocks"))
+    return found
