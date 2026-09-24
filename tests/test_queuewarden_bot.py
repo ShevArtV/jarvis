@@ -40,7 +40,7 @@ def _item(n: int, notification_id: int | None = None) -> dict:
         "body": "Задача переведена в «В работе»",
         "taskId": 500 + n,
         "projectId": 7,
-        "url": f"https://queuewarden.ru/task/{500 + n}",
+        "url": f"https://stage.queuewarden.ru/task/{500 + n}",
         "createdAt": "2026-09-23T10:00:00Z",
     }
 
@@ -116,7 +116,7 @@ class ParseTest(unittest.TestCase):
     def test_trigger_text_carries_notification_and_instruction(self) -> None:
         text = qw.build_trigger_text(_item(1))
         for part in ("task.moved", "QW-1: Починить корзину", "«В работе»",
-                     "https://queuewarden.ru/task/501", "taskId: 501",
+                     "https://stage.queuewarden.ru/task/501", "taskId: 501",
                      "projectId: 7", "queuewarden_task_get", "КОРОТКОЕ резюме"):
             self.assertIn(part, text)
 

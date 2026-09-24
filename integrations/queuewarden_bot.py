@@ -26,7 +26,7 @@ from bot.topics import TopicKey, _resolve_topic_from_env, resolve_teamlead_topic
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_URL = "https://queuewarden.ru"
+DEFAULT_URL = "https://stage.queuewarden.ru"
 SOURCE = "queuewarden"
 SEEN_INTEGRATION = "queuewarden"
 SEEN_KIND = "bot_notification"
