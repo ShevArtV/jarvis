@@ -218,6 +218,13 @@ spawn_procs: dict[tuple[int, int, str], asyncio.subprocess.Process] = {}
 persistent_workers: dict[tuple[int, int], object] = {}
 
 
+# Запуск живого процесса занимает секунды (await start_persistent_*). Без
+# per-key лока два почти одновременных хода топика успевали оба увидеть пустой
+# persistent_workers и поднять по процессу — второй затирал первого в реестре,
+# а первый оставался сиротой на той же сессии.
+persistent_spawn_locks: dict[tuple[int, int], asyncio.Lock] = {}
+
+
 # Простаивающий живой процесс не экономит токены (сессия и так резюмируется
 # с диска) — только задержку на старте. Держать его вечно смысла нет.
 PERSISTENT_IDLE_MINUTES = int_env("JARVIS_PERSISTENT_IDLE_MINUTES", 20)

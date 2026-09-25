@@ -19,6 +19,9 @@ from telegram import Update
 from telegram.ext import Application
 
 from engines import engine_model_scope, get_engine_by_name
+from engines.claude_engine import CLAUDE_TIMEOUT
+from engines.codex_engine import CODEX_TIMEOUT
+from engines.opencode_engine import OPENCODE_TIMEOUT
 from engines.process_control import terminate_process_tree
 
 from bot.db import _db, log_message
@@ -43,6 +46,7 @@ from bot.sessions import (
 from bot.settings import CLAUDE_CWD
 from bot.topics import (
     _key,
+    _kill_persistent_worker,
     _lock_for,
     active_procs,
     resolve_job_notice_target,
@@ -113,6 +117,42 @@ async def _run_spawn(update: Update, user_text: str) -> None:
         await deliver_file_markers(chat, thread_id, file_markers, notice_prefix=prefix)
     logger.info("spawn done: key=%s spawn=%s ok=%s files=%d",
                 key, spawn_id, ok, len(file_markers))
+
+
+async def _run_job_turn_persistent(
+    chat, thread_id: int, key: tuple[int, int], prompt: str, on_intermediate,
+) -> tuple[bool, str]:
+    """Ход job'а в живом процессе топика — отдельным ходом, а не довеском.
+
+    Довесок растворился бы в чужом ходе: ответ ушёл бы тому, кто ход начал, и
+    job остался бы без результата и нотиса инициатору. Поэтому ждём, пока
+    текущий ход закончится."""
+    from bot.handlers.messages import _get_or_start_persistent_worker
+
+    try:
+        worker, _spawned = await _get_or_start_persistent_worker(chat, thread_id, key)
+    except Exception as exc:
+        logger.exception("persistent worker spawn failed for job key=%s", key)
+        return False, f"Не удалось поднять живой процесс: {exc}"
+    if worker is None:
+        return False, "persistent для движка топика не действует — повтори задачу."
+    while worker.busy and not worker.dead:
+        await asyncio.sleep(1.0)
+    if worker.dead:
+        return False, "Живой процесс завершился, не дождавшись хода job'а."
+    timeout = {"codex": CODEX_TIMEOUT, "opencode": OPENCODE_TIMEOUT}.get(
+        get_session(*key)[2], CLAUDE_TIMEOUT,
+    )
+    worker.on_intermediate = on_intermediate
+    _is_new, fut = await worker.submit(prompt)
+    try:
+        return await asyncio.wait_for(fut, timeout=timeout)
+    except asyncio.TimeoutError:
+        logger.warning("persistent job turn timeout key=%s", key)
+        await _kill_persistent_worker(key, "")
+        return False, f"Timeout: живой процесс не ответил за {timeout}с."
+    finally:
+        worker.on_intermediate = None
 
 
 async def _run_manager_job(app: Application, job: dict) -> tuple[bool, int | None, str | None]:
@@ -270,6 +310,13 @@ async def _run_manager_job(app: Application, job: dict) -> tuple[bool, int | Non
                     continue
                 if row and row[0]:
                     interrupted = True
+                    if use_persistent:
+                        logger.info(
+                            "manager job %s: cancel_requested, killing persistent worker",
+                            job_id,
+                        )
+                        await _kill_persistent_worker(key, "")
+                        return
                     proc = active_procs.get(key)
                     if proc is not None:
                         logger.info(
@@ -284,13 +331,22 @@ async def _run_manager_job(app: Application, job: dict) -> tuple[bool, int | Non
                             )
                     return
 
+        # Persistent-топик: job идёт в тот же живой процесс, что и сообщения.
+        # Разовый `--resume` той же сессии рядом с живым процессом — вторая
+        # параллельная сессия в топике (codex на этом падает thread-store conflict).
+        use_persistent = get_persistent_for_engine(*key, engine_name)
         watcher_task = asyncio.create_task(_interrupt_watcher())
 
         try:
-            with engine_model_scope(engine.name, model):
-                ok, final_text, _sid_after = await call_llm_stream(
-                    engine, session_id, prompt, key, cwd, on_intermediate,
+            if use_persistent:
+                ok, final_text = await _run_job_turn_persistent(
+                    chat, thread_id, key, prompt, on_intermediate,
                 )
+            else:
+                with engine_model_scope(engine.name, model):
+                    ok, final_text, _sid_after = await call_llm_stream(
+                        engine, session_id, prompt, key, cwd, on_intermediate,
+                    )
             if ok and pending_summary:
                 clear_pending_summary(*key)
         except Exception as exc:
