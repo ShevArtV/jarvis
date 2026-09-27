@@ -110,7 +110,9 @@ def _configure_codex(python: str, args: list[str]) -> None:
             f"args = {_toml_array(args)}",
             "enabled = true",
             "startup_timeout_sec = 30",
-            "tool_timeout_sec = 60",
+            # ask_user ждёт ответа до 3600 с — таймаут клиента обязан быть длиннее,
+            # иначе codex бросает вопрос через минуту и идёт дальше без ответа.
+            "tool_timeout_sec = 3700",
             END_MARKER,
             "",
         ]

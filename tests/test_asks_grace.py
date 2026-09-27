@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from bot import db as bot_db
-from bot.asks import get_recent_timed_out_ask, mark_ask_late_answered
+from bot.asks import get_pending_ask, get_recent_timed_out_ask, mark_ask_late_answered
 
 
 class AsksGraceTest(unittest.TestCase):
@@ -110,6 +110,47 @@ class AsksGraceTest(unittest.TestCase):
             with patch.object(bot_db, "DB_PATH", db_path):
                 self.assertTrue(mark_ask_late_answered(ask_id, "первый ответ"))
                 self.assertFalse(mark_ask_late_answered(ask_id, "второй ответ"))
+
+    def _pending_with_pulse(self, db_path: str, polled_at: datetime | None) -> int:
+        ask_id = self._add_ask(db_path, "pending", datetime.utcnow() - timedelta(minutes=40))
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                "UPDATE ask_requests SET polled_at = ? WHERE id = ?",
+                (polled_at.isoformat() if polled_at else None, ask_id),
+            )
+        return ask_id
+
+    def test_abandoned_ask_does_not_swallow_message(self) -> None:
+        """Пульс протух (codex бросил ask_user, процесс убит) — вопрос не ждут:
+        он закрывается как timed_out от последнего опроса, а не ловит сообщение."""
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = self._fresh_db(tmp)
+            last_poll = datetime.utcnow() - timedelta(minutes=5)
+            ask_id = self._pending_with_pulse(db_path, last_poll)
+            with patch.object(bot_db, "DB_PATH", db_path):
+                self.assertIsNone(get_pending_ask(-100, 77))
+                late = get_recent_timed_out_ask(-100, 77)
+            self.assertIsNotNone(late)
+            self.assertEqual(late["id"], ask_id)
+            self.assertEqual(late["answered_at"], last_poll.isoformat())
+
+    def test_live_ask_still_catches_message(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = self._fresh_db(tmp)
+            ask_id = self._pending_with_pulse(db_path, datetime.utcnow() - timedelta(seconds=5))
+            with patch.object(bot_db, "DB_PATH", db_path):
+                ask = get_pending_ask(-100, 77)
+            self.assertIsNotNone(ask)
+            self.assertEqual(ask["id"], ask_id)
+
+    def test_ask_without_pulse_is_treated_as_live(self) -> None:
+        """Вопрос от MCP-сервера старой версии пульса не пишет — не трогаем."""
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = self._fresh_db(tmp)
+            ask_id = self._pending_with_pulse(db_path, None)
+            with patch.object(bot_db, "DB_PATH", db_path):
+                ask = get_pending_ask(-100, 77)
+            self.assertEqual(ask["id"], ask_id)
 
 
 if __name__ == "__main__":

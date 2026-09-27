@@ -1914,6 +1914,28 @@ def _ask_keyboard(ask_id: int, options: list[str]) -> dict[str, Any]:
     }
 
 
+def _touch_ask(ask_id: int) -> None:
+    """Пульс ожидания: бот по нему отличает живой вопрос от брошенного."""
+    try:
+        with _connect() as conn:
+            conn.execute(
+                "UPDATE ask_requests SET polled_at = ? WHERE id = ?",
+                (datetime.utcnow().isoformat(), ask_id),
+            )
+    except sqlite3.OperationalError:
+        # Бот ещё не перезапущен и колонки нет — работаем без пульса.
+        pass
+
+
+def _expire_ask(ask_id: int) -> None:
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE ask_requests SET status = 'timed_out', answered_at = ? "
+            "WHERE id = ? AND status = 'pending'",
+            (datetime.utcnow().isoformat(), ask_id),
+        )
+
+
 @mcp.tool(
     name="ask_user",
     description=(
@@ -2043,34 +2065,37 @@ async def ask_user(
                 ask_id, thread_id, len(options))
 
     deadline = time.monotonic() + timeout_seconds
-    while True:
-        with _connect() as conn:
-            conn.row_factory = sqlite3.Row
-            row = conn.execute(
-                "SELECT status, answer, option_index, via FROM ask_requests WHERE id = ?",
-                (ask_id,),
-            ).fetchone()
-        if row is not None and row["status"] == "answered":
-            logger.info("ask_user #%s answered via %s", ask_id, row["via"])
-            return {
-                "status": "answered",
-                "ask_id": ask_id,
-                "answer": row["answer"],
-                "option_index": row["option_index"],
-                "via": row["via"],
-            }
-        if time.monotonic() >= deadline:
-            break
-        await asyncio.sleep(poll_interval)
+    try:
+        while True:
+            _touch_ask(ask_id)
+            with _connect() as conn:
+                conn.row_factory = sqlite3.Row
+                row = conn.execute(
+                    "SELECT status, answer, option_index, via FROM ask_requests WHERE id = ?",
+                    (ask_id,),
+                ).fetchone()
+            if row is not None and row["status"] == "answered":
+                logger.info("ask_user #%s answered via %s", ask_id, row["via"])
+                return {
+                    "status": "answered",
+                    "ask_id": ask_id,
+                    "answer": row["answer"],
+                    "option_index": row["option_index"],
+                    "via": row["via"],
+                }
+            if time.monotonic() >= deadline:
+                break
+            await asyncio.sleep(poll_interval)
+    except BaseException:
+        # Вызов прерван (клиент бросил его по tool_timeout, процесс гасят) —
+        # ответа никто не ждёт, иначе он съест следующее сообщение в топик.
+        _expire_ask(ask_id)
+        logger.info("ask_user #%s abandoned by the caller", ask_id)
+        raise
 
     # Таймаут: закрываем вопрос, гасим кнопки — чтобы по протухшему нельзя было
     # кликнуть и чтобы следующее сообщение в топик не съелось как «ответ».
-    with _connect() as conn:
-        conn.execute(
-            "UPDATE ask_requests SET status = 'timed_out', answered_at = ? "
-            "WHERE id = ? AND status = 'pending'",
-            (datetime.utcnow().isoformat(), ask_id),
-        )
+    _expire_ask(ask_id)
     if tg_msg_id:
         try:
             _telegram_api("editMessageText", {

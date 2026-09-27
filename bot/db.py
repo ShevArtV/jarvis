@@ -311,6 +311,14 @@ def init_db() -> None:
             "CREATE INDEX IF NOT EXISTS idx_ask_requests_pending "
             "ON ask_requests(chat_id, thread_id, status, id)"
         )
+        # polled_at — пульс ожидающего ask_user: MCP-сервер обновляет его на
+        # каждом опросе. Протух — вопрос никто не ждёт (codex бросил вызов по
+        # tool_timeout, процесс убит), и сообщение в топик не должно в него уйти.
+        ask_cols = [r[1] for r in conn.execute("PRAGMA table_info(ask_requests)").fetchall()]
+        if "polled_at" not in ask_cols:
+            _backup_db_once()
+            logger.info("adding 'polled_at' column to ask_requests")
+            conn.execute("ALTER TABLE ask_requests ADD COLUMN polled_at TEXT")
         # Очередь задач от Менеджера (MCP tool manager_send as_user=True).
         # Worker внутри бота забирает pending и прокручивает их через
         # обычный LLM-pipeline в указанном топике.

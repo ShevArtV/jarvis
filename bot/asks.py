@@ -25,10 +25,30 @@ logger = logging.getLogger(__name__)
 GRACE_MINUTES = 15
 
 
+# MCP-сервер опрашивает вопрос не реже раза в 30 с (poll_interval ≤ 30).
+POLL_STALE_SECONDS = 90
+
+
 def get_pending_ask(chat_id: int, thread_id: int) -> dict | None:
-    """Незакрытый вопрос топика (последний, если их вдруг несколько)."""
+    """Незакрытый вопрос топика, который агент ещё ждёт (последний из таких).
+
+    Вопрос с протухшим пульсом ``polled_at`` брошен — закрываем его как
+    ``timed_out`` с моментом последнего опроса, чтобы сообщение ушло агенту
+    обычным ходом (с grace-пометкой), а не в пустоту. ``polled_at IS NULL`` —
+    вопрос от MCP-сервера старой версии, пульса он не пишет: считаем живым.
+    """
+    stale_before = (datetime.utcnow() - timedelta(seconds=POLL_STALE_SECONDS)).isoformat()
     with _db() as conn:
         conn.row_factory = sqlite3.Row
+        cur = conn.execute(
+            "UPDATE ask_requests SET status = 'timed_out', answered_at = polled_at "
+            "WHERE chat_id = ? AND thread_id = ? AND status = 'pending' "
+            "AND polled_at IS NOT NULL AND polled_at < ?",
+            (chat_id, thread_id, stale_before),
+        )
+        if cur.rowcount:
+            logger.info("expired %d abandoned ask(s): chat=%s thread=%s",
+                        cur.rowcount, chat_id, thread_id)
         row = conn.execute(
             "SELECT * FROM ask_requests WHERE chat_id = ? AND thread_id = ? "
             "AND status = 'pending' ORDER BY id DESC LIMIT 1",
