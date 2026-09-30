@@ -12,9 +12,9 @@
   потому что 4096 символов Telegram не переживает.
 * **Rich Messages (Bot API 10.1).** Финальный ответ агента уходит
   ``sendRichMessage`` с markdown как есть: заголовки, таблицы, списки, цитаты
-  Telegram рисует сам, лимит 32 768 символов. Картинки из ``[[FILE:]]``
-  встраиваются в сообщение (несколько — коллажем). Telegram не принял —
-  прежний путь HTML/документ.
+  Telegram рисует сам, лимит 32 768 символов. Файлы из ``[[FILE:]]``
+  встраиваются в начало сообщения: фото и видео — слайдером, остальное —
+  блоками-документами. Telegram не принял — прежний путь HTML/документ.
 """
 
 from __future__ import annotations
@@ -57,9 +57,13 @@ SILENT_MARKER = "[[SILENT]]"
 # Rich Messages: лимит Telegram 32 768 символов; картинка встраивается в
 # сообщение как фото — у фото свой лимит 10 МБ, остальное идёт документом.
 RICH_LIMIT = 32000
-RICH_MAX_IMAGES = 20
-RICH_IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp")
-RICH_IMAGE_LIMIT_MB = 10
+# Вложения rich-ответа: до 50 на сообщение; фото Telegram берёт до 10 МБ,
+# остальное загрузкой бота — до 50 МБ.
+RICH_MAX_MEDIA = 50
+RICH_PHOTO_EXTS = (".jpg", ".jpeg", ".png", ".webp")
+RICH_VIDEO_EXTS = (".mp4", ".mov", ".m4v", ".webm")
+RICH_PHOTO_LIMIT_MB = 10
+RICH_FILE_LIMIT_MB = 50
 
 JOURNAL_MAX_CHARS = 3400  # запас до TG_HARD_LIMIT на HTML-разметку
 JOURNAL_LINE_CHARS = 400   # длинную строку шага режем — журнал, не транскрипт
@@ -528,60 +532,72 @@ async def deliver_file_markers(
                 pass
 
 
-def split_image_markers(
+def _rich_kind(path: str) -> str:
+    low = path.lower()
+    if low.endswith(RICH_PHOTO_EXTS):
+        return "photo"
+    if low.endswith(RICH_VIDEO_EXTS):
+        return "video"
+    return "document"
+
+
+def split_media_markers(
     markers: list[tuple[str, str | None]],
 ) -> tuple[list[tuple[str, str | None]], list[tuple[str, str | None]]]:
-    """Маркеры → (картинки для встраивания в rich-ответ, остальные файлы).
+    """Маркеры → (файлы для встраивания в rich-ответ, остальные).
 
-    Картинка — существующий файл по абсолютному пути, jpg/png/webp до 10 МБ.
-    Всё прочее, включая битые пути, идёт в deliver_file_markers: там ошибка
-    доходит до топика текстом."""
-    images: list[tuple[str, str | None]] = []
+    Встраивается существующий файл по абсолютному пути в пределах лимита
+    своего типа. Всё прочее, включая битые пути, идёт в deliver_file_markers:
+    там ошибка доходит до топика текстом."""
+    media: list[tuple[str, str | None]] = []
     rest: list[tuple[str, str | None]] = []
     for path, caption in markers:
+        limit = RICH_PHOTO_LIMIT_MB if _rich_kind(path) == "photo" else RICH_FILE_LIMIT_MB
         ok = (
-            len(images) < RICH_MAX_IMAGES
+            len(media) < RICH_MAX_MEDIA
             and os.path.isabs(path)
-            and path.lower().endswith(RICH_IMAGE_EXTS)
             and os.path.isfile(path)
-            and os.path.getsize(path) <= RICH_IMAGE_LIMIT_MB * 1024 * 1024
+            and 0 < os.path.getsize(path) <= limit * 1024 * 1024
         )
-        (images if ok else rest).append((path, caption))
-    return images, rest
+        (media if ok else rest).append((path, caption))
+    return media, rest
 
 
-def _rich_image_block(images: list[tuple[str, str | None]]) -> str:
-    """Markdown-блок картинок: ссылки tg://photo?id=imgN, несколько — коллажем."""
-    lines = []
-    for i, (_path, caption) in enumerate(images):
+def _rich_media_block(media: list[tuple[str, str | None]]) -> str:
+    """Markdown вложений: фото и видео — слайдером (одно — просто блоком),
+    за ними документы. Ссылки tg://<тип>?id=mN ведут на rich_message.media."""
+    visual, docs = [], []
+    for i, (path, caption) in enumerate(media):
+        kind = _rich_kind(path)
         title = ""
         if caption:
             title = ' "' + caption[:1024].replace('"', "'") + '"'
-        lines.append(f"![](tg://photo?id=img{i}{title})")
-    if len(lines) > 1:
-        lines = ["<tg-collage>", *lines, "</tg-collage>"]
-    return "\n".join(lines)
+        line = f"![](tg://{kind}?id=m{i}{title})"
+        (docs if kind == "document" else visual).append(line)
+    if len(visual) > 1:
+        visual = ["<tg-slideshow>", *visual, "</tg-slideshow>"]
+    return "\n".join(visual + docs)
 
 
 async def _send_rich_message(
-    chat, thread_id: int, markdown: str, images: list[tuple[str, str | None]],
+    chat, thread_id: int, markdown: str, media: list[tuple[str, str | None]],
 ) -> Message:
     """sendRichMessage через do_api_request — PTB 22.x метода не знает.
 
     Файл, вложенный в rich_message.media, PTB в multipart не выносит: он
     разбирает только параметры верхнего уровня. Поэтому файлы идут отдельным
     параметром, а media ссылается на их части через attach://."""
-    handles = [open(path, "rb") for path, _cap in images]
+    handles = [open(path, "rb") for path, _cap in media]
     try:
         files = [
             InputFile(fh, filename=os.path.basename(path), attach=True)
-            for fh, (path, _cap) in zip(handles, images)
+            for fh, (path, _cap) in zip(handles, media)
         ]
         rich: dict = {"markdown": markdown}
         if files:
             rich["media"] = [
-                {"id": f"img{i}", "media": {"type": "photo", "media": f.attach_uri}}
-                for i, f in enumerate(files)
+                {"id": f"m{i}", "media": {"type": _rich_kind(path), "media": f.attach_uri}}
+                for i, (f, (path, _cap)) in enumerate(zip(files, media))
             ]
         api_kwargs: dict = {"chat_id": chat.id, "rich_message": rich}
         if thread_id:
@@ -598,25 +614,25 @@ async def _send_rich_message(
 
 async def send_claude_reply(
     chat, thread_id: int, text: str, meta: dict, filename_prefix: str = "reply",
-    html_prefix: str = "", images: list[tuple[str, str | None]] | None = None,
+    html_prefix: str = "", media: list[tuple[str, str | None]] | None = None,
 ):
     """Ответ агента: Rich Message; не принят — HTML или .md вложение.
 
     `html_prefix` (например '[#xxxx] ') добавляется как уже готовый HTML-фрагмент
-    перед сконвертированным телом (в rich-ответ — без тегов). `images` — маркеры
-    из split_image_markers: встраиваются в rich-ответ, иначе уходят файлами."""
+    перед сконвертированным телом (в rich-ответ — без тегов). `media` — маркеры
+    из split_media_markers: встают в начало rich-ответа, иначе уходят файлами."""
     log_kind = "spawn_reply" if meta.get("spawn_id") else "bot_reply"
-    images = images or []
+    media = media or []
 
     plain_prefix = re.sub(r"<[^>]+>", "", html_prefix) if html_prefix else ""
     if len(plain_prefix) + len(text) <= RICH_LIMIT:
         markdown = plain_prefix + text
-        if images:
-            markdown += "\n\n" + _rich_image_block(images)
+        if media:
+            markdown = _rich_media_block(media) + "\n\n" + markdown
         sent = None
         try:
             sent = await _retry_transient(
-                lambda: _send_rich_message(chat, thread_id, markdown, images),
+                lambda: _send_rich_message(chat, thread_id, markdown, media),
                 "send_claude_reply(rich)",
             )
         except Exception as exc:
@@ -635,8 +651,8 @@ async def send_claude_reply(
     sent = await _send_claude_reply_legacy(
         chat, thread_id, text, meta, filename_prefix, html_prefix, log_kind,
     )
-    if images:
-        await deliver_file_markers(chat, thread_id, images)
+    if media:
+        await deliver_file_markers(chat, thread_id, media)
     return sent
 
 

@@ -15,6 +15,12 @@
 списка — одна установка из ``QUEUEWARDEN_URL``/``QUEUEWARDEN_MCP_TOKEN`` и MCP
 ``queuewarden``, как было до мультиустановки.
 
+Новая задача (``task.created``) перед постановкой обогащается из MCP
+установки: вложения скачиваются в ``temp/media/qw/<slug>/<номер>/`` и попадают
+в триггер готовыми маркерами ``[[FILE:]]`` (Jarvis встроит их в ответ
+слайдером), а роль оператора вычисляется по участникам: агент в слоте — его
+владелец. Сбой обогащения не мешает триггеру.
+
 Доставка at-least-once: неподтверждённое приходит снова. Поэтому ack уходит
 только после коммита триггера, а повторы гасятся отметкой по ``notificationId``
 в ``integration_seen_items`` (пишется в той же транзакции, что и триггер; kind
@@ -24,9 +30,12 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
 import logging
 import os
 import re
+import shutil
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -35,6 +44,7 @@ import httpx
 
 from bot.delivery import SILENT_MARKER
 from bot.queues import enqueue_agent_trigger
+from bot.settings import MEDIA_DIR
 from bot.topics import TopicKey, _resolve_topic_from_env, resolve_teamlead_topic
 
 logger = logging.getLogger(__name__)
@@ -51,6 +61,18 @@ _TASK_KEY_RE = re.compile(r"\b(\d{4}-\d+)\b")
 # Тимлид разбирает уведомление и может спросить оператора — роль не
 # 'executor', иначе гард ask_user закроет ему чат.
 TRIGGER_ROLE = "manager"
+
+ATTACH_DIR = os.path.join(MEDIA_DIR, "qw")
+# MCP artifact_get отдаёт файл base64 не больше 5 МиБ (MCP_ARTIFACT_LIMIT в QW).
+ARTIFACT_LIMIT_BYTES = 5 * 1024 * 1024
+MAX_ATTACHMENTS = 20
+# Слот задачи: поле, роль для department_users (оператор — всегда человек),
+# роль оператора, если в слоте он сам, и если его агент.
+_ROLE_SLOTS = (
+    ("reviewer_id", "reviewer", "ревизор", "владелец агента-ревизора"),
+    ("assignee_id", "assignee", "исполнитель", "владелец агента-исполнителя"),
+    ("operator_id", None, "оператор", "владелец агента-оператора"),
+)
 
 POLL_WAIT_SECONDS = 25
 POLL_LIMIT = 50
@@ -139,9 +161,109 @@ def task_hashtag(item: dict, inst: Installation) -> str:
     return f"#qw{slug}{match.group(1).replace('-', '_')}"
 
 
-def build_trigger_text(item: dict, inst: Installation) -> str:
+def operator_roles(task: dict, people: dict[str, dict]) -> list[str]:
+    """Роли оператора в задаче. QW шлёт task.created участникам, кроме
+    создателя, — значит, оператор занимает слот, не принадлежащий создателю:
+    сам (человек в слоте) или через своего агента (владелец агента)."""
+    creator = task.get("created_by")
+    roles = []
+    for field, _role, human, owner in _ROLE_SLOTS:
+        uid = task.get(field)
+        if not uid or uid == creator:
+            continue
+        person = people.get(uid)
+        if person and person.get("kind") == "agent":
+            if person.get("ownerId") != creator:
+                roles.append(owner)
+        else:
+            roles.append(human)
+    return roles
+
+
+async def _mcp_call(client: httpx.AsyncClient, inst: Installation, tool: str,
+                    args: dict) -> Any:
+    """Вызов инструмента MCP установки тем же токеном моста."""
+    resp = await client.post(
+        f"{inst.url}/mcp",
+        json={"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+              "params": {"name": tool, "arguments": args}},
+        headers={"Accept": "application/json, text/event-stream"},
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    if data.get("error"):
+        raise RuntimeError(f"{tool}: {data['error'].get('message')}")
+    result = data.get("result") or {}
+    if result.get("isError"):
+        raise RuntimeError(f"{tool}: {result.get('content')}")
+    if result.get("structuredContent") is not None:
+        return result["structuredContent"]
+    return json.loads(result["content"][0]["text"])
+
+
+def _safe_name(name: str | None) -> str:
+    name = os.path.basename(name or "").strip() or "file"
+    return re.sub(r"[^\w.\- ]", "_", name)[:120]
+
+
+async def enrich_created(client: httpx.AsyncClient, inst: Installation,
+                         item: dict) -> dict:
+    """Для task.created: роль оператора и скачанные вложения.
+    Возвращает {"roles": [...], "files": [путь, ...], "skipped": [имя, ...]}."""
+    detail = await _mcp_call(client, inst, "queuewarden_task_get",
+                             {"taskId": item["taskId"]})
+    task = detail.get("task") or {}
+    people: dict[str, dict] = {}
+    for field, role, _human, _owner in _ROLE_SLOTS:
+        if role and task.get(field) and task.get(field) != task.get("created_by"):
+            found = await _mcp_call(client, inst, "queuewarden_department_users",
+                                    {"projectId": task["project_id"], "role": role})
+            people.update({row["id"]: row for row in found.get("rows") or []})
+
+    folder = os.path.join(ATTACH_DIR, inst.slug,
+                          _safe_name(task.get("task_key") or str(item["taskId"])))
+    attachments = [a for a in detail.get("artifacts") or []
+                   if a.get("kind") == "attachment" and not a.get("run_id")]
+    files: list[str] = []
+    skipped = [_safe_name(a.get("filename")) for a in attachments[MAX_ATTACHMENTS:]]
+    for art in attachments[:MAX_ATTACHMENTS]:
+        name = _safe_name(art.get("filename"))
+        if int(art.get("size_bytes") or 0) > ARTIFACT_LIMIT_BYTES:
+            skipped.append(name)
+            continue
+        got = await _mcp_call(client, inst, "queuewarden_artifact_get",
+                              {"artifactId": art["id"]})
+        os.makedirs(folder, exist_ok=True)
+        path = os.path.join(folder, f"{str(art['id'])[:8]}-{name}")
+        with open(path, "wb") as fh:
+            fh.write(base64.b64decode(got.get("content") or ""))
+        files.append(path)
+    return {"roles": operator_roles(task, people), "files": files, "skipped": skipped}
+
+
+def prune_attachments(ttl_days: int) -> int:
+    """Удалить папки вложений задач старше ttl_days. Возвращает их число."""
+    if not os.path.isdir(ATTACH_DIR):
+        return 0
+    cutoff = time.time() - ttl_days * 86400
+    removed = 0
+    for slug in os.listdir(ATTACH_DIR):
+        base = os.path.join(ATTACH_DIR, slug)
+        if not os.path.isdir(base):
+            continue
+        for key in os.listdir(base):
+            path = os.path.join(base, key)
+            if os.path.isdir(path) and os.path.getmtime(path) < cutoff:
+                shutil.rmtree(path, ignore_errors=True)
+                removed += 1
+    return removed
+
+
+def build_trigger_text(item: dict, inst: Installation,
+                       extra: dict | None = None) -> str:
     """Одно уведомление — текст строки триггера. Инструкцию агенту к серии
-    таких строк добавляет build_batch_prompt при запуске хода."""
+    таких строк добавляет build_batch_prompt при запуске хода. `extra` —
+    результат enrich_created."""
     lines = [
         f"Установка: {inst.slug} ({inst.url}), MCP-сервер: {inst.mcp}",
         f"Тип: {item.get('type') or '—'}",
@@ -158,6 +280,16 @@ def build_trigger_text(item: dict, inst: Installation) -> str:
     tag = task_hashtag(item, inst)
     if tag:
         lines.append(f"Тег: {tag}")
+    if extra:
+        if extra.get("roles"):
+            lines.append("Роль оператора: " + ", ".join(extra["roles"]))
+        if extra.get("files"):
+            lines.append("Вложения (скопируй маркеры в ответ как есть, каждый "
+                         "на своей строке):")
+            lines += [f"[[FILE: {path}]]" for path in extra["files"]]
+        if extra.get("skipped"):
+            lines.append("Не скачаны (больше 5 МиБ или сверх лимита), есть только "
+                         "в задаче: " + ", ".join(extra["skipped"]))
     return "\n".join(lines)
 
 
@@ -186,9 +318,15 @@ def build_batch_prompt(events: list[str]) -> str:
         "6) новая задача (task.created) — докладывай ВСЕГДА: QW шлёт его в этот канал, "
         "только если оператор участник задачи, а не создатель, — участие уже проверено, "
         "сам не перепроверяй и не молчи из-за того, что исполнитель и ревизор — агенты. "
-        "Роль оператора возьми из задачи (queuewarden_task_get); не видно — «оператор "
-        "или владелец агентов». Суть задачи, твоё мнение о постановке.\n"
-        "По каждой задаче — свой блок; первая строка блока: "
+        "Роль оператора — из строки «Роль оператора:» уведомления, сам не выводи. "
+        "Оформи карточкой:\n"
+        "  маркеры [[FILE: …]] из уведомления — в самом начале, каждый на своей строке;\n"
+        "  `## <название задачи>`;\n"
+        "  `<установка> · <проект> · <тип> · <приоритет> · дедлайн <дата> · ты: <роль оператора>`;\n"
+        "  по каждому непустому полю задачи — `### <название поля>` и его значение;\n"
+        "  `### Мнение Тимлида` — твоё мнение о постановке;\n"
+        "  последняя строка — `[Открыть задачу](<ссылка>) · <тег>`.\n"
+        "Остальные поводы — блоком на задачу; первая строка блока: "
         "`**[<установка>] <номер задачи> · <проект> · <название>** <тег>` (тег из "
         "строки «Тег:» уведомления; строку им не начинай — `#` в начале строки "
         "делает заголовок) и ссылка на задачу; тот же заголовок с тегом — в начале "
@@ -198,13 +336,14 @@ def build_batch_prompt(events: list[str]) -> str:
     return "\n\n".join(parts)
 
 
-def enqueue_notification(item: dict, topic: TopicKey, inst: Installation) -> int | None:
+def enqueue_notification(item: dict, topic: TopicKey, inst: Installation,
+                         extra: dict | None = None) -> int | None:
     """Поставить триггер по уведомлению. Возвращает id триггера или None у
     повторной доставки. Вернулся без исключения — уведомление можно
     подтверждать: триггер записан сейчас или был записан раньше."""
     chat_id, thread_id = topic
     trigger_id = enqueue_agent_trigger(
-        chat_id, thread_id, build_trigger_text(item, inst), SOURCE,
+        chat_id, thread_id, build_trigger_text(item, inst, extra), SOURCE,
         role=TRIGGER_ROLE,
         seen_key=(SEEN_INTEGRATION, f"{SEEN_KIND}:{inst.slug}", item["notificationId"]),
     )
@@ -265,8 +404,15 @@ async def poll_once(
 
     ack_ids = []
     for item in items:
+        extra = None
+        if item.get("type") == "task.created" and item.get("taskId"):
+            try:
+                extra = await enrich_created(client, inst, item)
+            except Exception as exc:
+                logger.warning("queuewarden[%s]: enrich %s failed: %s: %s", inst.slug,
+                               item.get("notificationId"), type(exc).__name__, exc)
         try:
-            enqueue_notification(item, topic, inst)
+            enqueue_notification(item, topic, inst, extra)
             ack_ids.append(item["id"])
         except Exception:
             # Не подтверждаем — QW доставит повторно.

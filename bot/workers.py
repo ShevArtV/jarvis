@@ -19,6 +19,7 @@ from datetime import datetime, timedelta
 from telegram.ext import Application
 
 from engines.process_control import terminate_process_tree
+from integrations.queuewarden_bot import prune_attachments
 
 from bot.db import _db, log_message
 from bot.delivery import _send_manager_notice, send_to_topic
@@ -81,6 +82,9 @@ async def cleanup_worker(app: Application) -> None:
                     "agent_triggers=%d (TTL=%dd)",
                     stats["messages_log"], stats["jobs"], stats["agent_triggers"], ttl,
                 )
+            dirs = prune_attachments(ttl)
+            if dirs:
+                logger.info("cleanup_worker: pruned %d QW attachment dirs", dirs)
             await asyncio.sleep(3600.0)
         except asyncio.CancelledError:
             logger.info("cleanup_worker cancelled")

@@ -7,6 +7,7 @@ bot_state.db тесты не трогают.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
 import sqlite3
@@ -361,6 +362,107 @@ class MultiInstallationTest(_DbCase):
         self.assertEqual(len(texts), 2)
         self.assertIn("queuewarden_artsites", texts[0])
         self.assertIn("queuewarden_tako", texts[1])
+
+
+CREATOR, ME = "u-tikhon", "u-me"
+# Задача 2609-5: создатель и оператор — Тихон, ревизор и исполнитель — агенты
+# владельца канала.
+TASK_2609_5 = {
+    "id": 505, "task_key": "2609-5", "project_id": 7, "created_by": CREATOR,
+    "reviewer_id": "a-rev", "assignee_id": "a-exec", "operator_id": CREATOR,
+}
+PEOPLE = {
+    "a-rev": {"id": "a-rev", "kind": "agent", "ownerId": ME},
+    "a-exec": {"id": "a-exec", "kind": "agent", "ownerId": ME},
+}
+
+
+class _FakeMCP:
+    """Мок MCP установки: tools/call → structuredContent по имени инструмента."""
+
+    def __init__(self, artifacts: list[dict]) -> None:
+        self.artifacts = artifacts
+        self.calls: list[tuple[str, dict]] = []
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        params = json.loads(request.content)["params"]
+        name, args = params["name"], params["arguments"]
+        self.calls.append((name, args))
+        if name == "queuewarden_task_get":
+            data = {"task": TASK_2609_5, "artifacts": self.artifacts}
+        elif name == "queuewarden_department_users":
+            data = {"rows": list(PEOPLE.values())}
+        elif name == "queuewarden_artifact_get":
+            data = {"content": base64.b64encode(b"PNG-" + args["artifactId"].encode()).decode()}
+        else:
+            return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1,
+                                             "error": {"message": "unknown tool"}})
+        return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1,
+                                         "result": {"structuredContent": data}})
+
+
+class CreatedCardTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        p = patch.object(qw, "ATTACH_DIR", self._tmp.name)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_roles_for_2609_5_are_agent_owner(self) -> None:
+        self.assertEqual(qw.operator_roles(TASK_2609_5, PEOPLE),
+                         ["владелец агента-ревизора", "владелец агента-исполнителя"])
+
+    def test_roles_human_in_slot_and_creators_agent_skipped(self) -> None:
+        task = {"created_by": CREATOR, "reviewer_id": ME, "assignee_id": "a-x",
+                "operator_id": ME}
+        people = {ME: {"kind": "human"},
+                  "a-x": {"kind": "agent", "ownerId": CREATOR}}
+        self.assertEqual(qw.operator_roles(task, people), ["ревизор", "оператор"])
+
+    def test_enrich_downloads_attachments_and_skips_big_and_run_files(self) -> None:
+        mcp = _FakeMCP([
+            {"id": "aaaaaaaa-1", "kind": "attachment", "filename": "скрин 1.png",
+             "size_bytes": 10, "run_id": None},
+            {"id": "bbbbbbbb-2", "kind": "attachment", "filename": "big.mp4",
+             "size_bytes": qw.ARTIFACT_LIMIT_BYTES + 1, "run_id": None},
+            {"id": "cccccccc-3", "kind": "attachment", "filename": "run.log",
+             "size_bytes": 10, "run_id": "r1"},
+        ])
+
+        async def run() -> dict:
+            async with httpx.AsyncClient(transport=httpx.MockTransport(mcp)) as client:
+                return await qw.enrich_created(client, INST, {"taskId": 505})
+        extra = asyncio.run(run())
+
+        self.assertEqual(extra["roles"],
+                         ["владелец агента-ревизора", "владелец агента-исполнителя"])
+        path = os.path.join(self._tmp.name, "default", "2609-5", "aaaaaaaa-скрин 1.png")
+        self.assertEqual(extra["files"], [path])
+        with open(path, "rb") as fh:
+            self.assertEqual(fh.read(), b"PNG-aaaaaaaa-1")
+        self.assertEqual(extra["skipped"], ["big.mp4"])
+        roles = [a["role"] for n, a in mcp.calls if n == "queuewarden_department_users"]
+        self.assertEqual(roles, ["reviewer", "assignee"])
+
+    def test_trigger_text_carries_role_and_file_markers(self) -> None:
+        text = qw.build_trigger_text(
+            _item(1), INST,
+            {"roles": ["владелец агента-ревизора"], "files": ["/m/a.png"],
+             "skipped": ["big.mp4"]})
+        self.assertIn("Роль оператора: владелец агента-ревизора", text)
+        self.assertIn("\n[[FILE: /m/a.png]]", text)
+        self.assertIn("big.mp4", text)
+
+    def test_prune_removes_only_stale_task_dirs(self) -> None:
+        old = os.path.join(self._tmp.name, "tako", "2609-1")
+        new = os.path.join(self._tmp.name, "tako", "2609-2")
+        os.makedirs(old)
+        os.makedirs(new)
+        os.utime(old, (0, 0))
+        self.assertEqual(qw.prune_attachments(30), 1)
+        self.assertFalse(os.path.exists(old))
+        self.assertTrue(os.path.exists(new))
 
 
 class WorkerDisabledTest(unittest.TestCase):

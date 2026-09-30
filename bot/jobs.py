@@ -33,7 +33,7 @@ from bot.delivery import (
     extract_file_markers,
     send_claude_reply,
     send_to_topic,
-    split_image_markers,
+    split_media_markers,
 )
 from bot.llm import call_llm_stream
 from bot.sessions import (
@@ -106,12 +106,12 @@ async def _run_spawn(update: Update, user_text: str) -> None:
     if not cleaned_text.strip():
         cleaned_text = "(пустой ответ)" if not file_markers else "(см. вложения)"
     meta = {"type": "claude_response", "spawn_id": spawn_id}
-    images, file_markers = split_image_markers(file_markers)
+    media, file_markers = split_media_markers(file_markers)
     try:
         await send_claude_reply(
             chat, thread_id, cleaned_text, meta,
             filename_prefix=f"spawn_{spawn_id}",
-            html_prefix=_html_escape(prefix), images=images,
+            html_prefix=_html_escape(prefix), media=media,
         )
     except Exception:
         logger.exception("failed to send spawn reply: key=%s spawn=%s", key, spawn_id)
@@ -402,10 +402,10 @@ async def _run_manager_job(app: Application, job: dict) -> tuple[bool, int | Non
             cleaned_text = "(пустой ответ)" if not file_markers else "(см. вложения)"
         meta = {"type": "claude_response", "engine": engine.name, "job_id": job_id}
         sent_msg_id = None
-        images, file_markers = split_image_markers(file_markers)
+        media, file_markers = split_media_markers(file_markers)
         try:
             sent = await send_claude_reply(
-                chat, thread_id, cleaned_text, meta, images=images,
+                chat, thread_id, cleaned_text, meta, media=media,
             )
             if sent is not None:
                 sent_msg_id = sent.message_id

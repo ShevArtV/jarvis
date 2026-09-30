@@ -19,7 +19,7 @@ import uuid
 from datetime import datetime
 from bot.asks import _mark_ask_answered, answer_ask, get_pending_ask, get_recent_timed_out_ask, mark_ask_late_answered
 from bot.db import log_message
-from bot.delivery import SILENT_MARKER, ProgressJournal, deliver_file_markers, extract_file_markers, send_claude_reply, send_to_topic, split_image_markers
+from bot.delivery import SILENT_MARKER, ProgressJournal, deliver_file_markers, extract_file_markers, send_claude_reply, send_to_topic, split_media_markers
 from bot.handlers.toggles import _ask_done_confirmation_if_needed, _warn_large_context_if_needed
 from bot.rich_message import get_rich_message, rich_message_files, rich_message_to_markdown
 from bot.llm import _build_reply_context_prefix, build_system_prefix, call_llm_stream
@@ -135,9 +135,9 @@ async def _finish_turn_reply(
                 "/engine — сменить движок."
             )
     meta = {"type": "claude_response", "engine": engine_name}
-    images, file_markers = split_image_markers(file_markers)
+    media, file_markers = split_media_markers(file_markers)
     try:
-        await send_claude_reply(chat, thread_id, cleaned_text, meta, images=images)
+        await send_claude_reply(chat, thread_id, cleaned_text, meta, media=media)
     except Exception:
         logger.exception("failed to send llm reply: key=%s", key)
     if file_markers:
