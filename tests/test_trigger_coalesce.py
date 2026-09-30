@@ -117,5 +117,26 @@ class SilentReplyTest(unittest.TestCase):
         self.assertEqual(send.await_args.args[2], "[[SILENT]]")
 
 
+class QuietJournalTest(unittest.TestCase):
+    def test_quiet_journal_never_touches_topic(self) -> None:
+        from bot import delivery
+
+        chat = AsyncMock()
+        send = AsyncMock()
+
+        async def run() -> delivery.ProgressJournal:
+            journal = delivery.ProgressJournal(chat, 1, quiet=True)
+            await journal.start()
+            await journal.append("🔧 шаг 1\n🔧 шаг 2")
+            await journal.finish(None, discard=True)
+            return journal
+
+        with patch.object(delivery, "send_to_topic", send):
+            journal = asyncio.run(run())
+        send.assert_not_awaited()
+        chat.send_message.assert_not_awaited()
+        self.assertEqual(journal.total_steps, 2)
+
+
 if __name__ == "__main__":
     unittest.main()

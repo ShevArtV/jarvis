@@ -224,8 +224,11 @@ class ProgressJournal:
     """
 
     def __init__(self, chat, thread_id: int, prefix: str = "",
-                 header: str = "⏳ Думаю..."):
+                 header: str = "⏳ Думаю...", quiet: bool = False):
         self.chat = chat
+        # quiet — шаги считаются, но в топик ничего не пишется: ход, который
+        # может закончиться молча ([[SILENT]]), не должен звенеть плашкой.
+        self.quiet = quiet
         self.thread_id = thread_id
         self.prefix = prefix
         self.header = header
@@ -242,6 +245,8 @@ class ProgressJournal:
         self._hb_task: asyncio.Task | None = None
 
     async def start(self) -> None:
+        if self.quiet:
+            return
         try:
             self.msg = await send_to_topic(
                 self.chat, self.thread_id, f"{self.prefix}{self.header}",
@@ -328,7 +333,7 @@ class ProgressJournal:
         await self._flush()
 
     async def _flush(self) -> None:
-        if self._broken:
+        if self._broken or self.quiet:
             return
         if self._is_stale():
             logger.info(

@@ -31,6 +31,11 @@ ENV = {
     "JARVIS_QW_NOTIFICATIONS": "1",
 }
 
+# Боевой .env (его грузит импорт бота) задаёт список установок — тесты одной
+# установки ушли бы в режим нескольких и крутились бы бесконечно.
+# Тесты нескольких установок ставят список сами через patch.dict.
+os.environ.pop("QUEUEWARDEN_INSTALLATIONS", None)
+
 
 def _item(n: int, notification_id: int | None = None) -> dict:
     return {

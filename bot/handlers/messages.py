@@ -269,7 +269,7 @@ async def _handle_persistent_message(
             logger.exception("failed to send persistent-append ack key=%s", key)
         return
 
-    journal = ProgressJournal(chat, thread_id)
+    journal = ProgressJournal(chat, thread_id, quiet=allow_silent)
     await journal.start()
     worker.on_intermediate = journal.append
     timeout = {"codex": CODEX_TIMEOUT, "opencode": OPENCODE_TIMEOUT}.get(
@@ -479,7 +479,7 @@ async def _process_prompt_locked(
         prompt = "\n\n".join(prompt_parts)
 
         # Журнал хода: шаги агента копятся в одном сообщении и остаются в топике.
-        journal = ProgressJournal(chat, thread_id)
+        journal = ProgressJournal(chat, thread_id, quiet=allow_silent)
         await journal.start()
 
         sid_after = session_id
