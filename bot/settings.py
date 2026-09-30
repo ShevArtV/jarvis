@@ -102,6 +102,8 @@ def configure_logging() -> None:
         format="[bot] %(asctime)s %(levelname)s %(message)s",
         level=logging.INFO,
     )
+    # httpx пишет на INFO каждый запрос с полным URL, а в URL Bot API — токен.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 configure_logging()

@@ -2201,6 +2201,8 @@ def main(argv: list[str] | None = None) -> int:
         format="[jarvis-mcp] %(asctime)s %(levelname)s %(message)s",
         stream=sys.stderr,
     )
+    # httpx пишет на INFO каждый запрос с полным URL, а в URL Bot API — токен.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
 
     db_path = args.db.expanduser().resolve()
     if not db_path.exists():
