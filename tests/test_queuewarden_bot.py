@@ -411,7 +411,7 @@ class CreatedCardTest(unittest.TestCase):
 
     def test_roles_for_2609_5_are_agent_owner(self) -> None:
         self.assertEqual(qw.operator_roles(TASK_2609_5, PEOPLE),
-                         ["владелец агента-ревизора", "владелец агента-исполнителя"])
+                         ["ревизор (🤖)", "исполнитель (🤖)"])
 
     def test_roles_human_in_slot_and_creators_agent_skipped(self) -> None:
         task = {"created_by": CREATOR, "reviewer_id": ME, "assignee_id": "a-x",
@@ -436,7 +436,7 @@ class CreatedCardTest(unittest.TestCase):
         extra = asyncio.run(run())
 
         self.assertEqual(extra["roles"],
-                         ["владелец агента-ревизора", "владелец агента-исполнителя"])
+                         ["ревизор (🤖)", "исполнитель (🤖)"])
         path = os.path.join(self._tmp.name, "default", "2609-5", "aaaaaaaa-скрин 1.png")
         self.assertEqual(extra["files"], [path])
         with open(path, "rb") as fh:
@@ -448,9 +448,9 @@ class CreatedCardTest(unittest.TestCase):
     def test_trigger_text_carries_role_and_file_markers(self) -> None:
         text = qw.build_trigger_text(
             _item(1), INST,
-            {"roles": ["владелец агента-ревизора"], "files": ["/m/a.png"],
+            {"roles": ["ревизор (🤖)", "исполнитель (🤖)"], "files": ["/m/a.png"],
              "skipped": ["big.mp4"]})
-        self.assertIn("Роль оператора: владелец агента-ревизора", text)
+        self.assertIn("Роль оператора: ревизор (🤖) / исполнитель (🤖)", text)
         self.assertIn("\n[[FILE: /m/a.png]]", text)
         self.assertIn("big.mp4", text)
 

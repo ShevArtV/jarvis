@@ -54,6 +54,13 @@ class SplitMediaTest(unittest.TestCase):
         ])
 
 
+class LineHashtagTest(unittest.TestCase):
+    def test_hashtag_at_line_start_escaped_headings_and_code_kept(self) -> None:
+        md = "## Итог\n#qwtako2609_5\n  #tag\n```\n#include\n```\nтекст #tag"
+        self.assertEqual(delivery._escape_line_hashtags(md),
+                         "## Итог\n\\#qwtako2609_5\n  \\#tag\n```\n#include\n```\nтекст #tag")
+
+
 class SendClaudeReplyTest(unittest.TestCase):
     def setUp(self) -> None:
         for name in ("note_topic_message", "save_message_context", "log_message"):

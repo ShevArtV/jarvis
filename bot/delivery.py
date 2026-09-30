@@ -563,6 +563,23 @@ def split_media_markers(
     return media, rest
 
 
+_LINE_HASHTAG_RE = re.compile(r"^([ \t]*)#(?=[^\s#])")
+
+
+def _escape_line_hashtags(markdown: str) -> str:
+    """`#тег` в начале строки rich-markdown Telegram делает заголовком даже
+    без пробела; `\\#тег` остаётся хэштегом (проверено 30.09.2026). Код в
+    ```-блоках не трогаем."""
+    out, fenced = [], False
+    for line in markdown.split("\n"):
+        if line.lstrip().startswith("```"):
+            fenced = not fenced
+        elif not fenced:
+            line = _LINE_HASHTAG_RE.sub(r"\1\\#", line)
+        out.append(line)
+    return "\n".join(out)
+
+
 def _rich_media_block(media: list[tuple[str, str | None]]) -> str:
     """Markdown вложений: фото и видео — слайдером (одно — просто блоком),
     за ними документы. Ссылки tg://<тип>?id=mN ведут на rich_message.media."""
@@ -626,7 +643,7 @@ async def send_claude_reply(
 
     plain_prefix = re.sub(r"<[^>]+>", "", html_prefix) if html_prefix else ""
     if len(plain_prefix) + len(text) <= RICH_LIMIT:
-        markdown = plain_prefix + text
+        markdown = _escape_line_hashtags(plain_prefix + text)
         if media:
             markdown = _rich_media_block(media) + "\n\n" + markdown
         sent = None
