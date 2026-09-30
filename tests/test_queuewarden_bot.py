@@ -132,7 +132,8 @@ class ParseTest(unittest.TestCase):
         self.assertLess(prompt.index("--- 1 ---\nсобытие А"),
                         prompt.index("--- 2 ---\nсобытие Б"))
         for part in ("queuewarden_task_get", "не подтверждай gate", "ask_user",
-                     "teamlead/AGENTS.md", "`[<установка>] <номер задачи>"):
+                     "teamlead/AGENTS.md", "`**[<установка>] <номер задачи>",
+                     "6) новая задача (task.created)", "не создатель", "<тег>"):
             self.assertIn(part, prompt)
         self.assertTrue(prompt.endswith("ответь ровно [[SILENT]]"))
 
@@ -301,6 +302,18 @@ class InstallationsTest(unittest.TestCase):
         inst = qw.Installation("tako", "https://tako.test", "t", "queuewarden_tako")
         text = qw.build_trigger_text(_item(1), inst)
         self.assertIn("Установка: tako (https://tako.test), MCP-сервер: queuewarden_tako", text)
+
+    def test_hashtag_from_task_key_in_title(self) -> None:
+        tako = qw.Installation("tako", "https://tako.test", "t", "queuewarden_tako")
+        item = {**_item(1), "title": "2609-2: Починить корзину"}
+        self.assertEqual(qw.task_hashtag(item, tako), "#qwtako2609_2")
+        self.assertIn("Тег: #qwtako2609_2", qw.build_trigger_text(item, tako))
+        self.assertEqual(qw.task_hashtag(item, INST), "#qw2609_2")
+
+    def test_no_hashtag_without_task_key(self) -> None:
+        tako = qw.Installation("tako", "https://tako.test", "t", "queuewarden_tako")
+        self.assertEqual(qw.task_hashtag(_item(1), tako), "")
+        self.assertNotIn("Тег:", qw.build_trigger_text(_item(1), tako))
 
 
 class MultiInstallationTest(_DbCase):

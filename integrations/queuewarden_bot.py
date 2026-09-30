@@ -46,6 +46,8 @@ SEEN_KIND = "bot_notification"
 LEGACY_SLUG = "default"
 LEGACY_MCP = "queuewarden"
 _SLUG_RE = re.compile(r"[a-z0-9_-]+")
+# Номер задачи QW (task_key вида 2609-2) — в payload его нет, он в заголовке.
+_TASK_KEY_RE = re.compile(r"\b(\d{4}-\d+)\b")
 # Тимлид разбирает уведомление и может спросить оператора — роль не
 # 'executor', иначе гард ask_user закроет ему чат.
 TRIGGER_ROLE = "manager"
@@ -127,6 +129,16 @@ def parse_notifications(payload: Any) -> list[dict]:
     return result
 
 
+def task_hashtag(item: dict, inst: Installation) -> str:
+    """Хэштег задачи для поиска в Telegram: #qwtako2609_2. Дефис хэштег рвёт,
+    поэтому номер — через подчёркивание. Номера в заголовке нет — пусто."""
+    match = _TASK_KEY_RE.search(item.get("title") or "")
+    if not match:
+        return ""
+    slug = "" if inst.slug == LEGACY_SLUG else inst.slug.replace("-", "")
+    return f"#qw{slug}{match.group(1).replace('-', '_')}"
+
+
 def build_trigger_text(item: dict, inst: Installation) -> str:
     """Одно уведомление — текст строки триггера. Инструкцию агенту к серии
     таких строк добавляет build_batch_prompt при запуске хода."""
@@ -143,6 +155,9 @@ def build_trigger_text(item: dict, inst: Installation) -> str:
     lines.append(
         f"taskId: {item.get('taskId') or '—'}, projectId: {item.get('projectId') or '—'}"
     )
+    tag = task_hashtag(item, inst)
+    if tag:
+        lines.append(f"Тег: {tag}")
     return "\n".join(lines)
 
 
@@ -167,10 +182,15 @@ def build_batch_prompt(events: list[str]) -> str:
         "3) план — суть, риски, твоё мнение;\n"
         "4) перевод в «Готово» — что сделано, куда выложено, как проверено, твоё мнение;\n"
         "5) human gate — спроси оператора через ask_user (вместе с докладом 3 или 4, "
-        "если gate на плане или на финальной проверке) и исполни его решение.\n"
+        "если gate на плане или на финальной проверке) и исполни его решение;\n"
+        "6) новая задача (task.created) — уведомление приходит, только если оператор в "
+        "ней ревизор, исполнитель или оператор, а не создатель: его роль, суть задачи, "
+        "твоё мнение о постановке.\n"
         "По каждой задаче — свой блок; первая строка блока: "
-        "`[<установка>] <номер задачи> · <проект> · <название>` и ссылка на задачу; "
-        "тот же заголовок — в начале вопроса ask_user. "
+        "`**[<установка>] <номер задачи> · <проект> · <название>** <тег>` (тег из "
+        "строки «Тег:» уведомления; строку им не начинай — `#` в начале строки "
+        "делает заголовок) и ссылка на задачу; тот же заголовок с тегом — в начале "
+        "вопроса ask_user. "
         f"Если писать не о чем — ответь ровно {SILENT_MARKER}"
     )
     return "\n\n".join(parts)

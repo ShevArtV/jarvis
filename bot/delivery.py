@@ -10,6 +10,11 @@
   предыдущий, а в конце индикатор удалялся — ход работы исчезал бесследно.
 * **Длинные ответы.** Больше MSG_LIMIT — уходит .md-файлом с коротким превью,
   потому что 4096 символов Telegram не переживает.
+* **Rich Messages (Bot API 10.1).** Финальный ответ агента уходит
+  ``sendRichMessage`` с markdown как есть: заголовки, таблицы, списки, цитаты
+  Telegram рисует сам, лимит 32 768 символов. Картинки из ``[[FILE:]]``
+  встраиваются в сообщение (несколько — коллажем). Telegram не принял —
+  прежний путь HTML/документ.
 """
 
 from __future__ import annotations
@@ -22,6 +27,7 @@ import tempfile
 import time
 from datetime import datetime
 
+from telegram import InputFile, Message
 from telegram.constants import ParseMode
 from telegram.error import BadRequest, NetworkError, RetryAfter, TimedOut
 from telegram.ext import Application
@@ -47,6 +53,13 @@ logger = logging.getLogger(__name__)
 # Ответ агента на внешний триггер, означающий «оператору писать не о чем».
 # Работает только там, где вызывающий явно разрешил молчание (allow_silent).
 SILENT_MARKER = "[[SILENT]]"
+
+# Rich Messages: лимит Telegram 32 768 символов; картинка встраивается в
+# сообщение как фото — у фото свой лимит 10 МБ, остальное идёт документом.
+RICH_LIMIT = 32000
+RICH_MAX_IMAGES = 20
+RICH_IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp")
+RICH_IMAGE_LIMIT_MB = 10
 
 JOURNAL_MAX_CHARS = 3400  # запас до TG_HARD_LIMIT на HTML-разметку
 JOURNAL_LINE_CHARS = 400   # длинную строку шага режем — журнал, не транскрипт
@@ -515,15 +528,123 @@ async def deliver_file_markers(
                 pass
 
 
+def split_image_markers(
+    markers: list[tuple[str, str | None]],
+) -> tuple[list[tuple[str, str | None]], list[tuple[str, str | None]]]:
+    """Маркеры → (картинки для встраивания в rich-ответ, остальные файлы).
+
+    Картинка — существующий файл по абсолютному пути, jpg/png/webp до 10 МБ.
+    Всё прочее, включая битые пути, идёт в deliver_file_markers: там ошибка
+    доходит до топика текстом."""
+    images: list[tuple[str, str | None]] = []
+    rest: list[tuple[str, str | None]] = []
+    for path, caption in markers:
+        ok = (
+            len(images) < RICH_MAX_IMAGES
+            and os.path.isabs(path)
+            and path.lower().endswith(RICH_IMAGE_EXTS)
+            and os.path.isfile(path)
+            and os.path.getsize(path) <= RICH_IMAGE_LIMIT_MB * 1024 * 1024
+        )
+        (images if ok else rest).append((path, caption))
+    return images, rest
+
+
+def _rich_image_block(images: list[tuple[str, str | None]]) -> str:
+    """Markdown-блок картинок: ссылки tg://photo?id=imgN, несколько — коллажем."""
+    lines = []
+    for i, (_path, caption) in enumerate(images):
+        title = ""
+        if caption:
+            title = ' "' + caption[:1024].replace('"', "'") + '"'
+        lines.append(f"![](tg://photo?id=img{i}{title})")
+    if len(lines) > 1:
+        lines = ["<tg-collage>", *lines, "</tg-collage>"]
+    return "\n".join(lines)
+
+
+async def _send_rich_message(
+    chat, thread_id: int, markdown: str, images: list[tuple[str, str | None]],
+) -> Message:
+    """sendRichMessage через do_api_request — PTB 22.x метода не знает.
+
+    Файл, вложенный в rich_message.media, PTB в multipart не выносит: он
+    разбирает только параметры верхнего уровня. Поэтому файлы идут отдельным
+    параметром, а media ссылается на их части через attach://."""
+    handles = [open(path, "rb") for path, _cap in images]
+    try:
+        files = [
+            InputFile(fh, filename=os.path.basename(path), attach=True)
+            for fh, (path, _cap) in zip(handles, images)
+        ]
+        rich: dict = {"markdown": markdown}
+        if files:
+            rich["media"] = [
+                {"id": f"img{i}", "media": {"type": "photo", "media": f.attach_uri}}
+                for i, f in enumerate(files)
+            ]
+        api_kwargs: dict = {"chat_id": chat.id, "rich_message": rich}
+        if thread_id:
+            api_kwargs["message_thread_id"] = thread_id
+        if files:
+            api_kwargs["rich_media_files"] = files
+        return await chat.get_bot().do_api_request(
+            "sendRichMessage", api_kwargs=api_kwargs, return_type=Message,
+        )
+    finally:
+        for fh in handles:
+            fh.close()
+
+
 async def send_claude_reply(
     chat, thread_id: int, text: str, meta: dict, filename_prefix: str = "reply",
-    html_prefix: str = "",
+    html_prefix: str = "", images: list[tuple[str, str | None]] | None = None,
 ):
-    """Короткий текст — send_message с HTML-форматированием; длинный — .md вложение.
-    `html_prefix` (например '[#xxxx] ') добавляется как уже готовый HTML-фрагмент
-    перед сконвертированным телом."""
-    log_kind = "spawn_reply" if meta.get("spawn_id") else "bot_reply"
+    """Ответ агента: Rich Message; не принят — HTML или .md вложение.
 
+    `html_prefix` (например '[#xxxx] ') добавляется как уже готовый HTML-фрагмент
+    перед сконвертированным телом (в rich-ответ — без тегов). `images` — маркеры
+    из split_image_markers: встраиваются в rich-ответ, иначе уходят файлами."""
+    log_kind = "spawn_reply" if meta.get("spawn_id") else "bot_reply"
+    images = images or []
+
+    plain_prefix = re.sub(r"<[^>]+>", "", html_prefix) if html_prefix else ""
+    if len(plain_prefix) + len(text) <= RICH_LIMIT:
+        markdown = plain_prefix + text
+        if images:
+            markdown += "\n\n" + _rich_image_block(images)
+        sent = None
+        try:
+            sent = await _retry_transient(
+                lambda: _send_rich_message(chat, thread_id, markdown, images),
+                "send_claude_reply(rich)",
+            )
+        except Exception as exc:
+            logger.warning("rich message rejected, falling back to html: %s", exc)
+        if sent is not None:
+            note_topic_message(chat.id, thread_id, sent.message_id)
+            try:
+                save_message_context(chat.id, sent.message_id, meta)
+                log_message(
+                    chat.id, thread_id, "out", log_kind, text, sent.message_id,
+                )
+            except Exception:
+                logger.exception("save_message_context failed")
+            return sent
+
+    sent = await _send_claude_reply_legacy(
+        chat, thread_id, text, meta, filename_prefix, html_prefix, log_kind,
+    )
+    if images:
+        await deliver_file_markers(chat, thread_id, images)
+    return sent
+
+
+async def _send_claude_reply_legacy(
+    chat, thread_id: int, text: str, meta: dict, filename_prefix: str,
+    html_prefix: str, log_kind: str,
+):
+    """Прежний путь до Rich Messages: HTML кусками по 4096 или .md вложение."""
     if len(text) <= MSG_LIMIT:
         html_body = html_prefix + md_to_html(text)
         chunks = split_html_for_telegram(html_body, TG_HARD_LIMIT)

@@ -52,6 +52,12 @@ def build_system_prefix(
             "нужен контекст прошлых разговоров, подними его сам через MCP-инструмент "
             f"manager_inbox(chat_id={key[0]}, thread_id={key[1]})."
         )
+    lines.append(
+        "Ответ уходит в Telegram как Rich Message (Markdown): заголовки ##, таблицы, "
+        "чек-листы - [x], цитаты >, <details><summary>…</summary>…</details>. Не "
+        "начинай строку хэштегом — # в начале строки станет заголовком. Картинки, "
+        "приложенные файл-маркерами, встанут в конец ответа коллажем."
+    )
     if mcp_playwright:
         lines.append(
             "Если нужно работать с браузером, используй Playwright MCP browser_* tools, "
