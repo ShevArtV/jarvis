@@ -71,6 +71,19 @@ class PersistentOpenCodeTest(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_exclusive_turn_is_not_joined_and_does_not_join(self) -> None:
+        async def run() -> None:
+            worker = _worker()
+            _new, fut = await worker.submit("пользователь")
+            self.assertEqual(await worker.submit("qw", exclusive=True), (False, None))
+            worker.busy = False
+            is_new, fut2 = await worker.submit("qw", exclusive=True)
+            self.assertTrue(is_new)
+            self.assertEqual(await worker.submit("пользователь 2"), (False, None))
+            self.assertEqual(worker.sent, ["пользователь", "qw"])
+
+        asyncio.run(run())
+
     def test_idle_before_turn_started_is_ignored(self) -> None:
         async def run() -> None:
             worker = _worker()

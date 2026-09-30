@@ -25,7 +25,7 @@ from bot.rich_message import get_rich_message, rich_message_files, rich_message_
 from bot.llm import _build_reply_context_prefix, build_system_prefix, call_llm_stream
 from bot.sessions import _parse_transfer_marker, _persistent_column_for_engine, build_context_handoff, clear_pending_summary, ensure_active_session, get_mcp_playwright, get_model, get_pending_summary, get_persistent_for_engine, get_session, update_session_id
 from bot.settings import CLAUDE_CWD, MEDIA_DIR
-from bot.topics import _key, _kill_persistent_worker, _lock_for, load_message_context, pending_queue, persistent_spawn_locks, persistent_workers, resolve_topic_role
+from bot.topics import _key, _kill_persistent_worker, _lock_for, load_message_context, pending_queue, persistent_spawn_locks, persistent_workers, resolve_topic_role, wait_turn_end
 from engines import engine_model_scope, get_engine_by_name
 from engines.claude_engine import CLAUDE_TIMEOUT, start_persistent as start_persistent_claude
 from engines.codex_engine import CODEX_TIMEOUT
@@ -256,7 +256,32 @@ async def _handle_persistent_message(
     prompt_parts.append("---\n\nСообщение пользователя:\n" + user_text)
     prompt = "\n\n".join(prompt_parts)
 
-    is_new, fut = await worker.submit(prompt)
+    # Триггер, которому разрешено промолчать (QW), идёт только отдельным ходом:
+    # довеском к чужому ходу он потерял бы [[SILENT]] и попал в ответ
+    # пользователю. И наоборот: в его ход сообщение пользователя не дописываем,
+    # иначе оно пропадёт вместе с молчаливым ответом. Ждём конца хода.
+    notified_wait = False
+    while True:
+        is_new, fut = await worker.submit(prompt, exclusive=allow_silent)
+        if fut is not None:
+            break
+        if not allow_silent and not notified_wait:
+            notified_wait = True
+            try:
+                await send_to_topic(
+                    chat, thread_id,
+                    "⏳ Сейчас разбираю внешнее уведомление — отвечу следующим ходом.",
+                )
+            except Exception:
+                logger.exception("failed to send persistent-wait ack key=%s", key)
+        await wait_turn_end(worker)
+        if worker.dead:
+            worker, _spawned = await _get_or_start_persistent_worker(chat, thread_id, key)
+            if worker is None:
+                await _process_prompt_locked(
+                    chat, thread_id, key, user_text, meta_block, allow_silent=allow_silent,
+                )
+                return
 
     if not is_new:
         if allow_silent:
@@ -301,6 +326,8 @@ async def _handle_persistent_message(
         if live is None or live.dead:
             return False, ""
         _is_new, probe_fut = await live.submit(probe_prompt)
+        if probe_fut is None:  # уже идёт отдельный ход триггера
+            return False, ""
         return await asyncio.wait_for(probe_fut, timeout=timeout)
 
     await _finish_turn_reply(

@@ -78,6 +78,8 @@ class PersistentOpenCodeWorker:
         self.model = model
         self.system = system
         self.busy = False
+        # Можно ли дописывать в идущий ход (см. submit(exclusive=...)).
+        self.steerable = True
         self.dead = False
         self.last_activity = time.monotonic()
         self.turn_lock = asyncio.Lock()
@@ -154,17 +156,24 @@ class PersistentOpenCodeWorker:
 
     # --- Turn ---
 
-    async def submit(self, text: str) -> tuple[bool, "asyncio.Future"]:
+    async def submit(
+        self, text: str, *, exclusive: bool = False,
+    ) -> tuple[bool, "asyncio.Future | None"]:
         """Start a new turn or add the message to the running one.
 
-        Returns ``(is_new_turn, future)`` like the Claude/Codex workers.
+        Returns ``(is_new_turn, future)`` like the Claude/Codex workers,
+        ``(False, None)`` when the message was not sent (see ``exclusive``
+        in PersistentCodexWorker.submit).
         """
         async with self.turn_lock:
             if self.dead or self.proc.returncode is not None:
                 raise RuntimeError("persistent opencode process is not running")
             is_new = not self.busy
+            if not is_new and (exclusive or not self.steerable):
+                return False, None
             if is_new:
                 self.busy = True
+                self.steerable = not exclusive
                 self._reset_turn()
                 self.pending_future = asyncio.get_running_loop().create_future()
             fut = self.pending_future

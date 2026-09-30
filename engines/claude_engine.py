@@ -185,6 +185,8 @@ class PersistentClaudeWorker:
         self.session_id = session_id
         self.cwd = cwd
         self.busy = False
+        # Можно ли дописывать в идущий ход (см. submit(exclusive=...)).
+        self.steerable = True
         self.dead = False
         self.last_activity = time.monotonic()
         self.turn_lock = asyncio.Lock()
@@ -202,17 +204,26 @@ class PersistentClaudeWorker:
         assert self.proc.stdin is not None
         self.proc.stdin.write(line.encode())
 
-    async def submit(self, text: str) -> tuple[bool, "asyncio.Future"]:
+    async def submit(
+        self, text: str, *, exclusive: bool = False,
+    ) -> tuple[bool, "asyncio.Future | None"]:
         """Отправить реплику живому процессу.
 
         Возвращает (is_new_turn, future). ``future`` резолвится в
         ``(ok, final_text)`` — ждать её нужно, только если ``is_new_turn``:
         если ход уже шёл, реплика просто дописана в него, и результат придёт
-        тому вызову, который этот ход начал."""
+        тому вызову, который этот ход начал.
+
+        ``exclusive`` — только отдельным ходом, в который никто не допишет
+        (триггер, которому разрешено промолчать). ``(False, None)`` — реплика
+        не отправлена: идёт ход, а дописывать нельзя; ждать его конца."""
         async with self.turn_lock:
             is_new = not self.busy
+            if not is_new and (exclusive or not self.steerable):
+                return False, None
             if is_new:
                 self.busy = True
+                self.steerable = not exclusive
                 self.pending_future = asyncio.get_running_loop().create_future()
             fut = self.pending_future
             self._write_user_message(text)

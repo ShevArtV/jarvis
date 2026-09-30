@@ -247,6 +247,17 @@ def _lock_for(key: tuple[int, int]) -> asyncio.Lock:
 pending_queue: dict[str, asyncio.Event] = {}
 
 
+async def wait_turn_end(worker) -> None:
+    """Дождаться конца идущего хода живого процесса (или его смерти).
+    Результат хода не трогаем: его ждёт и доставляет тот, кто ход начал."""
+    while worker.busy and not worker.dead:
+        fut = worker.pending_future
+        if fut is not None and not fut.done():
+            await asyncio.wait({fut}, timeout=5.0)
+        else:
+            await asyncio.sleep(0.5)
+
+
 async def _kill_persistent_worker(key: tuple[int, int], reason: str) -> bool:
     """Убить живой процесс топика, если есть. Будит того, кто ждёт
     результата текущего хода (не вешает его до CLAUDE_TIMEOUT). Возвращает

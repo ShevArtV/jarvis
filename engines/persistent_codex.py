@@ -86,6 +86,8 @@ class PersistentCodexWorker:
         self.cwd = cwd
         self.model = model
         self.busy = False
+        # Можно ли дописывать в идущий ход (см. submit(exclusive=...)).
+        self.steerable = True
         self.dead = False
         self.last_activity = time.monotonic()
         self.turn_lock = asyncio.Lock()
@@ -149,20 +151,27 @@ class PersistentCodexWorker:
         self.session_id = thread_id
         return thread_id
 
-    async def submit(self, text: str) -> tuple[bool, "asyncio.Future"]:
+    async def submit(
+        self, text: str, *, exclusive: bool = False,
+    ) -> tuple[bool, "asyncio.Future | None"]:
         """Start a new turn or steer the active one.
 
         Returns ``(is_new_turn, future)``. The future resolves to
         ``(ok, final_text)`` for the turn starter; steering callers only get an
         acknowledgement and must not wait for the same final result.
+        ``exclusive`` — only as a separate turn that nobody may steer into;
+        ``(False, None)``: a turn is running (or it is exclusive), nothing sent.
         """
         async with self.turn_lock:
             if self.dead or self.proc.returncode is not None:
                 raise RuntimeError("persistent codex process is not running")
 
             is_new = not self.busy
+            if not is_new and (exclusive or not self.steerable):
+                return False, None
             if is_new:
                 self.busy = True
+                self.steerable = not exclusive
                 self._final_text = ""
                 self._active_turn_id = None
                 self.pending_future = asyncio.get_running_loop().create_future()

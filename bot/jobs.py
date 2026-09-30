@@ -51,6 +51,7 @@ from bot.topics import (
     _lock_for,
     active_procs,
     resolve_job_notice_target,
+    wait_turn_end,
 )
 
 logger = logging.getLogger(__name__)
@@ -138,15 +139,18 @@ async def _run_job_turn_persistent(
         return False, f"Не удалось поднять живой процесс: {exc}"
     if worker is None:
         return False, "persistent для движка топика не действует — повтори задачу."
-    while worker.busy and not worker.dead:
-        await asyncio.sleep(1.0)
-    if worker.dead:
-        return False, "Живой процесс завершился, не дождавшись хода job'а."
+    while True:
+        await wait_turn_end(worker)
+        if worker.dead:
+            return False, "Живой процесс завершился, не дождавшись хода job'а."
+        # None — между ожиданием и submit начался отдельный ход триггера.
+        _is_new, fut = await worker.submit(prompt)
+        if fut is not None:
+            break
     timeout = {"codex": CODEX_TIMEOUT, "opencode": OPENCODE_TIMEOUT}.get(
         get_session(*key)[2], CLAUDE_TIMEOUT,
     )
     worker.on_intermediate = on_intermediate
-    _is_new, fut = await worker.submit(prompt)
     try:
         return await asyncio.wait_for(fut, timeout=timeout)
     except asyncio.TimeoutError:
