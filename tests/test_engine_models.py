@@ -42,6 +42,24 @@ class ClaudeModelDiscoveryTest(unittest.TestCase):
                 ["opus", "claude-opus-5", "claude-sonnet-4-6"],
             )
 
+    def test_display_names_become_button_labels(self) -> None:
+        from bot.handlers.engine import _model_label
+
+        ev = json.loads(_init_response([]))
+        ev["response"]["response"]["models"] = [
+            {"value": "opus", "displayName": "Opus 5.5"},
+            {"value": "claude-fable-5-1", "displayName": "Fable 5.1"},
+        ]
+        with patch.object(
+            claude_engine.subprocess, "run", return_value=self._run(json.dumps(ev) + "\n"),
+        ):
+            self.assertEqual(
+                claude_engine._models_from_claude_init(), ["opus", "claude-fable-5-1"],
+            )
+        self.assertEqual(_model_label("opus"), "Opus 5.5")
+        self.assertEqual(_model_label("claude-fable-5-1"), "Fable 5.1")
+        self.assertEqual(_model_label("deepseek/deepseek-chat"), "deepseek-chat")
+
     def test_env_override_wins(self) -> None:
         with patch.object(claude_engine.subprocess, "run") as run, \
                 patch.dict("os.environ", {"CLAUDE_MODELS": "opus,haiku"}):

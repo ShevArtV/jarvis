@@ -22,6 +22,7 @@ from bot.sessions import _transfer_marker, get_model, get_session, set_engine, s
 from bot.settings import CLAUDE_CWD, DEFAULT_ENGINE_NAME
 from bot.topics import _key, _kill_persistent_worker, _lock_for, active_procs
 from engines import SUPPORTED_ENGINES, ensure_engine_tools, get_engine_by_name
+from engines.model_cache import label_for
 from engines.process_control import terminate_process_tree
 from telegram.error import BadRequest
 
@@ -51,7 +52,11 @@ def _model_label(model: str) -> str:
 
     Провайдера прячем, только если он и так дублируется в имени модели: в списке
     opencode рядом живут 'deepseek/deepseek-chat' и 'opencode/hy3-free', и у
-    второго провайдер — единственное, что говорит, чья это модель."""
+    второго провайдер — единственное, что говорит, чья это модель.
+    Если CLI сообщил имя модели (claude: 'opus' → 'Opus 5.5') — показываем его."""
+    label = label_for(model)
+    if label:
+        return label
     provider, _, short = model.partition("/")
     if short and short.startswith(provider):
         return short
@@ -153,7 +158,7 @@ async def _do_engine_switch(
     logger.info("engine switched for key=%s: %s -> %s (new sid=%s, model=%s)",
                 key, current_engine, target, new_id, model)
     mcp_line = f"\n{mcp_status}" if mcp_ok else f"\n⚠️ {mcp_status}"
-    model_line = f"\nМодель: {model}" if model else ""
+    model_line = f"\nМодель: {_model_label(model)}" if model else ""
     return (
         f"🔁 Движок переключён: {current_engine} → {target}"
         f"{model_line}\n"
@@ -247,12 +252,12 @@ async def cmd_engine(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if target in SUPPORTED_ENGINES and target == current_engine and len(args) >= 2:
         target_engine = get_engine_by_name(target)
         models = list(target_engine.models)
-        substr = args[1].strip().lower()
-        exact = [m for m in models if m.lower() == substr]
+        substr = " ".join(args[1:]).strip().lower()  # «Fable 5.1» — с пробелом
+        exact = [m for m in models if substr in (m.lower(), _model_label(m).lower())]
         if exact:
             chosen = exact[0]
         else:
-            matches = [m for m in models if substr in m.lower()]
+            matches = [m for m in models if substr in m.lower() or substr in _model_label(m).lower()]
             if len(matches) != 1:
                 await update.message.reply_text(
                     f"Подстрока {substr!r} матчит {len(matches)} модель(и) у `{target}`. "
@@ -291,12 +296,12 @@ async def cmd_engine(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                 f"{target} {_model_label(models[0])}."
             )
             return
-        substr = args[1].strip().lower()
-        exact = [m for m in models if m.lower() == substr]
+        substr = " ".join(args[1:]).strip().lower()  # «Fable 5.1» — с пробелом
+        exact = [m for m in models if substr in (m.lower(), _model_label(m).lower())]
         if len(exact) == 1:
             chosen_model = exact[0]
         else:
-            matches = [m for m in models if substr in m.lower()]
+            matches = [m for m in models if substr in m.lower() or substr in _model_label(m).lower()]
             if len(matches) != 1:
                 await update.message.reply_text(
                     f"Подстрока {substr!r} матчит {len(matches)} модель(и) у `{target}`. "
@@ -343,7 +348,7 @@ async def on_engine_select(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         if len(models) > 1:
             prompt_text = (
                 f"Движок `{target}` уже активен.\n"
-                f"Текущая модель: {current_model or '(дефолт движка)'}.\n"
+                f"Текущая модель: {_model_label(current_model) if current_model else '(дефолт движка)'}.\n"
                 f"Выбери другую модель — контекст сессии сохранится:"
             )
             try:

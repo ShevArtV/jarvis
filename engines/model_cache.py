@@ -26,6 +26,20 @@ MODELS_TTL = float(os.environ.get("JARVIS_MODELS_TTL", "600"))
 _lock = threading.Lock()
 _cache: dict[str, tuple[float, list[str]]] = {}
 _refreshing: set[str] = set()
+# Человекочитаемые имена моделей, если CLI их отдаёт (claude: 'opus' → 'Opus 5.5').
+_labels: dict[str, str] = {}
+
+
+def remember_labels(labels: dict[str, str]) -> None:
+    """Запомнить имена моделей для кнопок и списков в UI."""
+    with _lock:
+        _labels.update(labels)
+
+
+def label_for(model: str) -> str | None:
+    """Имя модели от CLI или None, если CLI его не сообщал."""
+    with _lock:
+        return _labels.get(model)
 
 
 def split_models(raw: str | None) -> list[str]:

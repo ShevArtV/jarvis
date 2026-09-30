@@ -22,7 +22,7 @@ from contextvars import ContextVar
 from pathlib import Path
 from typing import Awaitable, Callable
 
-from engines.model_cache import cached_models, prewarm, split_models
+from engines.model_cache import cached_models, prewarm, remember_labels, split_models
 from engines.process_control import terminate_process_tree
 
 logger = logging.getLogger(__name__)
@@ -404,6 +404,8 @@ def _models_from_claude_init(timeout: float = 30.0) -> list[str]:
 
     Тот же список, что в меню /model: алиасы и полные имена прошлых версий.
     Сообщение модели не уходит — токены не тратятся, ~2с на старт CLI.
+    displayName ('Opus 5.5') запоминается для кнопок: по алиасу 'opus'
+    не видно, какая это версия.
     ``default`` отбрасываем: это не модель, а «дефолт CLI» — он и так
     получается без --model.
     """
@@ -429,11 +431,20 @@ def _models_from_claude_init(timeout: float = 30.0) -> list[str]:
         if ev.get("type") != "control_response":
             continue
         response = (ev.get("response") or {}).get("response") or {}
-        return [
-            item["value"] for item in response.get("models") or []
-            if isinstance(item, dict) and isinstance(item.get("value"), str)
-            and item["value"] and item["value"] != "default"
-        ]
+        models: list[str] = []
+        labels: dict[str, str] = {}
+        for item in response.get("models") or []:
+            if not isinstance(item, dict):
+                continue
+            value = item.get("value")
+            if not isinstance(value, str) or not value or value == "default":
+                continue
+            models.append(value)
+            label = item.get("displayName")
+            if isinstance(label, str) and label:
+                labels[value] = label
+        remember_labels(labels)
+        return models
     logger.warning("claude model discovery: no control_response, rc=%s", proc.returncode)
     return []
 
