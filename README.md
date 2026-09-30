@@ -642,13 +642,27 @@ Per-topic MCP — часть контракта `Engine.call_stream` (см.
 
 ### QueueWarden: канал уведомлений «Бот»
 
-`integrations/queuewarden_bot.py` держит long-poll `GET {QUEUEWARDEN_URL}/api/bot/notifications?wait=25`
-токеном учётки-моста `QUEUEWARDEN_MCP_TOKEN` (база по умолчанию `https://stage.queuewarden.ru`).
+`integrations/queuewarden_bot.py` держит long-poll `GET <url>/api/bot/notifications?wait=25`
+токеном учётки-моста по каждой установке QW — отдельной задачей, со своим backoff:
+
+```
+QUEUEWARDEN_INSTALLATIONS=artsites,tako
+QUEUEWARDEN_ARTSITES_URL=https://artsites.queuewarden.ru
+QUEUEWARDEN_ARTSITES_TOKEN=<токен моста artsites>
+QUEUEWARDEN_TAKO_URL=https://tako.queuewarden.ru
+QUEUEWARDEN_TAKO_TOKEN=<токен моста tako>
+```
+
+Без `QUEUEWARDEN_INSTALLATIONS` — одна установка из `QUEUEWARDEN_URL` (по умолчанию
+`https://stage.queuewarden.ru`) и `QUEUEWARDEN_MCP_TOKEN`, MCP `queuewarden`.
 Каждое уведомление — отдельный `agent_triggers` с `source='queuewarden'` в топик Тимлида
-(переопределение — `JARVIS_QW_NOTICE_CHAT_ID`/`JARVIS_QW_NOTICE_THREAD_ID`): агент разбирает его
-через MCP `queuewarden` и шлёт оператору короткое резюме. Повторы гасятся по `notificationId`
-(отметка в `integration_seen_items` в одной транзакции с триггером), ack — только после коммита.
-Нет токена или `JARVIS_QW_NOTIFICATIONS=0` — воркер выключен; 404 (канал не выложен) — тихо ждёт.
+(переопределение — `JARVIS_QW_NOTICE_CHAT_ID`/`JARVIS_QW_NOTICE_THREAD_ID`); в тексте — установка
+и MCP-сервер `queuewarden_<slug>`, через который агент разбирает уведомление и шлёт оператору
+короткое резюме. Эти серверы Тимлиду выдаёт `JARVIS_TOPIC_MCP_CONFIG` (роль `teamlead`, токен моста
+установки). Повторы гасятся по `notificationId` (отметка в `integration_seen_items` с kind
+`bot_notification:<slug>`, в одной транзакции с триггером), ack — только после коммита.
+Нет установок или `JARVIS_QW_NOTIFICATIONS=0` — воркер выключен; 404 (канал не выложен) или
+отвергнутый токен — установка тихо ждёт, остальные работают.
 
 ### ActiveCollab
 
