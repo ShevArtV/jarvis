@@ -133,7 +133,8 @@ class ParseTest(unittest.TestCase):
                         prompt.index("--- 2 ---\nсобытие Б"))
         for part in ("queuewarden_task_get", "не подтверждай gate", "ask_user",
                      "teamlead/AGENTS.md", "`**[<установка>] <номер задачи>",
-                     "6) новая задача (task.created)", "не создатель", "<тег>"):
+                     "6) новая задача (task.created) — докладывай ВСЕГДА",
+                     "участие уже проверено", "<тег>"):
             self.assertIn(part, prompt)
         self.assertTrue(prompt.endswith("ответь ровно [[SILENT]]"))
 
