@@ -76,6 +76,8 @@ class PersistentOpenCodeWorker:
         self.session_id = session_id
         self.cwd = cwd
         self.model = model
+        # Живой процесс не сообщает модель в событиях — это та, что запросили.
+        self.actual_model = model
         self.system = system
         self.busy = False
         # Можно ли дописывать в идущий ход (см. submit(exclusive=...)).

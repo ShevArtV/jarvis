@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import re
+import subprocess
 import time
 import uuid
 from contextvars import ContextVar
@@ -193,6 +194,8 @@ class PersistentClaudeWorker:
         self.pending_future: asyncio.Future | None = None
         self.on_intermediate: Callable[[str], Awaitable[None]] | None = None
         self.reader_task: asyncio.Task | None = None
+        # Модель, которой CLI ответил последний раз (system.init / assistant).
+        self.actual_model: str | None = None
         self._buffer: list[str] = []
         self._last_push = 0.0
 
@@ -275,7 +278,14 @@ class PersistentClaudeWorker:
                 except json.JSONDecodeError:
                     continue
                 etype = ev.get("type")
+                if etype == "system" and ev.get("subtype") == "init":
+                    m = ev.get("model")
+                    if isinstance(m, str) and m:
+                        self.actual_model = m
                 if etype == "assistant":
+                    m = (ev.get("message") or {}).get("model")
+                    if isinstance(m, str) and m:
+                        self.actual_model = m
                     _accumulate_assistant_event(ev, self._buffer, self.cwd)
                     await self._flush()
                 elif etype == "result":
@@ -389,9 +399,49 @@ def _models_from_claude_config() -> list[str]:
     return models
 
 
+def _models_from_claude_init(timeout: float = 30.0) -> list[str]:
+    """Модели аккаунта из ответа CLI на control-запрос ``initialize``.
+
+    Тот же список, что в меню /model: алиасы и полные имена прошлых версий.
+    Сообщение модели не уходит — токены не тратятся, ~2с на старт CLI.
+    ``default`` отбрасываем: это не модель, а «дефолт CLI» — он и так
+    получается без --model.
+    """
+    request = json.dumps({
+        "type": "control_request",
+        "request_id": "jarvis-models",
+        "request": {"subtype": "initialize"},
+    })
+    try:
+        proc = subprocess.run(
+            [CLAUDE_BIN, "-p", "--input-format", "stream-json",
+             "--output-format", "stream-json", "--verbose"],
+            input=request + "\n", capture_output=True, text=True, timeout=timeout,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        logger.warning("claude model discovery failed", exc_info=True)
+        return []
+    for line in proc.stdout.splitlines():
+        try:
+            ev = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if ev.get("type") != "control_response":
+            continue
+        response = (ev.get("response") or {}).get("response") or {}
+        return [
+            item["value"] for item in response.get("models") or []
+            if isinstance(item, dict) and isinstance(item.get("value"), str)
+            and item["value"] and item["value"] != "default"
+        ]
+    logger.warning("claude model discovery: no control_response, rc=%s", proc.returncode)
+    return []
+
+
 def _discover_claude_models() -> list[str]:
     return (
         split_models(os.environ.get("CLAUDE_MODELS"))
+        or _models_from_claude_init()
         or DEFAULT_CLAUDE_MODELS + _models_from_claude_config()
     )
 

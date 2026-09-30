@@ -23,7 +23,7 @@ from bot.delivery import SILENT_MARKER, ProgressJournal, deliver_file_markers, e
 from bot.handlers.toggles import _ask_done_confirmation_if_needed, _warn_large_context_if_needed
 from bot.rich_message import get_rich_message, rich_message_files, rich_message_to_markdown
 from bot.llm import _build_reply_context_prefix, build_system_prefix, call_llm_stream
-from bot.sessions import _parse_transfer_marker, _persistent_column_for_engine, build_context_handoff, clear_pending_summary, ensure_active_session, get_mcp_playwright, get_model, get_pending_summary, get_persistent_for_engine, get_session, update_session_id
+from bot.sessions import _parse_transfer_marker, _persistent_column_for_engine, build_context_handoff, clear_pending_summary, ensure_active_session, get_mcp_playwright, get_model, get_pending_summary, get_persistent_for_engine, get_session, update_actual_model, update_session_id
 from bot.settings import CLAUDE_CWD, MEDIA_DIR
 from bot.topics import _key, _kill_persistent_worker, _lock_for, load_message_context, pending_queue, persistent_spawn_locks, persistent_workers, resolve_topic_role, wait_turn_end
 from engines import engine_model_scope, get_engine_by_name
@@ -319,6 +319,9 @@ async def _handle_persistent_message(
         clear_pending_summary(*key)
 
     engine_name = get_session(*key)[2]
+    actual_model = getattr(worker, "actual_model", None)
+    if actual_model:
+        update_actual_model(key[0], key[1], engine_name, actual_model)
 
     async def _probe(probe_prompt: str) -> tuple[bool, str]:
         """Переспросить живой процесс — он ещё держит контекст хода."""
