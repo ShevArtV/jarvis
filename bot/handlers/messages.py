@@ -19,7 +19,7 @@ import uuid
 from datetime import datetime
 from bot.asks import _mark_ask_answered, answer_ask, get_pending_ask, get_recent_timed_out_ask, mark_ask_late_answered
 from bot.db import log_message
-from bot.delivery import ProgressJournal, deliver_file_markers, extract_file_markers, send_claude_reply, send_to_topic
+from bot.delivery import SILENT_MARKER, ProgressJournal, deliver_file_markers, extract_file_markers, send_claude_reply, send_to_topic
 from bot.handlers.toggles import _ask_done_confirmation_if_needed, _warn_large_context_if_needed
 from bot.rich_message import get_rich_message, rich_message_files, rich_message_to_markdown
 from bot.llm import _build_reply_context_prefix, build_system_prefix, call_llm_stream
@@ -70,6 +70,7 @@ async def _finish_turn_reply(
     chat, thread_id: int, journal: "ProgressJournal", ok: bool, final_text: str,
     engine_name: str, key: tuple[int, int],
     retry_cb=None,
+    allow_silent: bool = False,
 ) -> None:
     """Общий хвост хода: закрыть журнал, отправить финальный ответ и файлы.
     Общий для разового вызова движка и живого процесса claude (/persistent).
@@ -78,7 +79,16 @@ async def _finish_turn_reply(
     сессии. Нужен, когда ход закончился ничем: «(пустой ответ)» пользователю
     бесполезен, поэтому сначала просим агента доложить статус и только если и
     это пусто — печатаем диагностику, по которой понятно, что делать.
+
+    `allow_silent` — ход по внешнему триггеру, где агенту разрешено промолчать:
+    ответ из одного SILENT_MARKER в топик не уходит, журнал удаляется.
     """
+    if allow_silent and ok and SILENT_MARKER in final_text:
+        final_text = final_text.replace(SILENT_MARKER, "").strip()
+        if not final_text:
+            await journal.finish(discard=True)
+            logger.info("silent turn, nothing sent: key=%s engine=%s", key, engine_name)
+            return
     await journal.finish(final_text)
 
     if not ok and not final_text.strip():
@@ -208,6 +218,7 @@ async def _get_or_start_persistent_worker(chat, thread_id: int, key: tuple[int, 
 
 async def _handle_persistent_message(
     chat, thread_id: int, key: tuple[int, int], user_text: str, meta_block: str,
+    allow_silent: bool = False,
 ) -> None:
     """Путь для топиков с /persistent on: без topic-lock и без «в очереди».
 
@@ -225,7 +236,9 @@ async def _handle_persistent_message(
         )
         return
     if worker is None:
-        await _process_prompt_locked(chat, thread_id, key, user_text, meta_block)
+        await _process_prompt_locked(
+            chat, thread_id, key, user_text, meta_block, allow_silent=allow_silent,
+        )
         return
 
     pending_summary_delivered = False
@@ -245,6 +258,8 @@ async def _handle_persistent_message(
     is_new, fut = await worker.submit(prompt)
 
     if not is_new:
+        if allow_silent:
+            return  # внешний триггер: подтверждение «добавил» некому читать
         try:
             await send_to_topic(
                 chat, thread_id,
@@ -289,7 +304,7 @@ async def _handle_persistent_message(
 
     await _finish_turn_reply(
         chat, thread_id, journal, ok, final_text, engine_name, key,
-        retry_cb=_probe if ok else None,
+        retry_cb=_probe if ok else None, allow_silent=allow_silent,
     )
     logger.info("persistent turn done: key=%s engine=%s ok=%s", key, engine_name, ok)
 
@@ -363,6 +378,7 @@ async def _process_prompt(
 
 async def _process_prompt_locked(
     chat, thread_id: int, key: tuple[int, int], user_text: str, meta_block: str,
+    allow_silent: bool = False,
 ) -> None:
     """Обычный путь: topic-lock, «в очереди», процесс движка на сообщение."""
     # Проверяем, занят ли lock. Если занят — сообщаем «в очереди» с кнопкой «Отменить».
@@ -491,7 +507,7 @@ async def _process_prompt_locked(
 
         await _finish_turn_reply(
             chat, thread_id, journal, ok, final_text, engine.name, key,
-            retry_cb=_probe if ok else None,
+            retry_cb=_probe if ok else None, allow_silent=allow_silent,
         )
 
         logger.info("lock released: key=%s ok=%s engine=%s", key, ok, engine.name)

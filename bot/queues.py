@@ -87,14 +87,23 @@ def finish_job(
 
 def claim_next_agent_trigger(
     exclude_keys: frozenset[tuple[int, int]] | None = None,
+    coalesce: dict[str, float] | None = None,
 ) -> dict | None:
     """Atomically claim one pending non-job trigger.
 
     This queue is for external-integration handoff (see agent_triggers in
     init_db): run a normal LLM turn in the topic, but do not create/finish a
     Jarvis job and do not emit job safety notices.
+
+    ``coalesce`` — ``{source: seconds}``: триггер такого источника ждёт, пока
+    самому старому из них не исполнится ``seconds``, и забирается вместе со
+    всеми ожидающими триггерами того же источника в этом топике — серия
+    событий уходит агенту одним ходом. ``ids``/``texts`` в ответе — все
+    забранные строки по порядку.
     """
-    now = datetime.utcnow().isoformat()
+    coalesce = coalesce or {}
+    now_dt = datetime.utcnow()
+    now = now_dt.isoformat()
     sql = (
         "SELECT id, chat_id, thread_id, text, source FROM agent_triggers "
         "WHERE status = 'pending'"
@@ -103,23 +112,40 @@ def claim_next_agent_trigger(
     for chat_id, thread_id in (exclude_keys or ()):
         sql += " AND NOT (chat_id = ? AND thread_id = ?)"
         params.extend([chat_id, thread_id])
+    for source, seconds in coalesce.items():
+        sql += " AND NOT (source = ? AND created_at > ?)"
+        params.extend([source, (now_dt - timedelta(seconds=seconds)).isoformat()])
     sql += " ORDER BY created_at ASC, id ASC LIMIT 1"
     with _db() as conn:
         row = conn.execute(sql, params).fetchone()
         if not row:
             return None
-        cur = conn.execute(
-            "UPDATE agent_triggers SET status = 'in_progress', claimed_at = ? "
-            "WHERE id = ? AND status = 'pending'",
-            (now, row[0]),
-        )
-        if cur.rowcount != 1:
+        rows = [row]
+        if row[4] in coalesce:
+            rows = conn.execute(
+                "SELECT id, chat_id, thread_id, text, source FROM agent_triggers "
+                "WHERE status = 'pending' AND chat_id = ? AND thread_id = ? "
+                "AND source = ? ORDER BY created_at ASC, id ASC",
+                (row[1], row[2], row[4]),
+            ).fetchall()
+        claimed = []
+        for r in rows:
+            cur = conn.execute(
+                "UPDATE agent_triggers SET status = 'in_progress', claimed_at = ? "
+                "WHERE id = ? AND status = 'pending'",
+                (now, r[0]),
+            )
+            if cur.rowcount == 1:
+                claimed.append(r)
+        if not claimed:
             return None
     return {
-        "id": row[0],
+        "id": claimed[0][0],
+        "ids": [r[0] for r in claimed],
         "chat_id": row[1],
         "thread_id": row[2],
-        "text": row[3],
+        "text": "\n\n".join(r[3] for r in claimed),
+        "texts": [r[3] for r in claimed],
         "source": row[4],
     }
 

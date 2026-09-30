@@ -44,7 +44,11 @@ from bot.topics import (
 
 logger = logging.getLogger(__name__)
 
-JOURNAL_MAX_CHARS = 3400   # запас до TG_HARD_LIMIT на HTML-разметку
+# Ответ агента на внешний триггер, означающий «оператору писать не о чем».
+# Работает только там, где вызывающий явно разрешил молчание (allow_silent).
+SILENT_MARKER = "[[SILENT]]"
+
+JOURNAL_MAX_CHARS = 3400  # запас до TG_HARD_LIMIT на HTML-разметку
 JOURNAL_LINE_CHARS = 400   # длинную строку шага режем — журнал, не транскрипт
 JOURNAL_STALE_CHECK_SEC = 2.0    # как часто журнал сверяется с хвостом топика
 JOURNAL_HEARTBEAT_SEC = 60.0     # молчание агента, после которого пишем «ещё работаю»
@@ -410,19 +414,20 @@ class ProgressJournal:
                 continue
             break
 
-    async def finish(self, final_text: str | None = None) -> None:
+    async def finish(self, final_text: str | None = None, discard: bool = False) -> None:
         """Оставить журнал в топике, вычистив эхо финального ответа.
 
         Журнал без единого шага (или из одного лишь финального текста) —
-        удаляем: он ничего не добавляет к ответу.
+        удаляем: он ничего не добавляет к ответу. ``discard`` — удалить в
+        любом случае: ход закончился молча и следа в топике не оставляет.
         """
         if self._hb_task is not None:
             self._hb_task.cancel()
             self._hb_task = None
         self._hb_suffix = ""
-        if final_text:
+        if final_text and not discard:
             self._strip_final_echo(final_text)
-        if self.total_steps > 0 and self.lines:
+        if self.total_steps > 0 and self.lines and not discard:
             await self._flush()   # перерисовать без вырезанного хвоста
             return
         if self.msg is None:

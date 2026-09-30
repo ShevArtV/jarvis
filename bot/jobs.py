@@ -453,6 +453,13 @@ async def _process_agent_trigger(app: Application, trigger: dict) -> tuple[bool,
     key = (chat_id, thread_id)
     text = trigger["text"]
     source = trigger.get("source") or "external"
+    # QueueWarden: серия уведомлений — один ход советника, которому разрешено
+    # промолчать, если оператору писать не о чем.
+    allow_silent = source == "queuewarden"
+    if allow_silent:
+        from integrations.queuewarden_bot import build_batch_prompt
+
+        text = build_batch_prompt(trigger.get("texts") or [text])
     try:
         chat = await app.bot.get_chat(chat_id)
     except Exception:
@@ -471,9 +478,13 @@ async def _process_agent_trigger(app: Application, trigger: dict) -> tuple[bool,
     try:
         _sid, _cwd, engine_name = get_session(*key)
         if get_persistent_for_engine(*key, engine_name):
-            await _handle_persistent_message(chat, thread_id, key, text, "")
+            await _handle_persistent_message(
+                chat, thread_id, key, text, "", allow_silent=allow_silent,
+            )
         else:
-            await _process_prompt_locked(chat, thread_id, key, text, "")
+            await _process_prompt_locked(
+                chat, thread_id, key, text, "", allow_silent=allow_silent,
+            )
     except Exception as exc:
         logger.exception("agent trigger %s crashed key=%s", trigger["id"], key)
         return False, str(exc)[:1000]

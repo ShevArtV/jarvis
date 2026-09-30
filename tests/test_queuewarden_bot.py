@@ -114,12 +114,22 @@ class ParseTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             qw.parse_notifications([])
 
-    def test_trigger_text_carries_notification_and_instruction(self) -> None:
+    def test_trigger_text_carries_notification(self) -> None:
         text = qw.build_trigger_text(_item(1), INST)
         for part in ("task.moved", "QW-1: Починить корзину", "«В работе»",
                      "https://stage.queuewarden.ru/task/501", "taskId: 501",
-                     "projectId: 7", "queuewarden_task_get", "КОРОТКОЕ резюме"):
+                     "projectId: 7"):
             self.assertIn(part, text)
+
+    def test_batch_prompt_numbers_events_and_allows_silence(self) -> None:
+        prompt = qw.build_batch_prompt(["событие А", "событие Б"])
+        self.assertIn("2 шт.", prompt)
+        self.assertLess(prompt.index("--- 1 ---\nсобытие А"),
+                        prompt.index("--- 2 ---\nсобытие Б"))
+        for part in ("queuewarden_task_get", "не подтверждай gate", "ask_user",
+                     "teamlead/AGENTS.md", "`[<установка>] <номер задачи>"):
+            self.assertIn(part, prompt)
+        self.assertTrue(prompt.endswith("ответь ровно [[SILENT]]"))
 
     def test_notice_topic_env_override(self) -> None:
         with patch.dict(os.environ, ENV):
@@ -286,7 +296,6 @@ class InstallationsTest(unittest.TestCase):
         inst = qw.Installation("tako", "https://tako.test", "t", "queuewarden_tako")
         text = qw.build_trigger_text(_item(1), inst)
         self.assertIn("Установка: tako (https://tako.test), MCP-сервер: queuewarden_tako", text)
-        self.assertIn("MCP-сервер queuewarden_tako этой установки", text)
 
 
 class MultiInstallationTest(_DbCase):

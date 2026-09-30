@@ -480,20 +480,25 @@ async def _run_agent_trigger_slot(
     sem: asyncio.Semaphore,
 ) -> None:
     trigger_id = trigger["id"]
+    # Склеенные триггеры (coalesce) закрываются вместе с первым.
+    trigger_ids = trigger.get("ids") or [trigger_id]
+
+    def _finish(status: str, error: str | None) -> None:
+        for tid in trigger_ids:
+            finish_agent_trigger(tid, status, error, None)
+
     try:
         ok, err_text = await _process_agent_trigger(app, trigger)
-        finish_agent_trigger(
-            trigger_id,
+        _finish(
             "done" if ok else "failed",
             None if ok else (err_text or "engine returned no usable reply"),
-            None,
         )
     except asyncio.CancelledError:
-        finish_agent_trigger(trigger_id, "failed", "worker cancelled", None)
+        _finish("failed", "worker cancelled")
         raise
     except Exception as exc:
         logger.exception("agent trigger %s crashed", trigger_id)
-        finish_agent_trigger(trigger_id, "failed", str(exc)[:1000], None)
+        _finish("failed", str(exc)[:1000])
     finally:
         _inflight_trigger_keys.discard(key)
         sem.release()
@@ -507,16 +512,20 @@ async def agent_triggers_worker(app: Application) -> None:
     normal topic lock inside _process_prompt_locked/_handle_persistent_message.
     """
     concurrency = _env_int("JARVIS_AGENT_TRIGGERS_CONCURRENCY", 5, 1)
+    # Уведомления QueueWarden идут сериями: ждём затишья и отдаём серию
+    # Тимлиду одним ходом, а не разбираем устаревшие события по одному.
+    coalesce = {"queuewarden": _env_int("JARVIS_QW_COALESCE_SECONDS", 60, 0)}
     sem = asyncio.Semaphore(concurrency)
     tasks: set[asyncio.Task] = set()
-    logger.info("agent_triggers_worker started (concurrency=%d)", concurrency)
+    logger.info("agent_triggers_worker started (concurrency=%d, coalesce=%s)",
+                concurrency, coalesce)
     while True:
         acquired = False
         try:
             await sem.acquire()
             acquired = True
             exclude = frozenset(_inflight_trigger_keys | _inflight_job_keys)
-            trigger = claim_next_agent_trigger(exclude_keys=exclude)
+            trigger = claim_next_agent_trigger(exclude_keys=exclude, coalesce=coalesce)
             if trigger is None:
                 sem.release()
                 acquired = False

@@ -3,8 +3,10 @@
 Бот заходит токеном учётки-моста и сам забирает свои уведомления:
 ``GET /api/bot/notifications?wait=25`` держит запрос, пока нечего отдать.
 Каждое уведомление становится отдельным ``agent_triggers``
-(source='queuewarden') в топике Тимлида; агент разбирает его через MCP
-установки и присылает оператору короткое резюме.
+(source='queuewarden') в топике Тимлида. Воркер триггеров склеивает серию
+уведомлений в один ход (``JARVIS_QW_COALESCE_SECONDS``); Тимлид-советник
+сверяет её с задачей через MCP установки и пишет оператору только по делу,
+иначе отвечает ``[[SILENT]]`` и в топик ничего не уходит.
 
 Установок QW может быть несколько (``QUEUEWARDEN_INSTALLATIONS=artsites,tako``,
 у каждой ``QUEUEWARDEN_<SLUG>_URL`` и ``QUEUEWARDEN_<SLUG>_TOKEN``) — каждая
@@ -31,6 +33,7 @@ from typing import Any
 
 import httpx
 
+from bot.delivery import SILENT_MARKER
 from bot.queues import enqueue_agent_trigger
 from bot.topics import TopicKey, _resolve_topic_from_env, resolve_teamlead_topic
 
@@ -125,9 +128,9 @@ def parse_notifications(payload: Any) -> list[dict]:
 
 
 def build_trigger_text(item: dict, inst: Installation) -> str:
-    """Инструкция агенту по одному уведомлению."""
+    """Одно уведомление — текст строки триггера. Инструкцию агенту к серии
+    таких строк добавляет build_batch_prompt при запуске хода."""
     lines = [
-        "Пришло уведомление QueueWarden (канал «Бот»).",
         f"Установка: {inst.slug} ({inst.url}), MCP-сервер: {inst.mcp}",
         f"Тип: {item.get('type') or '—'}",
         f"Заголовок: {item.get('title') or '—'}",
@@ -140,14 +143,37 @@ def build_trigger_text(item: dict, inst: Installation) -> str:
     lines.append(
         f"taskId: {item.get('taskId') or '—'}, projectId: {item.get('projectId') or '—'}"
     )
-    lines.append("")
-    lines.append(
-        f"Разбери уведомление через MCP-сервер {inst.mcp} этой установки "
-        "(queuewarden_task_get и другие инструменты; сервер другой установки "
-        "задачу не найдёт), при необходимости действуй по правилам проекта. "
-        "Затем пришли оператору КОРОТКОЕ резюме: что произошло и нужно ли его участие."
-    )
     return "\n".join(lines)
+
+
+def build_batch_prompt(events: list[str]) -> str:
+    """Ход Тимлида-советника по серии уведомлений (см. coalesce в
+    claim_next_agent_trigger). Правила докладов — teamlead/AGENTS.md."""
+    parts = [
+        f"Пришли уведомления QueueWarden (канал «Бот»), {len(events)} шт., "
+        "от старых к новым:",
+    ]
+    parts += [f"--- {n} ---\n{text}" for n, text in enumerate(events, 1)]
+    parts.append(
+        "Ты — технический советник оператора по задачам QueueWarden; правила — "
+        "раздел «QueueWarden» в teamlead/AGENTS.md. В QueueWarden сам ничего не "
+        "меняй: не подтверждай gate, не двигай, не возвращай и не перезапускай задачи.\n"
+        "Сверь уведомления с актуальным состоянием задачи через MCP-сервер её "
+        "установки (queuewarden_task_get, комментарии; сервер другой установки "
+        "задачу не найдёт). Уже устаревшие события не пересказывай.\n"
+        "Пиши оператору только в этих случаях:\n"
+        "1) задача не пошла в работу из бэклога — почему ревизор отклонил постановку;\n"
+        "2) проблема или вопрос, которые не разрешились сами;\n"
+        "3) план — суть, риски, твоё мнение;\n"
+        "4) перевод в «Готово» — что сделано, куда выложено, как проверено, твоё мнение;\n"
+        "5) human gate — спроси оператора через ask_user (вместе с докладом 3 или 4, "
+        "если gate на плане или на финальной проверке) и исполни его решение.\n"
+        "По каждой задаче — свой блок; первая строка блока: "
+        "`[<установка>] <номер задачи> · <проект> · <название>` и ссылка на задачу; "
+        "тот же заголовок — в начале вопроса ask_user. "
+        f"Если писать не о чем — ответь ровно {SILENT_MARKER}"
+    )
+    return "\n\n".join(parts)
 
 
 def enqueue_notification(item: dict, topic: TopicKey, inst: Installation) -> int | None:
