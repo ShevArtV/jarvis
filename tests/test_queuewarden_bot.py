@@ -22,6 +22,7 @@ from integrations import queuewarden_bot as qw
 
 TOPIC = (-1001, 77)
 BASE = "https://qw.test"
+INST = qw.Installation("default", BASE, "tok", "queuewarden")
 ENV = {
     "QUEUEWARDEN_MCP_TOKEN": "tok",
     "QUEUEWARDEN_URL": BASE,
@@ -95,7 +96,7 @@ class _DbCase(unittest.TestCase):
     def poll(self, server: _FakeQW) -> float | None:
         async def run() -> float | None:
             async with server.client() as client:
-                return await qw.poll_once(client, BASE, TOPIC, qw._QuietLog())
+                return await qw.poll_once(client, INST, TOPIC, qw._QuietLog())
         return asyncio.run(run())
 
 
@@ -114,7 +115,7 @@ class ParseTest(unittest.TestCase):
             qw.parse_notifications([])
 
     def test_trigger_text_carries_notification_and_instruction(self) -> None:
-        text = qw.build_trigger_text(_item(1))
+        text = qw.build_trigger_text(_item(1), INST)
         for part in ("task.moved", "QW-1: Починить корзину", "«В работе»",
                      "https://stage.queuewarden.ru/task/501", "taskId: 501",
                      "projectId: 7", "queuewarden_task_get", "КОРОТКОЕ резюме"):
@@ -174,7 +175,7 @@ class PollTest(_DbCase):
         with patch.object(qw, "enqueue_agent_trigger", side_effect=flaky):
             async def run() -> float | None:
                 async with httpx.AsyncClient(transport=httpx.MockTransport(spy)) as c:
-                    return await qw.poll_once(c, BASE, TOPIC, qw._QuietLog())
+                    return await qw.poll_once(c, INST, TOPIC, qw._QuietLog())
             asyncio.run(run())
         # Упавшее не подтверждено (QW доставит снова), записанное — да,
         # и к моменту ack триггер уже в базе.
@@ -187,12 +188,12 @@ class PollTest(_DbCase):
         with sqlite3.connect(self.db_path) as conn:
             conn.execute("ALTER TABLE agent_triggers RENAME TO agent_triggers_off")
         with self.assertRaises(sqlite3.OperationalError):
-            qw.enqueue_notification(_item(1), TOPIC)
+            qw.enqueue_notification(_item(1), TOPIC, INST)
         with sqlite3.connect(self.db_path) as conn:
             conn.execute("ALTER TABLE agent_triggers_off RENAME TO agent_triggers")
             seen = conn.execute("SELECT COUNT(*) FROM integration_seen_items").fetchone()[0]
         self.assertEqual(seen, 0)
-        self.assertIsNotNone(qw.enqueue_notification(_item(1), TOPIC))
+        self.assertIsNotNone(qw.enqueue_notification(_item(1), TOPIC, INST))
 
     def test_error_statuses(self) -> None:
         cases = [
@@ -248,6 +249,90 @@ class WorkerLoopTest(_DbCase):
         server = _FakeQW([httpx.Response(500)] * 8)
         delays = self._run_worker(server, sleeps_before_stop=7)
         self.assertEqual(delays, [5.0, 10.0, 20.0, 40.0, 60.0, 60.0, 60.0])
+
+
+MULTI_ENV = {
+    "QUEUEWARDEN_INSTALLATIONS": "artsites, Tako,artsites",
+    "QUEUEWARDEN_ARTSITES_URL": "https://artsites.test/",
+    "QUEUEWARDEN_ARTSITES_TOKEN": "tok-a",
+    "QUEUEWARDEN_TAKO_URL": "https://tako.test",
+    "QUEUEWARDEN_TAKO_TOKEN": "tok-t",
+}
+
+
+class InstallationsTest(unittest.TestCase):
+    def test_legacy_single_installation(self) -> None:
+        with patch.dict(os.environ, ENV):
+            os.environ.pop("QUEUEWARDEN_INSTALLATIONS", None)
+            self.assertEqual(qw.load_installations(), [INST])
+            os.environ.pop("QUEUEWARDEN_MCP_TOKEN")
+            self.assertEqual(qw.load_installations(), [])
+
+    def test_list_of_installations(self) -> None:
+        with patch.dict(os.environ, {**ENV, **MULTI_ENV}):
+            self.assertEqual(qw.load_installations(), [
+                qw.Installation("artsites", "https://artsites.test", "tok-a",
+                                "queuewarden_artsites"),
+                qw.Installation("tako", "https://tako.test", "tok-t", "queuewarden_tako"),
+            ])
+
+    def test_installation_without_token_or_bad_slug_skipped(self) -> None:
+        env = {**ENV, **MULTI_ENV, "QUEUEWARDEN_INSTALLATIONS": "artsites,tako,bad.slug",
+               "QUEUEWARDEN_TAKO_TOKEN": ""}
+        with patch.dict(os.environ, env):
+            self.assertEqual([i.slug for i in qw.load_installations()], ["artsites"])
+
+    def test_trigger_text_names_installation_mcp(self) -> None:
+        inst = qw.Installation("tako", "https://tako.test", "t", "queuewarden_tako")
+        text = qw.build_trigger_text(_item(1), inst)
+        self.assertIn("Установка: tako (https://tako.test), MCP-сервер: queuewarden_tako", text)
+        self.assertIn("MCP-сервер queuewarden_tako этой установки", text)
+
+
+class MultiInstallationTest(_DbCase):
+    def test_same_notification_id_from_two_installations_not_deduped(self) -> None:
+        a = qw.Installation("artsites", "https://a.test", "t", "queuewarden_artsites")
+        t = qw.Installation("tako", "https://t.test", "t", "queuewarden_tako")
+        self.assertIsNotNone(qw.enqueue_notification(_item(1), TOPIC, a))
+        self.assertIsNotNone(qw.enqueue_notification(_item(1), TOPIC, t))
+        self.assertIsNone(qw.enqueue_notification(_item(1), TOPIC, t))
+        rows = self.triggers()
+        self.assertEqual(len(rows), 2)
+        self.assertIn("queuewarden_artsites", rows[0][2])
+        self.assertIn("queuewarden_tako", rows[1][2])
+
+    def test_worker_polls_every_installation_with_its_token(self) -> None:
+        # После уведомления — 404, чтобы каждая установка дошла до sleep и
+        # цикл остановился (пустой ответ даёт паузу 0 и sleep не зовёт).
+        servers = {
+            tok: _FakeQW([httpx.Response(200, json={"items": [_item(1)]}),
+                          httpx.Response(404)])
+            for tok in ("tok-a", "tok-t")
+        }
+
+        slept: list[float] = []
+
+        async def fake_sleep(delay: float) -> None:
+            # Первая дошедшая до паузы установка ждёт вторую — иначе отмена
+            # могла бы прийти раньше, чем вторая сделала свой GET.
+            slept.append(delay)
+            if len(slept) < 2:
+                await asyncio.get_running_loop().create_future()
+            raise asyncio.CancelledError
+
+        with patch.dict(os.environ, {**ENV, **MULTI_ENV}), \
+                patch.object(qw, "_make_client",
+                             side_effect=lambda tok: servers[tok].client(tok)), \
+                patch("asyncio.sleep", side_effect=fake_sleep):
+            with self.assertRaises(asyncio.CancelledError):
+                asyncio.run(qw.queuewarden_notifications_worker(None))
+        for tok, server in servers.items():
+            self.assertEqual(server.acked, [[1]])
+            self.assertEqual(server.auth[0], f"Bearer {tok}")
+        texts = sorted(r[2] for r in self.triggers())
+        self.assertEqual(len(texts), 2)
+        self.assertIn("queuewarden_artsites", texts[0])
+        self.assertIn("queuewarden_tako", texts[1])
 
 
 class WorkerDisabledTest(unittest.TestCase):
