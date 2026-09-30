@@ -664,6 +664,21 @@ QUEUEWARDEN_TAKO_TOKEN=<токен моста tako>
 Нет установок или `JARVIS_QW_NOTIFICATIONS=0` — воркер выключен; 404 (канал не выложен) или
 отвергнутый токен — установка тихо ждёт, остальные работают.
 
+### QueueWarden: доски в `/board`
+
+`/board` показывает кнопку на каждую доску из `BOARD_MINIAPPS` (`подпись|https-адрес|short_name`
+через запятую):
+
+```
+BOARD_MINIAPPS=artsites|https://artsites.queuewarden.ru/miniapp|qwboard,tako|https://tako.queuewarden.ru/miniapp|qwtako
+```
+
+В личке кнопка — web_app, в группах/форумах (там web_app запрещён) — ссылка
+`t.me/<бот>/<short_name>`; `short_name` — direct link, заведённый в BotFather на этот адрес.
+Доска без `short_name` видна только в личке. Без списка — одна доска из `BOARD_MINIAPP_URL`/
+`BOARD_MINIAPP_SHORT_NAME`. Чтобы миниапп пустил, в панели установки (Настройки → Telegram)
+должен стоять токен этого бота.
+
 ### ActiveCollab
 
 Если в локальном `.env` заданы `ACTIVE_COLLAB_URL` и `ACTIVE_COLLAB_TOKEN`,

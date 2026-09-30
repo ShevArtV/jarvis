@@ -16,7 +16,7 @@ import asyncio
 import os
 from bot.formatting import _html_escape, md_to_html
 from bot.sessions import _persistent_column_for_engine, _session_state_line, clear_cwd, close_session, get_actual_model, get_mcp_playwright, get_model, get_persistent_for_engine, get_session, reset_session, set_cwd, touch_session
-from bot.settings import BOARD_MINIAPP_SHORT_NAME, BOARD_MINIAPP_URL, CLAUDE_CWD, DEFAULT_ENGINE_NAME, SESSION_IDLE_MINUTES
+from bot.settings import BOARD_MINIAPPS, CLAUDE_CWD, DEFAULT_ENGINE_NAME, SESSION_IDLE_MINUTES
 from bot.topics import _key, _kill_persistent_worker, active_procs, persistent_workers, spawn_procs
 from engines import get_engine_by_name
 from engines.limits import all_limits, format_limits_block
@@ -293,31 +293,38 @@ async def cmd_where(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
-async def cmd_board(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/board — открыть миниапп доски QueueWarden.
+def board_keyboard(
+    boards: list[tuple[str, str, str]], is_private: bool, bot_username: str,
+) -> InlineKeyboardMarkup | None:
+    """Кнопка на каждую доску. В личке — web_app-кнопка (миниапп прямо в
+    Telegram); в группах/форумах web_app-кнопки запрещены Telegram — там ссылка
+    на именованное приложение t.me/<bot>/<short_name>, доска без short_name
+    не показывается. ``None`` — показать нечего."""
+    rows = []
+    for label, url, short_name in boards:
+        text = f"Доска {label}" if label else "Открыть доску"
+        if is_private:
+            rows.append([InlineKeyboardButton(text, web_app=WebAppInfo(url=url))])
+        elif short_name:
+            rows.append([InlineKeyboardButton(
+                text, url=f"https://t.me/{bot_username}/{short_name}",
+            )])
+    return InlineKeyboardMarkup(rows) if rows else None
 
-    В личке доступна web_app-кнопка (открывает миниапп прямо в Telegram).
-    В группах/форумах web_app-кнопки запрещены Telegram — там ссылка на
-    именованное приложение вида t.me/<bot>/<short_name>.
-    """
+
+async def cmd_board(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/board — открыть миниаппы досок QueueWarden (BOARD_MINIAPPS)."""
     if not update.message:
         return
-    if not BOARD_MINIAPP_URL:
+    is_private = update.effective_chat is not None and update.effective_chat.type == "private"
+    keyboard = board_keyboard(BOARD_MINIAPPS, is_private, context.bot.username)
+    if keyboard is None:
         await update.message.reply_text(
-            "Миниапп доски не настроен: задайте BOARD_MINIAPP_URL в .env."
+            "Миниапп доски не настроен: задайте BOARD_MINIAPPS в .env "
+            "(в группе нужен short_name доски)."
         )
         return
-    is_private = update.effective_chat is not None and update.effective_chat.type == "private"
-    if is_private:
-        keyboard = InlineKeyboardMarkup(
-            [[InlineKeyboardButton("Открыть доску", web_app=WebAppInfo(url=BOARD_MINIAPP_URL))]]
-        )
-    else:
-        link = f"https://t.me/{context.bot.username}/{BOARD_MINIAPP_SHORT_NAME}"
-        keyboard = InlineKeyboardMarkup(
-            [[InlineKeyboardButton("Открыть доску", url=link)]]
-        )
-    await update.message.reply_text("Доска QueueWarden", reply_markup=keyboard)
+    await update.message.reply_text("Доски QueueWarden", reply_markup=keyboard)
 
 
 async def cmd_spawn(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
