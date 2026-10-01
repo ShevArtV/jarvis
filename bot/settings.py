@@ -37,6 +37,10 @@ DEFAULT_ENGINE = get_engine_by_name(DEFAULT_ENGINE_NAME)
 # для обратной совместимости: задаёт дефолт для любого движка.
 CLAUDE_CWD = os.environ.get("CLAUDE_CWD") or os.path.expanduser("~")
 
+# Топик отдельного бота поддержки: сообщения в нём не запускают Jarvis.
+SUPPORT_CHAT_ID = int_env("JARVIS_SUPPORT_CHAT_ID", 0)
+SUPPORT_THREAD_ID = int_env("JARVIS_SUPPORT_THREAD_ID", 0)
+
 MSG_LIMIT = 3500           # порог отправки ответа как документ
 TG_HARD_LIMIT = 4096       # жёсткий лимит Telegram
 TG_FILE_LIMIT_MB = 50      # Telegram Bot API лимит на sendDocument

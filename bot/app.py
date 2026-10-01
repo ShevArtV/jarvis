@@ -22,6 +22,7 @@ from telegram import (
 from telegram.ext import (
     AIORateLimiter,
     Application,
+    ApplicationHandlerStop,
     CallbackQueryHandler,
     CommandHandler,
     MessageHandler,
@@ -34,6 +35,7 @@ from engines import prewarm_models
 from imap_watcher import run_imap_watcher
 from webhook_server import run_webhook_server
 
+from bot.settings import SUPPORT_CHAT_ID, SUPPORT_THREAD_ID
 from bot.asks import on_ask_answer
 from bot.rich_message import RICH_MESSAGE
 from bot.delivery import _send_manager_notice
@@ -189,6 +191,13 @@ async def _post_init(application: Application) -> None:
     application.bot_data["imap_task"] = imap_task
 
 
+async def _skip_support_topic(update: Update, context) -> None:
+    message = update.effective_message
+    if (message is not None and message.chat_id == SUPPORT_CHAT_ID
+            and message.message_thread_id == SUPPORT_THREAD_ID):
+        raise ApplicationHandlerStop
+
+
 def build_application(
     token: str | None = None,
     allowed_user_ids: set[int] | None = None,
@@ -218,6 +227,9 @@ def build_application(
     allowed = filters.User(
         user_id=allowed_user_ids if allowed_user_ids is not None else ALLOWED_USER_IDS
     )
+
+    if SUPPORT_CHAT_ID and SUPPORT_THREAD_ID:
+        app.add_handler(TypeHandler(Update, _skip_support_topic), group=-2)
 
     # Группа -1: журнал всех входящих до любых обработчиков (не блокирует их).
     app.add_handler(TypeHandler(Update, log_incoming_update), group=-1)
