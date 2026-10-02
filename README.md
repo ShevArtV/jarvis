@@ -5,6 +5,64 @@
 Тонкая обёртка Telegram-бота над LLM CLI (`claude`, `codex` или `opencode`). Один топик = одна непрерывная сессия.
 Пишешь в Telegram — получаешь ответ, как если бы запускал CLI в терминале.
 
+## Quick start (English)
+
+Jarvis is a Telegram bot that drives the LLM CLIs you already use — `claude`,
+`codex` or `opencode`. Each forum topic is one long-running CLI session with its
+own working directory, engine and model. The rest of this README is in Russian;
+this section is enough to get the bot running.
+
+**Requirements:** Python 3.11+, at least one of `claude` / `codex` / `opencode`
+installed and logged in under the same OS user, a bot token from
+[@BotFather](https://t.me/BotFather) and your Telegram user id (e.g. from
+`@userinfobot`). Add the bot to a forum group with topics enabled, or just talk
+to it in a private chat.
+
+### Linux / macOS
+
+```bash
+git clone https://github.com/ShevArtV/jarvis.git
+cd jarvis
+python3 -m venv venv
+./venv/bin/pip install -r requirements.txt
+cp .env.example .env          # set TELEGRAM_TOKEN and ALLOWED_USER_IDS
+claude -p "hello"             # make sure the engine answers from this shell
+./venv/bin/python telegram_bot.py
+```
+
+To keep it running, install the systemd user unit from `systemd/` (see
+[«Автозапуск через systemd»](#автозапуск-через-systemd-user-unit); adjust
+`WorkingDirectory` and `ExecStart` if the repo is not in `~/projects/jarvis`).
+
+### Windows (native, no WSL)
+
+```powershell
+git clone https://github.com/ShevArtV/jarvis.git
+cd jarvis
+py -3 -m venv venv
+.\venv\Scripts\pip install -r requirements.txt
+Copy-Item .env.example .env   # set TELEGRAM_TOKEN and ALLOWED_USER_IDS
+claude -p "hello"
+$env:PYTHONUTF8 = "1"
+.\venv\Scripts\python telegram_bot.py
+```
+
+npm-installed CLIs (`.cmd` shims) are found automatically. Autostart via Task
+Scheduler or NSSM and the Windows-specific notes are in
+[docs/windows.md](docs/windows.md).
+
+### Next steps
+
+- In a topic: `/engine` shows and switches the engine and model, `/bind <path>`
+  sets the topic's working directory; `/session`, `/stop`, `/close` do what
+  they say.
+- Default engine for new topics: `JARVIS_ENGINE=claude|codex|opencode` in `.env`.
+- Optional integrations (QueueWarden, ActiveCollab, reminders, IMAP, webhook,
+  support topic) live in `plugins/` and are off by default; enable them with
+  `JARVIS_PLUGINS=name1,name2`. A plugin is a package whose `plugin.py`
+  exposes `PLUGIN = Plugin(...)` (see `bot/plugins.py`).
+- Every other setting is documented in `.env.example`.
+
 ## Что умеет
 
 - Передаёт любые текстовые запросы в выбранный движок (`claude`, OpenAI `codex` или `opencode`).
@@ -66,6 +124,8 @@
 
 ## Установка
 
+### Linux / macOS
+
 ```bash
 git clone https://github.com/ShevArtV/jarvis.git
 cd jarvis
@@ -75,7 +135,12 @@ cp .env.example .env
 # отредактировать .env: TELEGRAM_TOKEN + ALLOWED_USER_IDS
 ```
 
-На Windows — те же шаги в PowerShell, см. [docs/windows.md](docs/windows.md).
+### Windows
+
+Нативно, без WSL — PowerShell, `PYTHONUTF8=1`, автозапуск через Планировщик
+задач или NSSM: [docs/windows.md](docs/windows.md).
+
+### Проверка движка
 
 Убедись, что `claude` доступен в PATH и авторизован:
 
@@ -758,6 +823,10 @@ opencode mcp list
 
 ## Автозапуск через systemd (user unit)
 
+Юнит рассчитан на репозиторий в `~/projects/jarvis`; если он лежит в другом
+месте, поправьте `WorkingDirectory` и `ExecStart`. На Windows — см.
+[docs/windows.md](docs/windows.md#автозапуск).
+
 ```bash
 mkdir -p ~/.config/systemd/user
 cp systemd/jarvis-bot.service ~/.config/systemd/user/
@@ -796,13 +865,15 @@ journalctl --user -u jarvis-bot -f
 | `bot/formatting.py` | Markdown → HTML Telegram, нарезка по лимиту |
 | `bot/delivery.py` | отправка, журнал хода, длинные ответы файлом, маркеры `[[FILE:]]` |
 | `bot/llm.py` | системный префикс и `call_llm_stream` |
-| `bot/reminders.py` | разбор расписаний; без зависимостей на Telegram — импортируется MCP-сервером |
+| `bot/rich_message.py` | Rich Messages (Bot API 10.1+) → markdown для агента; PTB этого поля пока не знает |
+| `bot/plugins.py` | контракт плагина (`Plugin`, `Command`, `TriggerSource`) и загрузка по `JARVIS_PLUGINS` |
+| `bot/timeutil.py` | `utcnow()` — наивное UTC-время, в котором хранятся даты в БД |
 | `bot/handlers/commands.py` | простые команды: `/start`, `/session`, `/bind`, … |
 | `bot/handlers/engine.py` | `/engine` и его инлайн-диалог выбора движка и модели |
 | `bot/handlers/toggles.py` | `/browser`, `/persistent`, вопрос «задача завершена?» |
 | `bot/handlers/messages.py` | текст, фото, документы; обычный ход и ход через живой процесс |
 | `bot/jobs.py` | выполнение job Менеджера, `/spawn`, внешних триггеров |
-| `bot/workers.py` | все фоновые циклы: heartbeat, очереди, reaper, напоминания, уборка |
+| `bot/workers.py` | фоновые циклы ядра: heartbeat, очереди, reaper, уборка (циклы плагинов — в `plugins/`) |
 | `bot/app.py` | сборка `Application`, регистрация хендлеров, старт воркеров |
 
 Прочее:
@@ -812,7 +883,9 @@ journalctl --user -u jarvis-bot -f
   webhook, топик бота поддержки). Включаются списком `JARVIS_PLUGINS`; каждая
   объявляет в `plugin.py` объект `PLUGIN` (`bot/plugins.py`): фоновые задачи,
   команды, источники триггеров, свои таблицы. MCP-тулы — в `mcp_tools.py`.
-- `engines/` — адаптеры CLI, Playwright MCP, topic-MCP, кэш моделей (см. выше).
+- `engines/` — адаптеры CLI: контракт `Engine` и общая база в `base.py`, общие куски
+  (журнал хода, чтение JSONL, учёт процессов) в `common.py`; Playwright MCP,
+  topic-MCP, кэш моделей (см. выше).
 - `scripts/jarvis_mcp_server.py` — точка входа Jarvis Manager MCP (путь прописан в конфигах движков).
 - `mcp_server/` — сам MCP-сервер: `common.py` (БД, Telegram API, объект FastMCP),
   `tools/` (`ask_user`, `manager_*`), `server.py` (`main`, загрузка тулов плагинов
@@ -825,7 +898,8 @@ journalctl --user -u jarvis-bot -f
 ## Тесты
 
 ```bash
-./venv/bin/python -m unittest discover -s tests -t .
+JARVIS_DOTENV=0 ./venv/bin/python -m unittest discover -s tests -t .
+./venv/bin/pip install -r requirements-dev.txt && ./venv/bin/ruff check .
 ```
 
 Внешних сервисов и токенов не требуют: конфиги подкладываются во временные
