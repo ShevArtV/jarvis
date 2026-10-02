@@ -206,7 +206,7 @@ def disable_global_playwright_mcp(engine_name: str, engine_bin: str) -> tuple[bo
         else:
             raise RuntimeError(f"unknown engine: {engine_name}")
     except Exception as exc:
-        logger.warning("Playwright MCP cleanup failed for %s: %s", engine_name, exc)
+        logger.warning("Playwright MCP cleanup failed for %s: %s", engine_name, exc, exc_info=True)
         status = (False, f"Playwright MCP cleanup не выполнен: {exc}")
         _CLEANUP_STATUS[engine_name] = status
         return status

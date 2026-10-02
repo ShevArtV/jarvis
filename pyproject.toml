@@ -12,7 +12,7 @@ line-length = 120
 extend-exclude = ["venv", "temp"]
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I", "UP", "B"]
+select = ["E", "F", "W", "I", "UP", "B", "DTZ003", "BLE001", "S110"]
 ignore = [
     "E501",   # длинные строки — не цель линтера; переносит форматтер
     "B008",

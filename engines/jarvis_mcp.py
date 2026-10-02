@@ -215,7 +215,7 @@ def ensure_jarvis_mcp(engine_name: str, engine_bin: str) -> tuple[bool, str]:
         else:
             raise RuntimeError(f"unknown engine: {engine_name}")
     except Exception as exc:
-        logger.warning("Jarvis MCP setup failed for %s: %s", engine_name, exc)
+        logger.warning("Jarvis MCP setup failed for %s: %s", engine_name, exc, exc_info=True)
         status = (False, f"Jarvis Manager MCP не подключён: {exc}")
         _STATUS[engine_name] = status
         return status

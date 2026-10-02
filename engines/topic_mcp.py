@@ -216,16 +216,6 @@ def servers_for_role(role: str) -> list[dict[str, Any]]:
     return result
 
 
-def log_role(role: str) -> list[dict[str, Any]]:
-    """Resolve servers for ``role`` and log the result (never the headers)."""
-    specs = servers_for_role(role)
-    if specs:
-        logger.info(
-            "topic MCP role=%s servers=%s", role, ",".join(s["name"] for s in specs),
-        )
-    return specs
-
-
 # ---------- Engine-specific rendering ----------
 
 def claude_mcp_servers(role: str) -> dict[str, dict[str, Any]]:
