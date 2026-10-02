@@ -94,8 +94,8 @@ claude -p "hello"   # проверка, что авторизация работ
 
 ### Топик техподдержки
 
-Для отдельного бота поддержки задайте `JARVIS_SUPPORT_CHAT_ID` и
-`JARVIS_SUPPORT_THREAD_ID`. Jarvis полностью пропускает сообщения и команды
+Для отдельного бота поддержки включите плагин `support_topic` в `JARVIS_PLUGINS` и задайте
+`JARVIS_SUPPORT_CHAT_ID` и `JARVIS_SUPPORT_THREAD_ID`. Jarvis полностью пропускает сообщения и команды
 этого топика, чтобы ответы клиентам не запускали LLM. Оба значения обязательны;
 без них поведение остальных топиков не меняется. Активация требует перезапуска.
 
@@ -653,6 +653,7 @@ Per-topic MCP — часть контракта `Engine.call_stream` (см.
 
 ### QueueWarden: канал уведомлений «Бот»
 
+Плагин `queuewarden` (включается в `JARVIS_PLUGINS`).
 `plugins/queuewarden/notifications.py` держит long-poll `GET <url>/api/bot/notifications?wait=25`
 токеном учётки-моста по каждой установке QW — отдельной задачей, со своим backoff:
 
@@ -807,14 +808,17 @@ journalctl --user -u jarvis-bot -f
 Прочее:
 
 - `config.py` — чтение `.env`, токен и whitelist.
-- `plugins/` — подключаемые интеграции (QueueWarden, ActiveCollab, напоминания, IMAP, webhook).
+- `plugins/` — подключаемые интеграции (QueueWarden, ActiveCollab, напоминания, IMAP,
+  webhook, топик бота поддержки). Включаются списком `JARVIS_PLUGINS`; каждая
+  объявляет в `plugin.py` объект `PLUGIN` (`bot/plugins.py`): фоновые задачи,
+  команды, источники триггеров, свои таблицы. MCP-тулы — в `mcp_tools.py`.
 - `engines/` — адаптеры CLI, Playwright MCP, topic-MCP, кэш моделей (см. выше).
 - `scripts/jarvis_mcp_server.py` — точка входа Jarvis Manager MCP (путь прописан в конфигах движков).
 - `mcp_server/` — сам MCP-сервер: `common.py` (БД, Telegram API, объект FastMCP),
   `tools/` (`ask_user`, `manager_*`), `server.py` (`main`, загрузка тулов плагинов
   из `JARVIS_PLUGINS` через `plugins/<имя>/mcp_tools.py`).
 - `bot_state.db` — sqlite: сессии, `jobs`, `agent_triggers`, `messages_log`,
-  `reminders`, метаданные исходящих сообщений (для reply-to).
+  таблицы включённых плагинов, метаданные исходящих сообщений (для reply-to).
 - `temp/media/` — скачанные пользовательские вложения.
 - `systemd/jarvis-bot.service` — user-unit.
 

@@ -21,6 +21,7 @@ from bot.handlers.toggles import (
 from engines.session_usage import aggregate_claude_usage
 from mcp_server import common
 from mcp_server.tools import topics
+from plugins.reminders.plugin import PLUGIN as REMINDERS
 
 
 class DoneDetectorTest(unittest.TestCase):
@@ -325,7 +326,8 @@ class TopicAdminTest(unittest.TestCase):
     def _prepared(self, tmp: str, **seed_kwargs):
         """Готовая БД, на которую нацелен MCP-сервер."""
         db_path = str(Path(tmp) / "bot_state.db")
-        with patch.object(bot_db, "DB_PATH", db_path):
+        with patch.object(bot_db, "DB_PATH", db_path), \
+                patch.object(bot_db, "load_plugins", return_value=(REMINDERS,)):
             bot_db.init_db()
         self._seed(db_path, **seed_kwargs)
         common._DB_PATH = Path(db_path)

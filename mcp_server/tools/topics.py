@@ -792,10 +792,15 @@ async def manager_delete_topic(
                 (now, target_chat_id, thread_id),
             ).fetchall()
         ]
-        deleted_reminders = conn.execute(
-            "DELETE FROM reminders WHERE chat_id=? AND thread_id=?",
-            (target_chat_id, thread_id),
-        ).rowcount
+        # reminders — таблица плагина: без него её может не быть.
+        deleted_reminders = 0
+        if conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='reminders'"
+        ).fetchone():
+            deleted_reminders = conn.execute(
+                "DELETE FROM reminders WHERE chat_id=? AND thread_id=?",
+                (target_chat_id, thread_id),
+            ).rowcount
         deleted_log = 0
         if purge_log:
             deleted_log = conn.execute(
