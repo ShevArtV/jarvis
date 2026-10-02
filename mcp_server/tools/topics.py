@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import sqlite3
 import time
@@ -12,7 +13,9 @@ from typing import Any
 
 from bot.timeutil import utcnow
 from mcp_server import common
-from mcp_server.common import logger, mcp
+from mcp_server.common import mcp
+
+logger = logging.getLogger("jarvis-mcp")
 
 
 @mcp.tool(
@@ -80,6 +83,7 @@ def manager_engines() -> dict[str, Any]:
             available = shutil.which(bin_path) is not None
             models = list(eng.models)
         except Exception as exc:
+            logger.debug("engine %s probe failed", name, exc_info=True)
             out.append({
                 "name": name, "available": False,
                 "error": str(exc)[:300], "models": [],

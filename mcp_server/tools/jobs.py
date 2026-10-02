@@ -4,13 +4,16 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from datetime import timedelta
 from typing import Any
 
 from bot.timeutil import utcnow
 from mcp_server import common
-from mcp_server.common import logger, mcp
+from mcp_server.common import mcp
+
+logger = logging.getLogger("jarvis-mcp")
 
 
 @mcp.tool(
@@ -297,6 +300,7 @@ def manager_dismiss_notice(
         ok = True
         err = None
     except Exception as exc:
+        logger.debug("deleteMessage failed", exc_info=True)
         ok = False
         err = str(exc)[:300]
     return {

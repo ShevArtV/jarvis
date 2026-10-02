@@ -12,6 +12,7 @@ import os
 
 from telegram import Update
 from telegram.constants import ParseMode
+from telegram.error import TelegramError
 from telegram.ext import ContextTypes
 
 from bot.formatting import _html_escape, md_to_html
@@ -320,5 +321,5 @@ async def unauthorized_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     if update.message is not None:
         try:
             await update.message.reply_text("Доступ запрещён.")
-        except Exception:
-            pass
+        except TelegramError:
+            logger.debug("failed to send access denied reply", exc_info=True)

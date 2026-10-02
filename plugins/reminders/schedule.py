@@ -31,7 +31,8 @@ def _reminders_tz():
     try:
         return ZoneInfo(name)
     except Exception:
-        logger.warning("JARVIS_REMINDERS_TZ=%r invalid, using Europe/Moscow", name)
+        logger.warning("JARVIS_REMINDERS_TZ=%r invalid, using Europe/Moscow", name,
+                       exc_info=True)
         return ZoneInfo("Europe/Moscow")
 
 

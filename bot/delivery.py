@@ -28,7 +28,7 @@ import time
 
 from telegram import InputFile, Message
 from telegram.constants import ParseMode
-from telegram.error import BadRequest, NetworkError, RetryAfter, TimedOut
+from telegram.error import BadRequest, NetworkError, RetryAfter, TelegramError, TimedOut
 from telegram.ext import Application
 
 from bot.db import _db, log_message
@@ -456,8 +456,8 @@ class ProgressJournal:
             return
         try:
             await self.msg.delete()
-        except Exception:
-            pass
+        except TelegramError:
+            logger.debug("failed to delete progress message", exc_info=True)
 
 
 def extract_file_markers(text: str) -> tuple[str, list[tuple[str, str | None]]]:
@@ -528,8 +528,8 @@ async def deliver_file_markers(
                     chat, thread_id,
                     f"{notice_prefix}⚠️ не удалось отправить {path}: {exc}",
                 )
-            except Exception:
-                pass
+            except TelegramError:
+                logger.debug("failed to send file delivery notice", exc_info=True)
 
 
 def _rich_kind(path: str) -> str:
@@ -653,7 +653,7 @@ async def send_claude_reply(
                 "send_claude_reply(rich)",
             )
         except Exception as exc:
-            logger.warning("rich message rejected, falling back to html: %s", exc)
+            logger.warning("rich message rejected, falling back to html: %s", exc, exc_info=True)
         if sent is not None:
             note_topic_message(chat.id, thread_id, sent.message_id)
             try:

@@ -61,8 +61,8 @@ def _load_accounts() -> list[dict]:
         if not isinstance(accounts, list):
             raise ValueError("expected JSON array")
         return accounts
-    except Exception:
-        logger.error("JARVIS_IMAP_ACCOUNTS invalid JSON: %r", raw[:100])
+    except ValueError:
+        logger.error("JARVIS_IMAP_ACCOUNTS invalid JSON: %r", raw[:100], exc_info=True)
         return []
 
 

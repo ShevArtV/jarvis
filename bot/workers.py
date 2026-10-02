@@ -228,7 +228,7 @@ async def health_worker(app: Application) -> None:
                 try:
                     claimed_dt = datetime.fromisoformat(jclaimed)
                     mins = int((now_dt - claimed_dt).total_seconds() / 60)
-                except Exception:
+                except (ValueError, TypeError):
                     mins = warn_s // 60
                 with _db() as conn:
                     title_row = conn.execute(

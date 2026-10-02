@@ -413,7 +413,8 @@ async def poll_once(
                 extra = await enrich_created(client, inst, item)
             except Exception as exc:
                 logger.warning("queuewarden[%s]: enrich %s failed: %s: %s", inst.slug,
-                               item.get("notificationId"), type(exc).__name__, exc)
+                               item.get("notificationId"), type(exc).__name__, exc,
+                               exc_info=True)
         try:
             enqueue_notification(item, topic, inst, extra)
             ack_ids.append(item["id"])
@@ -450,7 +451,7 @@ async def _poll_installation(inst: Installation, topic: TopicKey) -> None:
                 raise
             except Exception as exc:
                 logger.warning("queuewarden[%s]: poll failed: %s: %s",
-                               inst.slug, type(exc).__name__, exc)
+                               inst.slug, type(exc).__name__, exc, exc_info=True)
                 delay = None
             if delay is None:
                 delay = backoff

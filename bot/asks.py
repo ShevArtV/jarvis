@@ -15,6 +15,7 @@ from datetime import datetime, timedelta
 
 from telegram import Update
 from telegram.constants import ParseMode
+from telegram.error import TelegramError
 from telegram.ext import ContextTypes
 
 from bot.db import _db
@@ -125,9 +126,9 @@ async def _mark_ask_answered(chat, ask: dict, answer: str) -> None:
             chat_id=ask["chat_id"], message_id=tg_msg_id, text=body,
             parse_mode=ParseMode.HTML, reply_markup=None,
         )
-    except Exception:
+    except TelegramError:
         # Сообщение могли удалить/изменить — ответ уже в БД, агент его получит.
-        logger.warning("ask #%s: failed to update question message", ask["id"])
+        logger.warning("ask #%s: failed to update question message", ask["id"], exc_info=True)
 
 
 async def on_ask_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -166,13 +167,13 @@ async def on_ask_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     logger.info("ask #%s answered by button: %r", ask_id, answer)
     try:
         await query.answer(f"Принято: {answer}"[:200])
-    except Exception:
-        pass
+    except TelegramError:
+        logger.debug("ask #%s: failed to answer callback query", ask_id, exc_info=True)
     try:
         await query.edit_message_text(
             f"❓ {_html_escape(ask['question'])}\n\n"
             f"✅ <b>Ответ:</b> {_html_escape(answer)}",
             parse_mode=ParseMode.HTML, reply_markup=None,
         )
-    except Exception:
-        logger.warning("ask #%s: failed to edit question message", ask_id)
+    except TelegramError:
+        logger.warning("ask #%s: failed to edit question message", ask_id, exc_info=True)

@@ -12,7 +12,7 @@ import logging
 import re
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.error import BadRequest
+from telegram.error import BadRequest, TelegramError
 from telegram.ext import ContextTypes
 
 from bot.delivery import send_to_topic
@@ -68,6 +68,7 @@ def _browser_precheck(enable: bool) -> tuple[bool, str]:
     try:
         spec = playwright_command_args()
     except Exception as exc:
+        logger.debug("playwright_command_args failed", exc_info=True)
         return False, f"⚠️ Playwright недоступен: {exc}"
     if spec is None:
         return False, "⚠️ Playwright выключен глобально (JARVIS_PLAYWRIGHT_MCP=0)."
@@ -136,8 +137,8 @@ async def on_browser_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return
     try:
         await query.answer()
-    except Exception:
-        pass
+    except TelegramError:
+        logger.debug("failed to answer callback query", exc_info=True)
     enable = data.split(":", 1)[1] == "on"
     key = _key(update)
     text = await _apply_browser(key, enable)
@@ -243,8 +244,8 @@ async def on_persistent_toggle(update: Update, context: ContextTypes.DEFAULT_TYP
         return
     try:
         await query.answer()
-    except Exception:
-        pass
+    except TelegramError:
+        logger.debug("failed to answer callback query", exc_info=True)
     enable = data.split(":", 1)[1] == "on"
     key = _key(update)
     text = await _apply_persistent(key, enable)
@@ -270,8 +271,8 @@ async def on_done_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     except ValueError:
         try:
             await query.answer("Некорректная кнопка", show_alert=True)
-        except Exception:
-            pass
+        except TelegramError:
+            logger.debug("failed to answer callback query", exc_info=True)
         return
 
     key = _key(update)
@@ -280,8 +281,8 @@ async def on_done_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         text = "Эта кнопка относится к старой сессии. Текущую сессию не трогаю."
         try:
             await query.answer(text, show_alert=True)
-        except Exception:
-            pass
+        except TelegramError:
+            logger.debug("failed to answer callback query", exc_info=True)
         try:
             await query.edit_message_text(text)
         except BadRequest:
@@ -292,8 +293,8 @@ async def on_done_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         text = "Ок, продолжаем в текущей сессии."
         try:
             await query.answer("Продолжаем")
-        except Exception:
-            pass
+        except TelegramError:
+            logger.debug("failed to answer callback query", exc_info=True)
         try:
             await query.edit_message_text(text)
         except BadRequest:
@@ -302,8 +303,8 @@ async def on_done_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     try:
         await query.answer("Закрываю сессию")
-    except Exception:
-        pass
+    except TelegramError:
+        logger.debug("failed to answer callback query", exc_info=True)
     await _kill_persistent_worker(key, "сессия закрыта по подтверждению завершения задачи")
     was_open = close_session(key[0], key[1])
     if was_open:

@@ -10,7 +10,9 @@ import sys
 from pathlib import Path
 
 from mcp_server import common
-from mcp_server.common import logger, mcp
+from mcp_server.common import mcp
+
+logger = logging.getLogger("jarvis-mcp")
 
 BUILTIN_TOOL_MODULES = (
     "mcp_server.tools.topics",
@@ -42,7 +44,8 @@ def load_tools() -> None:
             module = importlib.import_module(module_name)
             module.register(common.mcp)
         except Exception as exc:
-            logger.warning("plugin %s: MCP tools not loaded: %s", name, exc)
+            logger.warning("plugin %s: MCP tools not loaded: %s", name, exc,
+                           exc_info=True)
 
 
 def main(argv: list[str] | None = None) -> int:

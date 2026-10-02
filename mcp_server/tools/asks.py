@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 import sqlite3
 import time
@@ -11,7 +12,9 @@ from typing import Any
 
 from bot.timeutil import utcnow
 from mcp_server import common
-from mcp_server.common import logger, mcp
+from mcp_server.common import mcp
+
+logger = logging.getLogger("jarvis-mcp")
 
 _TASK_TAG_RE = re.compile(r"#[A-Za-z0-9][A-Za-z0-9._-]*")
 
@@ -203,7 +206,7 @@ async def ask_user(
             )
     except Exception as exc:
         logger.warning("ask_user #%s: failed to log question to messages_log: %s",
-                       ask_id, exc)
+                       ask_id, exc, exc_info=True)
     logger.info("ask_user #%s posted to thread=%s (options=%d)",
                 ask_id, thread_id, len(options))
 

@@ -14,6 +14,7 @@ import os
 import uuid
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.error import TelegramError
 from telegram.ext import ContextTypes
 
 from bot.asks import _mark_ask_answered, answer_ask, get_pending_ask, get_recent_timed_out_ask, mark_ask_late_answered
@@ -453,6 +454,7 @@ async def _process_prompt_locked(
                 reply_markup=kb,
             )
         except Exception:
+            logger.debug("failed to send queue notice", exc_info=True)
             queue_msg = None
 
     # Ожидание lock'а с возможностью отмены.
@@ -479,8 +481,8 @@ async def _process_prompt_locked(
             if queue_msg is not None:
                 try:
                     await queue_msg.edit_text("❌ Отменено пользователем")
-                except Exception:
-                    pass
+                except TelegramError:
+                    logger.debug("failed to edit cancelled queue message", exc_info=True)
             logger.info("queued request cancelled: key=%s queue_id=%s", key, queue_id)
             return
         # Дождались lock'а.
@@ -489,8 +491,8 @@ async def _process_prompt_locked(
         if queue_msg is not None:
             try:
                 await queue_msg.edit_reply_markup(reply_markup=None)
-            except Exception:
-                pass
+            except TelegramError:
+                logger.debug("failed to remove queue cancel button", exc_info=True)
     else:
         await lock.acquire()
 
@@ -692,16 +694,16 @@ async def on_cancel_queue(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         # Уже не в очереди: либо стартовал, либо уже отменён ранее.
         try:
             await query.answer("Уже выполняется — используй /stop", show_alert=True)
-        except Exception:
-            pass
+        except TelegramError:
+            logger.debug("failed to answer callback query", exc_info=True)
         # На всякий случай снимем кнопку, чтобы не нажималась повторно.
         try:
             await query.edit_message_reply_markup(reply_markup=None)
-        except Exception:
-            pass
+        except TelegramError:
+            logger.debug("failed to remove cancel button", exc_info=True)
         return
     event.set()
     try:
         await query.answer("Отменено")
-    except Exception:
-        pass
+    except TelegramError:
+        logger.debug("failed to answer callback query", exc_info=True)

@@ -13,7 +13,7 @@ import shutil
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
-from telegram.error import BadRequest
+from telegram.error import BadRequest, TelegramError
 from telegram.ext import ContextTypes
 
 from bot.delivery import send_to_topic
@@ -330,8 +330,8 @@ async def on_engine_select(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if target == current_engine:
         try:
             await query.answer()
-        except Exception:
-            pass
+        except TelegramError:
+            logger.debug("failed to answer callback query", exc_info=True)
         target_engine = get_engine_by_name(target)
         models = list(target_engine.models)
         current_model = get_model(*key)
@@ -373,8 +373,8 @@ async def on_engine_select(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if not ok:
         try:
             await query.answer("Не могу переключить", show_alert=False)
-        except Exception:
-            pass
+        except TelegramError:
+            logger.debug("failed to answer callback query", exc_info=True)
         try:
             await query.edit_message_text(
                 msg + (f"\n\n(текущий движок: {current})" if current else ""),
@@ -386,8 +386,8 @@ async def on_engine_select(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     try:
         await query.answer()
-    except Exception:
-        pass
+    except TelegramError:
+        logger.debug("failed to answer callback query", exc_info=True)
 
     # Шаг выбора модели: только если у целевого движка их >1.
     target_engine = get_engine_by_name(target)
@@ -453,8 +453,8 @@ async def on_model_select(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if model_idx < 0 or model_idx >= len(models):
         try:
             await query.answer("Модель не найдена", show_alert=True)
-        except Exception:
-            pass
+        except TelegramError:
+            logger.debug("failed to answer callback query", exc_info=True)
         return
     chosen = models[model_idx]
 
@@ -465,8 +465,8 @@ async def on_model_select(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         update_model_only(key[0], key[1], chosen)
         try:
             await query.answer()
-        except Exception:
-            pass
+        except TelegramError:
+            logger.debug("failed to answer callback query", exc_info=True)
         new_text = (
             f"Модель движка `{target}` изменена: → {_model_label(chosen)}.\n"
             f"Контекст сессии сохранён."
@@ -485,8 +485,8 @@ async def on_model_select(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if not ok:
         try:
             await query.answer("Не могу переключить", show_alert=False)
-        except Exception:
-            pass
+        except TelegramError:
+            logger.debug("failed to answer callback query", exc_info=True)
         try:
             await query.edit_message_text(
                 msg + (f"\n\n(текущий движок: {current})" if current else ""),
@@ -498,8 +498,8 @@ async def on_model_select(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     try:
         await query.answer()
-    except Exception:
-        pass
+    except TelegramError:
+        logger.debug("failed to answer callback query", exc_info=True)
     try:
         await query.edit_message_text(
             f"Переключаюсь {current} → {target} ({_model_label(chosen)}).\n"
@@ -544,8 +544,8 @@ async def on_engine_carry(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if not ok or current != old_engine:
         try:
             await query.answer("Состояние изменилось", show_alert=False)
-        except Exception:
-            pass
+        except TelegramError:
+            logger.debug("failed to answer callback query", exc_info=True)
         try:
             await query.edit_message_text(
                 (msg or f"Состояние изменилось: текущий движок — {current}.")
@@ -561,8 +561,8 @@ async def on_engine_carry(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     try:
         await query.answer()
-    except Exception:
-        pass
+    except TelegramError:
+        logger.debug("failed to answer callback query", exc_info=True)
 
     if choice == "n":
         text = await _do_engine_switch(key, new_engine, model=chosen_model)
