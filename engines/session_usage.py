@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import sqlite3
@@ -10,6 +11,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 # Приблизительные цены (USD за 1M токенов): (input, output, cache_write, cache_read).
 # Официального total_cost_usd в jsonl-транскрипте нет (он есть только в живом
@@ -379,7 +382,7 @@ def _inspect_opencode(session_id: str) -> SessionUsage:
         try:
             conn.close()
         except Exception:
-            pass
+            logger.debug("cannot close sqlite connection", exc_info=True)
     return usage
 
 

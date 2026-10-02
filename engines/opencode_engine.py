@@ -12,21 +12,32 @@ import json
 import logging
 import os
 import tempfile
-import time
 import uuid
 from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
-from pathlib import Path
 from typing import Any
 
-from engines.model_cache import cached_models, cli_models, prewarm, split_models
-from engines.process_control import feed_stdin, spawn, terminate_process_tree
+from engines.base import BaseEngine
+from engines.common import (
+    PLACEHOLDER_PREFIX,
+    IntermediateBuffer,
+    cleanup_tempfile,
+    is_placeholder,
+    iter_json_events,
+    missing_cwd_result,
+    read_stderr,
+    register_proc,
+    resolve_cwd,
+    unregister_proc,
+    wait_stream,
+)
+from engines.model_cache import cli_models, split_models
+from engines.process_control import feed_stdin, spawn
 
 logger = logging.getLogger(__name__)
 
 OPENCODE_BIN = os.environ.get("OPENCODE_BIN", "opencode")
 OPENCODE_TIMEOUT = int(os.environ.get("OPENCODE_TIMEOUT", "3600"))
-INTERMEDIATE_MIN_INTERVAL = 2.0
 
 # Фолбэк, если `opencode models` недоступен (CLI не установлен, нет сети).
 DEFAULT_OPENCODE_MODELS = [
@@ -43,24 +54,9 @@ FILE_MARKER_SYSTEM = (
     "явно указанных пользователем."
 )
 
-_PLACEHOLDER_PREFIX = "placeholder-"
-
 # Per-call модель. Выставляется через engines.engine_model_scope() из
 # telegram_bot.py перед call_stream. Если None — фолбэк на OPENCODE_MODEL env.
 CURRENT_MODEL: ContextVar[str | None] = ContextVar("opencode_model", default=None)
-
-
-def _is_placeholder(session_id: str) -> bool:
-    return session_id.startswith(_PLACEHOLDER_PREFIX)
-
-
-def _cleanup_tempfile(path: str | None) -> None:
-    if not path:
-        return
-    try:
-        os.unlink(path)
-    except OSError:
-        pass
 
 
 def _opencode_mcp_config(mcp_playwright: bool, mcp_topic_role: str | None) -> str | None:
@@ -69,7 +65,7 @@ def _opencode_mcp_config(mcp_playwright: bool, mcp_topic_role: str | None) -> st
     Клонирует глобальный opencode.json (Manager MCP и прочие настройки
     сохраняются), добавляет нужные MCP в `mcp` и пишет во временный файл.
     Путь подставляется в OPENCODE_CONFIG для конкретного запуска.
-    Вызывающий обязан удалить файл через _cleanup_tempfile.
+    Вызывающий обязан удалить файл через cleanup_tempfile.
 
     ``None`` — добавлять нечего, запускаем opencode с его штатным конфигом.
     Проверять надо именно СПИСОК серверов, а не роль: роль есть у каждого
@@ -125,7 +121,7 @@ def _opencode_mcp_config(mcp_playwright: bool, mcp_topic_role: str | None) -> st
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             json.dump(base, fh, ensure_ascii=False, indent=2)
     except Exception:
-        _cleanup_tempfile(path)
+        cleanup_tempfile(path)
         raise
     return path
 
@@ -233,21 +229,177 @@ def _discover_opencode_models() -> list[str]:
     return [line for line in cli_models([OPENCODE_BIN, "models"]) if "/" in line]
 
 
-class OpenCodeEngine:
+def _opencode_prompt(prompt: str, system_prefix: str | None, resume_mode: bool) -> str:
+    """У opencode нет канала system-prompt. FILE-маркер клеим каждый ход;
+    общий [SYSTEM:]-блок — только на НОВОЙ сессии (на resume уже в
+    транскрипте). См. codex-адаптер — логика идентична."""
+    prefix_parts: list[str] = []
+    if system_prefix and not resume_mode:
+        prefix_parts.append(system_prefix)
+    prefix_parts.append(FILE_MARKER_SYSTEM)
+    return "\n\n".join(prefix_parts) + "\n\n" + prompt
+
+
+def _opencode_command(
+    session_id: str, cwd: str, *, resume_mode: bool, model: str | None,
+) -> list[str]:
+    cmd = [
+        OPENCODE_BIN, "run",
+        "--format", "json",
+        "--dangerously-skip-permissions",
+        "--dir", cwd,
+    ]
+    if model:
+        cmd.extend(["--model", model])
+    agent = os.environ.get("OPENCODE_AGENT")
+    if agent:
+        cmd.extend(["--agent", agent])
+    variant = os.environ.get("OPENCODE_VARIANT")
+    if variant:
+        cmd.extend(["--variant", variant])
+    if resume_mode:
+        cmd.extend(["--session", session_id])
+    return cmd
+
+
+class _OpenCodeStream:
+    """Состояние разбора JSONL одного `opencode run --format json`."""
+
+    def __init__(
+        self,
+        model: str | None,
+        on_intermediate: Callable[[str], Awaitable[None]],
+    ) -> None:
+        self.on_intermediate = on_intermediate
+        self.journal = IntermediateBuffer()
+        self.requested_model = model
+        self.real_session_id: str | None = None
+        # actual_model: fallback на то, что мы сами просили (--model);
+        # stream-парсер ниже перезапишет, если CLI сообщит точное.
+        self.actual_model = model
+        self.text_chunks: list[str] = []
+        self.part_texts: dict[str, str] = {}
+        self.final_text = ""
+        self.stream_errors: list[str] = []
+
+    async def flush(self, force: bool = False) -> None:
+        await self.journal.flush(self.on_intermediate, force)
+
+    async def read(self, proc: asyncio.subprocess.Process) -> None:
+        assert proc.stdout is not None
+        async for ev in iter_json_events(proc.stdout, "opencode"):
+            await self.handle_event(ev)
+
+    def remember_text(self, part: Any, fallback: str = "") -> str:
+        txt = _text_from_part(part) or fallback
+        if not txt:
+            return ""
+        if isinstance(part, dict):
+            pid = part.get("id")
+            if isinstance(pid, str) and pid:
+                self.part_texts[pid] = txt
+        return txt
+
+    def _note_model(self, ev: dict[str, Any]) -> None:
+        # Best-effort парсинг модели: opencode кладёт её в part.modelID
+        # или message.info.modelID. Берём первое попадание.
+        for obj in (
+            ev, ev.get("part"), ev.get("info"), ev.get("message"),
+            ev.get("properties"),
+        ):
+            if isinstance(obj, dict):
+                for key_name in ("modelID", "model_id", "model"):
+                    m = obj.get(key_name)
+                    if isinstance(m, str) and m:
+                        self.actual_model = m
+                        break
+                if self.actual_model and self.actual_model != self.requested_model:
+                    break
+
+    async def _show(self, text: str) -> None:
+        """Последний кусок текста — в final_text и хвостом в журнал."""
+        self.final_text = text
+        self.journal.append(text[-800:])
+        await self.flush()
+
+    async def handle_event(self, ev: Any) -> None:
+        sid = _extract_session_id(ev)
+        if sid:
+            self.real_session_id = sid
+
+        self._note_model(ev)
+
+        etype = ev.get("type")
+        props = ev.get("properties") if isinstance(ev.get("properties"), dict) else {}
+        part = ev.get("part") if isinstance(ev.get("part"), dict) else props.get("part")
+
+        if etype in ("error", "session.error", "turn.failed"):
+            msg = _error_message(ev) or _error_message(props)
+            if msg and msg not in self.stream_errors:
+                self.stream_errors.append(msg)
+            return
+
+        if etype == "tool_use":
+            if isinstance(part, dict):
+                self.journal.append(f"🔧 {_tool_summary(part)}")
+                await self.flush()
+            return
+
+        if etype == "message.part.delta":
+            delta = _string_from_any(ev.get("delta") or props.get("delta")) or _text_from_part(part)
+            if delta:
+                if isinstance(part, dict) and isinstance(part.get("id"), str):
+                    pid = part["id"]
+                    self.part_texts[pid] = self.part_texts.get(pid, "") + delta
+                else:
+                    self.text_chunks.append(delta)
+                await self._show(delta)
+            return
+
+        if etype == "message.part.updated":
+            txt = self.remember_text(part)
+            if txt:
+                await self._show(txt)
+            return
+
+        if etype == "text":
+            txt = self.remember_text(part, _string_from_any(ev.get("text")))
+            if txt:
+                if not isinstance(part, dict) or not part.get("id"):
+                    self.text_chunks.append(txt)
+                await self._show(txt)
+            return
+
+        if etype == "step_finish":
+            if isinstance(part, dict) and part.get("reason") == "stop":
+                await self.flush(force=True)
+            return
+
+        if etype == "message.updated":
+            msg = ev.get("message") if isinstance(ev.get("message"), dict) else props.get("message")
+            txt = _text_from_part(msg)
+            if txt:
+                self.final_text = txt
+
+    def collected_text(self) -> str:
+        """Итоговый текст: части по id, иначе склейка чанков, иначе последний текст."""
+        if self.part_texts:
+            return "\n".join(self.part_texts.values())
+        if self.text_chunks:
+            return "".join(self.text_chunks)
+        return self.final_text
+
+
+class OpenCodeEngine(BaseEngine):
     name = "opencode"
     bin_path = OPENCODE_BIN
+    default_models = DEFAULT_OPENCODE_MODELS
 
-    @property
-    def models(self) -> list[str]:
-        return cached_models(
-            "opencode", _discover_opencode_models, DEFAULT_OPENCODE_MODELS,
-        )
-
-    def prewarm_models(self) -> None:
-        prewarm("opencode", _discover_opencode_models, DEFAULT_OPENCODE_MODELS)
+    def _discover_models(self) -> list[str]:
+        return _discover_opencode_models()
 
     def new_session_id(self) -> str:
-        return f"{_PLACEHOLDER_PREFIX}{uuid.uuid4()}"
+        return f"{PLACEHOLDER_PREFIX}{uuid.uuid4()}"
 
     def session_exists(self, session_id: str, cwd: str) -> bool:
         """OpenCode stores sessions in SQLite and validates ids itself.
@@ -256,10 +408,7 @@ class OpenCodeEngine:
         opencode instance. For real ``ses_...`` ids we optimistically resume and
         let the CLI return a clear error if the session was removed.
         """
-        return (not _is_placeholder(session_id)) and session_id.startswith("ses_")
-
-    def clear_stale_session_pidfile(self, session_id: str) -> None:
-        return None
+        return (not is_placeholder(session_id)) and session_id.startswith("ses_")
 
     async def call_stream(
         self,
@@ -275,42 +424,19 @@ class OpenCodeEngine:
         mcp_playwright: bool = False,
         mcp_topic_role: str | None = None,
     ) -> tuple[bool, str, str | None, str | None]:
-        effective_cwd = cwd or os.environ.get("CLAUDE_CWD", str(Path.home()))
+        effective_cwd = resolve_cwd(cwd)
         is_spawn = spawn_id is not None
 
         resume_mode = (not is_spawn) and self.session_exists(session_id, effective_cwd)
-
-        # У opencode нет канала system-prompt. FILE-маркер клеим каждый ход;
-        # общий [SYSTEM:]-блок — только на НОВОЙ сессии (на resume уже в
-        # транскрипте). См. codex-адаптер — логика идентична.
-        prefix_parts: list[str] = []
-        if system_prefix and not resume_mode:
-            prefix_parts.append(system_prefix)
-        prefix_parts.append(FILE_MARKER_SYSTEM)
-        full_prompt = "\n\n".join(prefix_parts) + "\n\n" + prompt
+        full_prompt = _opencode_prompt(prompt, system_prefix, resume_mode)
 
         # opencode run не умеет per-invocation MCP, поэтому клонируем глобальный
         # конфиг (Manager MCP сохраняется) + добавляем per-topic MCP во временный
         # файл и указываем на него через OPENCODE_CONFIG.
         pw_config_path = _opencode_mcp_config(mcp_playwright, mcp_topic_role)
 
-        cmd = [
-            OPENCODE_BIN, "run",
-            "--format", "json",
-            "--dangerously-skip-permissions",
-            "--dir", effective_cwd,
-        ]
         model = CURRENT_MODEL.get() or os.environ.get("OPENCODE_MODEL")
-        if model:
-            cmd.extend(["--model", model])
-        agent = os.environ.get("OPENCODE_AGENT")
-        if agent:
-            cmd.extend(["--agent", agent])
-        variant = os.environ.get("OPENCODE_VARIANT")
-        if variant:
-            cmd.extend(["--variant", variant])
-        if resume_mode:
-            cmd.extend(["--session", session_id])
+        cmd = _opencode_command(session_id, effective_cwd, resume_mode=resume_mode, model=model)
 
         logger.info(
             "opencode start: key=%s session=%s mode=%s cwd=%s prompt_len=%d spawn_id=%s",
@@ -319,13 +445,8 @@ class OpenCodeEngine:
         )
 
         if effective_cwd and not os.path.isdir(effective_cwd):
-            _cleanup_tempfile(pw_config_path)
-            return (
-                False,
-                f"⚠️ Рабочая папка `{effective_cwd}` не существует. "
-                "Создай её или переназначь через /bind.",
-                session_id, None,
-            )
+            cleanup_tempfile(pw_config_path)
+            return missing_cwd_result(effective_cwd, session_id)
 
         env = _opencode_env()
         if pw_config_path:
@@ -334,183 +455,50 @@ class OpenCodeEngine:
         try:
             proc = await spawn(cmd, cwd=effective_cwd, stdin=asyncio.subprocess.PIPE, env=env)
         except FileNotFoundError:
-            _cleanup_tempfile(pw_config_path)
+            cleanup_tempfile(pw_config_path)
             return False, f"`{OPENCODE_BIN}` не найден в PATH.", session_id, None
 
         await feed_stdin(proc, full_prompt)
+        register_proc(proc, key, spawn_id, active_procs, spawn_procs)
 
-        if is_spawn:
-            spawn_procs[(key[0], key[1], spawn_id)] = proc
-        else:
-            active_procs[key] = proc
-
-        real_session_id: str | None = None
-        # actual_model: fallback на то, что мы сами просили (--model);
-        # stream-парсер ниже перезапишет, если CLI сообщит точное.
-        actual_model: str | None = model
-        text_chunks: list[str] = []
-        part_texts: dict[str, str] = {}
-        final_text = ""
-        buffer_intermediate: list[str] = []
-        last_push = 0.0
-        stream_errors: list[str] = []
-
-        async def flush_intermediate(force: bool = False) -> None:
-            nonlocal last_push
-            if not buffer_intermediate:
-                return
-            now = time.monotonic()
-            if not force and (now - last_push) < INTERMEDIATE_MIN_INTERVAL:
-                return
-            text = "\n".join(buffer_intermediate)
-            buffer_intermediate.clear()
-            last_push = now
-            try:
-                await on_intermediate(text)
-            except Exception:
-                logger.exception("on_intermediate failed")
-
-        def remember_text(part: Any, fallback: str = "") -> str:
-            txt = _text_from_part(part) or fallback
-            if not txt:
-                return ""
-            if isinstance(part, dict):
-                pid = part.get("id")
-                if isinstance(pid, str) and pid:
-                    part_texts[pid] = txt
-            return txt
-
-        async def read_stream() -> None:
-            nonlocal final_text, real_session_id, actual_model
-            assert proc.stdout is not None
-            while True:
-                line = await proc.stdout.readline()
-                if not line:
-                    break
-                raw = line.decode("utf-8", errors="replace").strip()
-                if not raw:
-                    continue
-                try:
-                    ev = json.loads(raw)
-                except json.JSONDecodeError:
-                    logger.debug("opencode non-json stdout: %s", raw[:300])
-                    continue
-
-                sid = _extract_session_id(ev)
-                if sid:
-                    real_session_id = sid
-
-                # Best-effort парсинг модели: opencode кладёт её в part.modelID
-                # или message.info.modelID. Берём первое попадание.
-                for obj in (
-                    ev, ev.get("part"), ev.get("info"), ev.get("message"),
-                    ev.get("properties"),
-                ):
-                    if isinstance(obj, dict):
-                        for key_name in ("modelID", "model_id", "model"):
-                            m = obj.get(key_name)
-                            if isinstance(m, str) and m:
-                                actual_model = m
-                                break
-                        if actual_model and actual_model != model:
-                            break
-
-                etype = ev.get("type")
-                props = ev.get("properties") if isinstance(ev.get("properties"), dict) else {}
-                part = ev.get("part") if isinstance(ev.get("part"), dict) else props.get("part")
-
-                if etype in ("error", "session.error", "turn.failed"):
-                    msg = _error_message(ev) or _error_message(props)
-                    if msg and msg not in stream_errors:
-                        stream_errors.append(msg)
-                    continue
-
-                if etype == "tool_use":
-                    if isinstance(part, dict):
-                        buffer_intermediate.append(f"🔧 {_tool_summary(part)}")
-                        await flush_intermediate()
-                    continue
-
-                if etype == "message.part.delta":
-                    delta = _string_from_any(ev.get("delta") or props.get("delta")) or _text_from_part(part)
-                    if delta:
-                        if isinstance(part, dict) and isinstance(part.get("id"), str):
-                            pid = part["id"]
-                            part_texts[pid] = part_texts.get(pid, "") + delta
-                        else:
-                            text_chunks.append(delta)
-                        final_text = delta
-                        buffer_intermediate.append(delta[-800:])
-                        await flush_intermediate()
-                    continue
-
-                if etype == "message.part.updated":
-                    txt = remember_text(part)
-                    if txt:
-                        final_text = txt
-                        buffer_intermediate.append(txt[-800:])
-                        await flush_intermediate()
-                    continue
-
-                if etype == "text":
-                    txt = remember_text(part, _string_from_any(ev.get("text")))
-                    if txt:
-                        if not isinstance(part, dict) or not part.get("id"):
-                            text_chunks.append(txt)
-                        final_text = txt
-                        buffer_intermediate.append(txt[-800:])
-                        await flush_intermediate()
-                    continue
-
-                if etype == "step_finish":
-                    if isinstance(part, dict) and part.get("reason") == "stop":
-                        await flush_intermediate(force=True)
-                    continue
-
-                if etype == "message.updated":
-                    msg = ev.get("message") if isinstance(ev.get("message"), dict) else props.get("message")
-                    txt = _text_from_part(msg)
-                    if txt:
-                        final_text = txt
-
+        stream = _OpenCodeStream(model, on_intermediate)
         try:
-            try:
-                await asyncio.wait_for(read_stream(), timeout=OPENCODE_TIMEOUT)
-            except TimeoutError:
-                await terminate_process_tree(proc)
-                return False, f"Timeout: opencode не ответил за {OPENCODE_TIMEOUT}с.", session_id, actual_model
-            await proc.wait()
-        except asyncio.CancelledError:
-            await terminate_process_tree(proc)
-            raise
+            finished = await wait_stream(proc, stream.read(proc), OPENCODE_TIMEOUT)
         finally:
-            await flush_intermediate(force=True)
-            _cleanup_tempfile(pw_config_path)
-            if is_spawn:
-                skey = (key[0], key[1], spawn_id)
-                if spawn_procs.get(skey) is proc:
-                    spawn_procs.pop(skey, None)
-            else:
-                if active_procs.get(key) is proc:
-                    active_procs.pop(key, None)
+            await stream.flush(force=True)
+            cleanup_tempfile(pw_config_path)
+            unregister_proc(proc, key, spawn_id, active_procs, spawn_procs)
+        if not finished:
+            return False, f"Timeout: opencode не ответил за {OPENCODE_TIMEOUT}с.", session_id, stream.actual_model
 
-        stderr_text = ""
-        if proc.stderr is not None:
-            try:
-                stderr_b = await proc.stderr.read()
-                stderr_text = stderr_b.decode("utf-8", errors="replace")
-            except Exception:
-                pass
+        stderr_text = await read_stderr(proc)
+        return self._finish(
+            proc, stream, stderr_text,
+            cmd=cmd, cwd=effective_cwd, key=key, session_id=session_id, is_spawn=is_spawn,
+        )
 
-        if part_texts:
-            final_text = "\n".join(part_texts.values())
-        elif text_chunks:
-            final_text = "".join(text_chunks)
+    def _finish(
+        self,
+        proc: asyncio.subprocess.Process,
+        stream: _OpenCodeStream,
+        stderr_text: str,
+        *,
+        cmd: list[str],
+        cwd: str,
+        key: tuple[int, int],
+        session_id: str,
+        is_spawn: bool,
+    ) -> tuple[bool, str, str | None, str | None]:
+        """Итог вызова по коду выхода, собранному тексту и ошибкам stream."""
+        final_text = stream.collected_text()
+        real_session_id = stream.real_session_id
+        actual_model = stream.actual_model
+        stream_errors = stream.stream_errors
 
         if proc.returncode != 0:
             logger.warning(
                 "opencode rc=%s cmd=%s cwd=%s stderr=%s stream_errors=%s",
-                proc.returncode, cmd, effective_cwd,
+                proc.returncode, cmd, cwd,
                 stderr_text[:500], stream_errors[:3],
             )
             if proc.returncode and proc.returncode < 0:

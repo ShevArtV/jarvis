@@ -20,44 +20,18 @@ from engines.codex_engine import (
     CODEX_BIN,
     FILE_MARKER_SYSTEM,
     CodexEngine,
-    _is_placeholder,
+    _mcp_config_overrides,
+)
+from engines.common import (
+    IntermediateBuffer,
+    cleanup_codex_profiles,
+    is_placeholder,
+    iter_json_events,
+    resolve_cwd,
 )
 from engines.process_control import spawn, terminate_process_tree
 
 logger = logging.getLogger(__name__)
-
-INTERMEDIATE_MIN_INTERVAL = 2.0
-
-
-def _mcp_config_overrides(
-    mcp_playwright: bool,
-    mcp_topic_role: str | None,
-) -> tuple[list[str], list[Path]]:
-    """App-server MCP flags and temporary files."""
-    flags: list[str] = []
-    cleanup_paths: list[Path] = []
-
-    if mcp_playwright:
-        from engines.playwright_mcp import playwright_command_args, playwright_server_name
-
-        spec = playwright_command_args()
-        if spec is None:
-            logger.warning("persistent codex: Playwright requested but globally disabled")
-        else:
-            npx, args = spec
-            table = f"mcp_servers.{playwright_server_name()}"
-            flags.extend([
-                "-c", f"{table}.command={json.dumps(npx, ensure_ascii=False)}",
-                "-c", f"{table}.args={json.dumps(args, ensure_ascii=False)}",
-                "-c", f"{table}.enabled=true",
-            ])
-
-    if mcp_topic_role:
-        from engines.topic_mcp import codex_inline_config_flags
-
-        flags.extend(codex_inline_config_flags(mcp_topic_role))
-
-    return flags, cleanup_paths
 
 
 def _text_input(text: str) -> list[dict]:
@@ -100,8 +74,9 @@ class PersistentCodexWorker:
         self._request_lock = asyncio.Lock()
         self._next_request_id = 1
         self._pending_requests: dict[int, asyncio.Future] = {}
-        self._buffer: list[str] = []
-        self._last_push = 0.0
+        self._journal = IntermediateBuffer(
+            "persistent codex: on_intermediate failed key=%s", key,
+        )
         self._active_turn_id: str | None = None
         self._final_text = ""
         self._stderr_tail: deque[str] = deque(maxlen=80)
@@ -141,7 +116,7 @@ class PersistentCodexWorker:
         common = {k: v for k, v in common.items() if v is not None}
 
         if (
-            _is_placeholder(requested_session_id)
+            is_placeholder(requested_session_id)
             or not CodexEngine().session_exists(requested_session_id, self.cwd)
         ):
             result = await self._request("thread/start", common)
@@ -192,6 +167,7 @@ class PersistentCodexWorker:
                     )
                     self._active_turn_id = _extract_turn_id(result) or self._active_turn_id
                 except Exception as exc:
+                    logger.warning("persistent codex: turn/start failed key=%s", self.key, exc_info=True)
                     self._resolve(False, f"Ошибка turn/start: {exc}")
                 self.last_activity = time.monotonic()
                 return True, fut
@@ -234,21 +210,7 @@ class PersistentCodexWorker:
             raise
 
     async def _flush(self, force: bool = False) -> None:
-        if not self._buffer:
-            return
-        now = time.monotonic()
-        if not force and (now - self._last_push) < INTERMEDIATE_MIN_INTERVAL:
-            return
-        text = "\n".join(self._buffer)
-        self._buffer.clear()
-        self._last_push = now
-        cb = self.on_intermediate
-        if cb is None:
-            return
-        try:
-            await cb(text)
-        except Exception:
-            logger.exception("persistent codex: on_intermediate failed key=%s", self.key)
+        await self._journal.flush(self.on_intermediate, force)
 
     def _resolve(self, ok: bool, text: str) -> None:
         fut = self.pending_future
@@ -262,18 +224,7 @@ class PersistentCodexWorker:
     async def _read_loop(self) -> None:
         assert self.proc.stdout is not None
         try:
-            while True:
-                line = await self.proc.stdout.readline()
-                if not line:
-                    break
-                raw = line.decode("utf-8", errors="replace").strip()
-                if not raw:
-                    continue
-                try:
-                    ev = json.loads(raw)
-                except json.JSONDecodeError:
-                    logger.debug("persistent codex: non-json stdout line: %r", raw[:300])
-                    continue
+            async for ev in iter_json_events(self.proc.stdout, "persistent codex:"):
                 if "id" in ev:
                     self._handle_response(ev)
                 elif "method" in ev:
@@ -326,7 +277,7 @@ class PersistentCodexWorker:
             if itype == "commandExecution" and method == "item/started":
                 cmd = (item.get("command") or "").strip()
                 if cmd:
-                    self._buffer.append(f"🔧 exec {cmd[:150]}")
+                    self._journal.append(f"🔧 exec {cmd[:150]}")
                     await self._flush()
             elif itype == "reasoning" and method == "item/completed":
                 chunks = []
@@ -338,13 +289,13 @@ class PersistentCodexWorker:
                     chunks.extend(str(x) for x in content if x)
                 txt = "\n".join(chunks).strip()
                 if txt:
-                    self._buffer.append(f"💭 {txt[:800]}")
+                    self._journal.append(f"💭 {txt[:800]}")
                     await self._flush()
             elif itype == "agentMessage" and method == "item/completed":
                 txt = (item.get("text") or "").strip()
                 if txt:
                     self._final_text = txt
-                    self._buffer.append(txt[:800])
+                    self._journal.append(txt[:800])
                     await self._flush()
             return
 
@@ -378,7 +329,7 @@ class PersistentCodexWorker:
         if method == "warning":
             message = (params.get("message") or params.get("text") or "").strip()
             if message:
-                self._buffer.append(f"⚠️ {message[:800]}")
+                self._journal.append(f"⚠️ {message[:800]}")
                 await self._flush()
 
     async def _read_stderr_loop(self) -> None:
@@ -399,14 +350,9 @@ class PersistentCodexWorker:
         return "\n".join(self._stderr_tail)[-2000:]
 
     def _cleanup_profiles(self) -> None:
-        if not self._cleanup_paths:
-            return
-        from engines.topic_mcp import cleanup_codex_profile
-
         paths = self._cleanup_paths
         self._cleanup_paths = []
-        for path in paths:
-            cleanup_codex_profile(path)
+        cleanup_codex_profiles(paths)
 
 
 def _extract_thread_id(result: dict) -> str | None:
@@ -451,11 +397,14 @@ async def start_persistent(
     mcp_topic_role: str | None = None,
 ) -> PersistentCodexWorker:
     """Start app-server and open/resume a Codex thread."""
-    effective_cwd = cwd or os.environ.get("CLAUDE_CWD", str(Path.home()))
+    effective_cwd = resolve_cwd(cwd)
     if not os.path.isdir(effective_cwd):
         raise RuntimeError(f"Рабочая папка `{effective_cwd}` не существует.")
 
-    mcp_flags, mcp_cleanup_paths = _mcp_config_overrides(mcp_playwright, mcp_topic_role)
+    # app-server профилей не принимает — topic-MCP уходит -c-флагами.
+    mcp_flags, mcp_cleanup_paths = _mcp_config_overrides(
+        mcp_playwright, mcp_topic_role, inline_topic=True,
+    )
     cmd = [
         CODEX_BIN,
         "app-server",
@@ -473,10 +422,7 @@ async def start_persistent(
     try:
         proc = await spawn(cmd, cwd=effective_cwd, stdin=asyncio.subprocess.PIPE)
     except Exception:
-        from engines.topic_mcp import cleanup_codex_profile
-
-        for path in mcp_cleanup_paths:
-            cleanup_codex_profile(path)
+        cleanup_codex_profiles(mcp_cleanup_paths)
         raise
     worker = PersistentCodexWorker(key, proc, session_id, effective_cwd, model, mcp_cleanup_paths)
     worker.reader_task = asyncio.create_task(worker._read_loop())
