@@ -3,9 +3,9 @@
 
 from __future__ import annotations
 
-from datetime import datetime
 from typing import Any
 
+from bot.timeutil import utcnow
 from mcp_server import common
 
 
@@ -40,7 +40,7 @@ def _activecollab_check_updates() -> dict[str, Any]:
             notification["project_id"] = task.get("project_id")
             notification["project_name"] = task.get("project_name")
             notification["task_name"] = task.get("name")
-    now = datetime.utcnow().isoformat()
+    now = utcnow().isoformat()
 
     with common._connect() as conn:
         initialized = conn.execute(

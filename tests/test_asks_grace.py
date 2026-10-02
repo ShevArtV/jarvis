@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from bot import db as bot_db
 from bot.asks import get_pending_ask, get_recent_timed_out_ask, mark_ask_late_answered
+from bot.timeutil import utcnow
 
 
 class AsksGraceTest(unittest.TestCase):
@@ -44,8 +45,8 @@ class AsksGraceTest(unittest.TestCase):
             db_path = self._fresh_db(tmp)
             ask_id = self._add_ask(
                 db_path, "timed_out",
-                created_at=datetime.utcnow() - timedelta(minutes=35),
-                answered_at=datetime.utcnow() - timedelta(minutes=2),
+                created_at=utcnow() - timedelta(minutes=35),
+                answered_at=utcnow() - timedelta(minutes=2),
             )
             with patch.object(bot_db, "DB_PATH", db_path):
                 ask = get_recent_timed_out_ask(-100, 77)
@@ -56,7 +57,7 @@ class AsksGraceTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = self._fresh_db(tmp)
             ask_id = self._add_ask(
-                db_path, "timed_out", datetime.utcnow() - timedelta(minutes=5),
+                db_path, "timed_out", utcnow() - timedelta(minutes=5),
             )
             with patch.object(bot_db, "DB_PATH", db_path):
                 ask = get_recent_timed_out_ask(-100, 77)
@@ -67,7 +68,7 @@ class AsksGraceTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = self._fresh_db(tmp)
             self._add_ask(
-                db_path, "timed_out", datetime.utcnow() - timedelta(minutes=40),
+                db_path, "timed_out", utcnow() - timedelta(minutes=40),
             )
             with patch.object(bot_db, "DB_PATH", db_path):
                 ask = get_recent_timed_out_ask(-100, 77)
@@ -77,7 +78,7 @@ class AsksGraceTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = self._fresh_db(tmp)
             self._add_ask(
-                db_path, "answered", datetime.utcnow() - timedelta(minutes=1),
+                db_path, "answered", utcnow() - timedelta(minutes=1),
             )
             with patch.object(bot_db, "DB_PATH", db_path):
                 ask = get_recent_timed_out_ask(-100, 77)
@@ -87,7 +88,7 @@ class AsksGraceTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = self._fresh_db(tmp)
             ask_id = self._add_ask(
-                db_path, "timed_out", datetime.utcnow() - timedelta(minutes=5),
+                db_path, "timed_out", utcnow() - timedelta(minutes=5),
             )
             with patch.object(bot_db, "DB_PATH", db_path):
                 self.assertTrue(mark_ask_late_answered(ask_id, "да, сносить"))
@@ -104,14 +105,14 @@ class AsksGraceTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = self._fresh_db(tmp)
             ask_id = self._add_ask(
-                db_path, "timed_out", datetime.utcnow() - timedelta(minutes=5),
+                db_path, "timed_out", utcnow() - timedelta(minutes=5),
             )
             with patch.object(bot_db, "DB_PATH", db_path):
                 self.assertTrue(mark_ask_late_answered(ask_id, "первый ответ"))
                 self.assertFalse(mark_ask_late_answered(ask_id, "второй ответ"))
 
     def _pending_with_pulse(self, db_path: str, polled_at: datetime | None) -> int:
-        ask_id = self._add_ask(db_path, "pending", datetime.utcnow() - timedelta(minutes=40))
+        ask_id = self._add_ask(db_path, "pending", utcnow() - timedelta(minutes=40))
         with bot_db.connect(db_path) as conn:
             conn.execute(
                 "UPDATE ask_requests SET polled_at = ? WHERE id = ?",
@@ -124,7 +125,7 @@ class AsksGraceTest(unittest.TestCase):
         он закрывается как timed_out от последнего опроса, а не ловит сообщение."""
         with tempfile.TemporaryDirectory() as tmp:
             db_path = self._fresh_db(tmp)
-            last_poll = datetime.utcnow() - timedelta(minutes=5)
+            last_poll = utcnow() - timedelta(minutes=5)
             ask_id = self._pending_with_pulse(db_path, last_poll)
             with patch.object(bot_db, "DB_PATH", db_path):
                 self.assertIsNone(get_pending_ask(-100, 77))
@@ -136,7 +137,7 @@ class AsksGraceTest(unittest.TestCase):
     def test_live_ask_still_catches_message(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             db_path = self._fresh_db(tmp)
-            ask_id = self._pending_with_pulse(db_path, datetime.utcnow() - timedelta(seconds=5))
+            ask_id = self._pending_with_pulse(db_path, utcnow() - timedelta(seconds=5))
             with patch.object(bot_db, "DB_PATH", db_path):
                 ask = get_pending_ask(-100, 77)
             self.assertIsNotNone(ask)

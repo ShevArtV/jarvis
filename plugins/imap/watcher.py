@@ -25,10 +25,10 @@ import json
 import logging
 import os
 from collections.abc import Awaitable, Callable
-from datetime import datetime
 from email.header import decode_header, make_header
 
 from bot.db import _db
+from bot.timeutil import utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +43,7 @@ def _mark_seen(account_key: str, uid: int) -> bool:
             conn.execute(
                 "INSERT OR IGNORE INTO imap_state(account, uid, seen_at) "
                 "VALUES (?, ?, ?)",
-                (account_key, uid, datetime.utcnow().isoformat()),
+                (account_key, uid, utcnow().isoformat()),
             )
             new = conn.execute("SELECT changes()").fetchone()[0]
         return bool(new)

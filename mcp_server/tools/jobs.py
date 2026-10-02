@@ -5,9 +5,10 @@ from __future__ import annotations
 
 import asyncio
 import time
-from datetime import datetime, timedelta
+from datetime import timedelta
 from typing import Any
 
+from bot.timeutil import utcnow
 from mcp_server import common
 from mcp_server.common import logger, mcp
 
@@ -76,7 +77,7 @@ def manager_send(
             "thread_id (use manager_topics to list)."
         )
 
-    now_dt = datetime.utcnow()
+    now_dt = utcnow()
     now = now_dt.isoformat()
     if as_user:
         not_before: str | None = None
@@ -199,7 +200,7 @@ def manager_send(
 )
 def manager_cancel_job(job_id: int) -> dict[str, Any]:
     """Cancel a single pending job by id."""
-    now = datetime.utcnow().isoformat()
+    now = utcnow().isoformat()
     with common._connect() as conn:
         row = conn.execute(
             "SELECT status, chat_id, thread_id, not_before FROM jobs WHERE id = ?",
@@ -246,7 +247,7 @@ def manager_interrupt(
 ) -> dict[str, Any]:
     """Set cancel_requested for active jobs in the given topic."""
     target_chat_id = chat_id if chat_id is not None else common._default_chat_id()
-    now = datetime.utcnow().isoformat()
+    now = utcnow().isoformat()
     with common._connect() as conn:
         rows = conn.execute(
             "UPDATE jobs SET cancel_requested = ? "

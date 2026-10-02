@@ -15,6 +15,8 @@ import logging
 import os
 from datetime import datetime, timedelta
 
+from bot.timeutil import utcnow
+
 logger = logging.getLogger(__name__)
 
 _DAY_NAMES = {
@@ -121,7 +123,7 @@ def compute_next_fire(parsed: dict, after_utc: datetime | None = None) -> dateti
     from zoneinfo import ZoneInfo
     tz = _reminders_tz()
     if after_utc is None:
-        after_utc = datetime.utcnow()
+        after_utc = utcnow()
     # UTC naive → aware
     now_aware = after_utc.replace(tzinfo=ZoneInfo("UTC")).astimezone(tz)
     hh = parsed["hour"]

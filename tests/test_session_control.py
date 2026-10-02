@@ -18,6 +18,7 @@ from bot.handlers.toggles import (
     _looks_like_waiting_for_user,
     _session_confirm_token,
 )
+from bot.timeutil import utcnow
 from engines.session_usage import aggregate_claude_usage
 from mcp_server import common
 from mcp_server.tools import topics
@@ -170,7 +171,7 @@ class ManagerCloseSessionTest(unittest.TestCase):
     THREAD_ID = 77
 
     def _seed(self, db_path: str) -> None:
-        now = datetime.utcnow().isoformat()
+        now = utcnow().isoformat()
         with bot_db.connect(db_path) as conn:
             conn.execute(
                 "INSERT INTO sessions(chat_id, thread_id, session_id, cwd, engine, "
@@ -292,7 +293,7 @@ class TopicAdminTest(unittest.TestCase):
     THREAD_ID = 88
 
     def _seed(self, db_path: str, *, job_status: str = "pending") -> None:
-        now = datetime.utcnow().isoformat()
+        now = utcnow().isoformat()
         with bot_db.connect(db_path) as conn:
             conn.execute(
                 "INSERT INTO sessions(chat_id, thread_id, session_id, cwd, engine, "

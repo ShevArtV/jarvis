@@ -3,11 +3,11 @@ from __future__ import annotations
 import asyncio
 import tempfile
 import unittest
-from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
 from bot import db as bot_db
+from bot.timeutil import utcnow
 from mcp_server import common
 from mcp_server.tools import asks
 
@@ -62,7 +62,7 @@ class AskUserExternalGuardTest(unittest.TestCase):
                 "INSERT INTO agent_triggers(chat_id, thread_id, text, source, role, "
                 "status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (-100, thread_id, TRIGGER_TEXT, source, role, status,
-                 datetime.utcnow().isoformat()),
+                 utcnow().isoformat()),
             )
 
     def test_init_db_migrates_old_agent_triggers(self) -> None:
@@ -132,7 +132,7 @@ class AskUserExternalGuardTest(unittest.TestCase):
                 conn.execute(
                     "INSERT INTO agent_triggers(chat_id, thread_id, text, source, "
                     "status, created_at) VALUES (?, ?, ?, 'mxboard', 'in_progress', ?)",
-                    (-100, 77, TRIGGER_TEXT, datetime.utcnow().isoformat()),
+                    (-100, 77, TRIGGER_TEXT, utcnow().isoformat()),
                 )
             common._DB_PATH = Path(db_path)
             self.assertIsNone(asks._external_executor_task(-100, 77))
@@ -145,7 +145,7 @@ class AskUserExternalGuardTest(unittest.TestCase):
                     "INSERT INTO agent_triggers(chat_id, thread_id, text, source, role, "
                     "status, created_at) VALUES (?, ?, ?, 'mxboard', 'executor', "
                     "'in_progress', ?)",
-                    (-100, 88, "Событие по задаче без тега", datetime.utcnow().isoformat()),
+                    (-100, 88, "Событие по задаче без тега", utcnow().isoformat()),
                 )
             common._DB_PATH = Path(db_path)
             self.assertEqual(

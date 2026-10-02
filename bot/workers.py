@@ -32,6 +32,7 @@ from bot.queues import (
 )
 from bot.sessions import clear_close_request, close_session, get_session
 from bot.settings import CLAUDE_CWD
+from bot.timeutil import utcnow
 from bot.topics import (
     PERSISTENT_IDLE_MINUTES,
     _kill_persistent_worker,
@@ -207,7 +208,7 @@ async def health_worker(app: Application) -> None:
     )
     while True:
         try:
-            now_dt = datetime.utcnow()
+            now_dt = utcnow()
             warn_thr = (now_dt - timedelta(seconds=warn_s)).isoformat()
             fail_thr = (now_dt - timedelta(seconds=fail_s)).isoformat()
             now_iso = now_dt.isoformat()

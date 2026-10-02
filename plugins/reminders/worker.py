@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime
 
 from telegram.ext import Application
 
 from bot.db import _db, log_message
 from bot.delivery import send_to_topic
+from bot.timeutil import utcnow
 from bot.topics import resolve_secretary_topic, resolve_teamlead_topic
 from bot.workers import _env_int
 from plugins.reminders.schedule import compute_next_fire, parse_reminder_schedule
@@ -23,7 +23,7 @@ async def reminders_worker(app: Application) -> None:
     logger.info("reminders_worker started (interval=%ds)", interval)
     while True:
         try:
-            now = datetime.utcnow()
+            now = utcnow()
             now_iso = now.isoformat()
             with _db() as conn:
                 due_rows = conn.execute(

@@ -14,10 +14,10 @@ import json
 import logging
 import os
 from collections.abc import Awaitable, Callable
-from datetime import datetime
 from urllib.parse import parse_qs
 
 from bot.db import _db
+from bot.timeutil import utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +40,7 @@ def _log_event(source: str, event: str, payload: dict) -> None:
                 "INSERT INTO webhook_log(source, event, payload, received_at) "
                 "VALUES (?, ?, ?, ?)",
                 (source, event, json.dumps(payload, ensure_ascii=False),
-                 datetime.utcnow().isoformat()),
+                 utcnow().isoformat()),
             )
     except Exception:
         logger.exception("webhook: log failed source=%s event=%s", source, event)

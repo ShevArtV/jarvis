@@ -249,11 +249,6 @@ def _usage_line(usage: SessionUsage) -> str:
     return "; ".join(bits)
 
 
-def _inspect_topic_usage(key: tuple[int, int]) -> SessionUsage:
-    session_id, cwd, engine_name = get_session(*key)
-    return inspect_session_usage(engine_name, session_id, cwd or CLAUDE_CWD)
-
-
 async def cmd_bind(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     key = _key(update)
     args = context.args or []

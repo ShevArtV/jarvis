@@ -3,9 +3,9 @@
 
 from __future__ import annotations
 
-from datetime import datetime
 from typing import Any
 
+from bot.timeutil import utcnow
 from mcp_server import common
 from mcp_server.common import logger
 
@@ -58,7 +58,7 @@ def register(mcp) -> None:
                 "(once-reminder with past date?)"
             )
 
-        now = datetime.utcnow().isoformat()
+        now = utcnow().isoformat()
         with common._connect() as conn:
             cur = conn.execute(
                 "INSERT INTO reminders(chat_id, thread_id, text, schedule, "

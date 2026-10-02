@@ -16,10 +16,10 @@ import logging
 import os
 import shutil
 import sqlite3
-from datetime import datetime
 
 from bot.plugins import load_plugins
 from bot.settings import DB_PATH
+from bot.timeutil import utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +52,7 @@ def _backup_db_once() -> None:
     """
     if not os.path.exists(DB_PATH):
         return
-    stamp = datetime.utcnow().strftime("%Y%m%d")
+    stamp = utcnow().strftime("%Y%m%d")
     bak_path = f"{DB_PATH}.bak-{stamp}"
     if os.path.exists(bak_path):
         return
@@ -347,7 +347,7 @@ def log_message(
                 "text, telegram_message_id, ts) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (
                     chat_id, thread_id, direction, kind, text,
-                    telegram_message_id, datetime.utcnow().isoformat(),
+                    telegram_message_id, utcnow().isoformat(),
                 ),
             )
     except Exception:

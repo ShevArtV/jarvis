@@ -10,9 +10,10 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 from bot.db import _db
+from bot.timeutil import utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +35,7 @@ def claim_next_job(
     обрабатывает задачи РАЗНЫХ топиков одновременно; claim атомарен и
     multi-worker-safe (см. rowcount-проверку ниже).
     """
-    now = datetime.utcnow().isoformat()
+    now = utcnow().isoformat()
     sql = (
         "SELECT id, chat_id, thread_id, text, source, origin_chat_id, "
         "origin_thread_id FROM jobs "
@@ -81,7 +82,7 @@ def finish_job(
         conn.execute(
             "UPDATE jobs SET status = ?, error = ?, result_message_id = ?, "
             "finished_at = ? WHERE id = ?",
-            (status, error, result_message_id, datetime.utcnow().isoformat(), job_id),
+            (status, error, result_message_id, utcnow().isoformat(), job_id),
         )
 
 
@@ -102,7 +103,7 @@ def claim_next_agent_trigger(
     забранные строки по порядку.
     """
     coalesce = coalesce or {}
-    now_dt = datetime.utcnow()
+    now_dt = utcnow()
     now = now_dt.isoformat()
     sql = (
         "SELECT id, chat_id, thread_id, text, source FROM agent_triggers "
@@ -166,7 +167,7 @@ def enqueue_agent_trigger(
     не ставится и возвращается None. Ошибка записи откатывает обе строки, так
     что «отметили, но не поставили» не бывает.
     """
-    now = datetime.utcnow().isoformat()
+    now = utcnow().isoformat()
     with _db() as conn:
         if seen_key is not None:
             cur = conn.execute(
@@ -195,7 +196,7 @@ def finish_agent_trigger(
         conn.execute(
             "UPDATE agent_triggers SET status = ?, error = ?, result_message_id = ?, "
             "finished_at = ? WHERE id = ?",
-            (status, error, result_message_id, datetime.utcnow().isoformat(), trigger_id),
+            (status, error, result_message_id, utcnow().isoformat(), trigger_id),
         )
 
 
@@ -220,7 +221,7 @@ def cleanup_old_log_entries(ttl_days: int) -> dict[str, int]:
     """
     if ttl_days <= 0:
         return {"messages_log": 0, "jobs": 0, "agent_triggers": 0}
-    threshold = (datetime.utcnow() - timedelta(days=ttl_days)).isoformat()
+    threshold = (utcnow() - timedelta(days=ttl_days)).isoformat()
     with _db() as conn:
         log_n = conn.execute(
             "DELETE FROM messages_log WHERE ts < ?", (threshold,),

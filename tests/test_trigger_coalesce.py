@@ -8,13 +8,14 @@ from __future__ import annotations
 import asyncio
 import tempfile
 import unittest
-from datetime import datetime, timedelta
+from datetime import timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from bot import db as bot_db
 from bot import queues
 from bot.handlers import messages
+from bot.timeutil import utcnow
 
 TOPIC = (-1001, 77)
 OTHER = (-1001, 88)
@@ -36,7 +37,7 @@ class ClaimCoalesceTest(unittest.TestCase):
     def add(self, text: str, source: str = "queuewarden", topic=TOPIC,
             age: float = 120) -> int:
         tid = queues.enqueue_agent_trigger(*topic, text, source)
-        created = (datetime.utcnow() - timedelta(seconds=age)).isoformat()
+        created = (utcnow() - timedelta(seconds=age)).isoformat()
         with bot_db.connect(self.db_path) as conn:
             conn.execute("UPDATE agent_triggers SET created_at = ? WHERE id = ?",
                          (created, tid))

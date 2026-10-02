@@ -3,13 +3,13 @@ from __future__ import annotations
 import asyncio
 import tempfile
 import unittest
-from datetime import datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from bot import db as bot_db
 from bot import delivery as bot_delivery
 from bot.queues import claim_next_job
+from bot.timeutil import utcnow
 from bot.topics import resolve_job_notice_target
 from mcp_server import common
 from mcp_server.tools import jobs
@@ -95,7 +95,7 @@ class JobOriginNoticeTest(unittest.TestCase):
                     "INSERT INTO sessions(chat_id, thread_id, session_id, cwd, "
                     "engine, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
                     (-100, 101, "sid", "/tmp", "codex",
-                     datetime.utcnow().isoformat()),
+                     utcnow().isoformat()),
                 )
             common._DB_PATH = Path(db_path)
             result = jobs.manager_send(
@@ -121,7 +121,7 @@ class JobOriginNoticeTest(unittest.TestCase):
                     "INSERT INTO sessions(chat_id, thread_id, session_id, cwd, "
                     "engine, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
                     (-100, 101, "sid", "/tmp", "codex",
-                     datetime.utcnow().isoformat()),
+                     utcnow().isoformat()),
                 )
             common._DB_PATH = Path(db_path)
             result = jobs.manager_send(
@@ -143,7 +143,7 @@ class JobOriginNoticeTest(unittest.TestCase):
                         "INSERT INTO jobs(chat_id, thread_id, text, source, "
                         "status, created_at, origin_chat_id, origin_thread_id) "
                         "VALUES (?, ?, ?, 'manager', 'pending', ?, ?, ?)",
-                        (-100, 101, "текст", datetime.utcnow().isoformat(),
+                        (-100, 101, "текст", utcnow().isoformat(),
                          -100, 202),
                     )
                 job = claim_next_job()

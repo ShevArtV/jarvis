@@ -98,7 +98,7 @@ EXPECTED_LAYOUT = {
         "set_cwd", "clear_cwd", "set_pending_summary", "get_pending_summary",
         "clear_pending_summary", "build_context_handoff", "INSTRUCTION_FILES",
     ],
-    "bot.asks": ["get_pending_ask", "answer_ask", "ask_question_text", "on_ask_answer"],
+    "bot.asks": ["get_pending_ask", "answer_ask", "on_ask_answer"],
     "bot.delivery": [
         "send_to_topic", "send_document_to_topic", "send_claude_reply",
         "extract_file_markers", "deliver_file_markers", "ProgressJournal",

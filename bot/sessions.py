@@ -20,6 +20,7 @@ from datetime import UTC, datetime, timedelta
 
 from bot.db import _db
 from bot.settings import DEFAULT_ENGINE, DEFAULT_ENGINE_NAME, SESSION_IDLE_MINUTES
+from bot.timeutil import utcnow
 from engines import get_engine_by_name
 
 logger = logging.getLogger(__name__)
@@ -34,7 +35,7 @@ def get_session(chat_id: int, thread_id: int) -> tuple[str, str | None, str]:
     Engine хранится per-topic; при смене JARVIS_ENGINE существующие топики
     продолжают работать со своим движком, переключение — через /engine.
     """
-    now = datetime.utcnow().isoformat()
+    now = utcnow().isoformat()
     with _db() as conn:
         row = conn.execute(
             "SELECT session_id, cwd, engine FROM sessions "
@@ -66,7 +67,7 @@ def update_session_id(
         conn.execute(
             "UPDATE sessions SET session_id = ?, updated_at = ? "
             "WHERE chat_id = ? AND thread_id = ? AND engine = ?",
-            (new_session_id, datetime.utcnow().isoformat(),
+            (new_session_id, utcnow().isoformat(),
              chat_id, thread_id, expected_engine),
         )
 
@@ -74,7 +75,7 @@ def update_session_id(
 def reset_session(chat_id: int, thread_id: int) -> tuple[str, str | None, str]:
     """Новый id для движка топика; cwd и engine сохраняются. Если записи
     нет — создаётся под DEFAULT_ENGINE."""
-    now = datetime.utcnow().isoformat()
+    now = utcnow().isoformat()
     with _db() as conn:
         row = conn.execute(
             "SELECT cwd, engine FROM sessions WHERE chat_id = ? AND thread_id = ?",
@@ -103,13 +104,13 @@ def mark_session_start(chat_id: int, thread_id: int) -> None:
         conn.execute(
             "UPDATE sessions SET session_started_at = ? "
             "WHERE chat_id = ? AND thread_id = ?",
-            (datetime.utcnow().isoformat(), chat_id, thread_id),
+            (utcnow().isoformat(), chat_id, thread_id),
         )
 
 
 def touch_session(chat_id: int, thread_id: int) -> None:
     """Отметить активность в топике — продлевает текущий сеанс."""
-    now = datetime.utcnow().isoformat()
+    now = utcnow().isoformat()
     with _db() as conn:
         conn.execute(
             "UPDATE sessions SET last_activity_at = ?, updated_at = ? "
@@ -133,7 +134,7 @@ def close_session(chat_id: int, thread_id: int) -> bool:
         conn.execute(
             "UPDATE sessions SET last_activity_at = NULL, updated_at = ? "
             "WHERE chat_id = ? AND thread_id = ?",
-            (datetime.utcnow().isoformat(), chat_id, thread_id),
+            (utcnow().isoformat(), chat_id, thread_id),
         )
     return True
 
@@ -161,7 +162,7 @@ def _session_is_stale(last_activity_at: str | None) -> bool:
         logger.warning("bad last_activity_at=%r, treating session as stale",
                        last_activity_at)
         return True
-    return datetime.utcnow() - last > timedelta(minutes=SESSION_IDLE_MINUTES)
+    return utcnow() - last > timedelta(minutes=SESSION_IDLE_MINUTES)
 
 
 def _session_state_line(key: tuple[int, int]) -> str:
@@ -179,7 +180,7 @@ def _session_state_line(key: tuple[int, int]) -> str:
         last = datetime.fromisoformat(row[0])
     except ValueError:
         return "открыт (не удалось прочитать last_activity_at)"
-    idle_min = int((datetime.utcnow() - last).total_seconds() // 60)
+    idle_min = int((utcnow() - last).total_seconds() // 60)
     left = SESSION_IDLE_MINUTES - idle_min
     if left <= 0:
         return "протух (следующее сообщение откроет новый)"
@@ -277,7 +278,7 @@ def set_engine(
     Engine-проверка (поддерживается ли имя) — на стороне get_engine_by_name."""
     new_engine = get_engine_by_name(new_engine_name)
     new_id = new_engine.new_session_id()
-    now = datetime.utcnow().isoformat()
+    now = utcnow().isoformat()
     with _db() as conn:
         row = conn.execute(
             "SELECT cwd FROM sessions WHERE chat_id = ? AND thread_id = ?",
@@ -322,7 +323,7 @@ def set_mcp_playwright(chat_id: int, thread_id: int, enabled: bool) -> None:
     """Выставляет per-topic флаг браузера. Применяется со СЛЕДУЮЩЕГО сообщения:
     набор тулов движка меняется на лету, сессия и контекст сохраняются.
     Если записи топика ещё нет — создаёт под дефолтный движок."""
-    now = datetime.utcnow().isoformat()
+    now = utcnow().isoformat()
     with _db() as conn:
         row = conn.execute(
             "SELECT cwd, engine FROM sessions WHERE chat_id = ? AND thread_id = ?",
@@ -386,7 +387,7 @@ def set_persistent_for_engine(
         if enabled:
             raise RuntimeError(f"persistent is not supported for {engine_name}")
         return
-    now = datetime.utcnow().isoformat()
+    now = utcnow().isoformat()
     with _db() as conn:
         row = conn.execute(
             "SELECT cwd, engine FROM sessions WHERE chat_id = ? AND thread_id = ?",
@@ -407,16 +408,6 @@ def set_persistent_for_engine(
                 "WHERE chat_id = ? AND thread_id = ?",
                 (1 if enabled else 0, now, chat_id, thread_id),
             )
-
-
-def get_persistent_claude(chat_id: int, thread_id: int) -> bool:
-    """Backward-compatible helper for existing Claude persistent code."""
-    return get_persistent_for_engine(chat_id, thread_id, "claude")
-
-
-def set_persistent_claude(chat_id: int, thread_id: int, enabled: bool) -> None:
-    """Backward-compatible helper for existing Claude persistent code."""
-    set_persistent_for_engine(chat_id, thread_id, "claude", enabled)
 
 
 def update_actual_model(
@@ -467,7 +458,7 @@ def update_model_only(chat_id: int, thread_id: int, model: str | None) -> bool:
         cur = conn.execute(
             "UPDATE sessions SET model = ?, updated_at = ? "
             "WHERE chat_id = ? AND thread_id = ?",
-            (model, datetime.utcnow().isoformat(), chat_id, thread_id),
+            (model, utcnow().isoformat(), chat_id, thread_id),
         )
     return cur.rowcount == 1
 
@@ -479,7 +470,7 @@ def set_pending_summary(chat_id: int, thread_id: int, summary: str) -> None:
         conn.execute(
             "UPDATE sessions SET pending_summary = ?, updated_at = ? "
             "WHERE chat_id = ? AND thread_id = ?",
-            (summary, datetime.utcnow().isoformat(), chat_id, thread_id),
+            (summary, utcnow().isoformat(), chat_id, thread_id),
         )
 
 
@@ -506,7 +497,7 @@ def clear_pending_summary(chat_id: int, thread_id: int) -> None:
         conn.execute(
             "UPDATE sessions SET pending_summary = NULL, updated_at = ? "
             "WHERE chat_id = ? AND thread_id = ?",
-            (datetime.utcnow().isoformat(), chat_id, thread_id),
+            (utcnow().isoformat(), chat_id, thread_id),
         )
 
 
@@ -555,7 +546,7 @@ def build_context_handoff(key: tuple[int, int], old_engine_name: str) -> str:
 def set_cwd(chat_id: int, thread_id: int, cwd: str) -> None:
     """Создаёт запись, если её нет (session_id — новый id для дефолтного движка),
     либо обновляет cwd."""
-    now = datetime.utcnow().isoformat()
+    now = utcnow().isoformat()
     with _db() as conn:
         row = conn.execute(
             "SELECT session_id FROM sessions WHERE chat_id = ? AND thread_id = ?",
@@ -579,5 +570,5 @@ def clear_cwd(chat_id: int, thread_id: int) -> None:
     with _db() as conn:
         conn.execute(
             "UPDATE sessions SET cwd = NULL, updated_at = ? WHERE chat_id = ? AND thread_id = ?",
-            (datetime.utcnow().isoformat(), chat_id, thread_id),
+            (utcnow().isoformat(), chat_id, thread_id),
         )

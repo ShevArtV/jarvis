@@ -25,7 +25,6 @@ import os
 import re
 import tempfile
 import time
-from datetime import datetime
 
 from telegram import InputFile, Message
 from telegram.constants import ParseMode
@@ -41,6 +40,7 @@ from bot.settings import (
     TG_FILE_LIMIT_MB,
     TG_HARD_LIMIT,
 )
+from bot.timeutil import utcnow
 from bot.topics import (
     latest_topic_message_id,
     note_topic_message,
@@ -150,7 +150,7 @@ async def _send_manager_notice(
     # обработал свежие нотисы. С дедупом — один job на всю серию нотисов
     # пока адресат их не разгребёт.
     try:
-        now = datetime.utcnow().isoformat()
+        now = utcnow().isoformat()
         with _db() as conn:
             existing = conn.execute(
                 "SELECT COUNT(*) FROM jobs "
@@ -732,7 +732,7 @@ async def _send_claude_reply_legacy(
                     document=fh,
                     filename=(
                         f"{filename_prefix}_"
-                        f"{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.md"
+                        f"{utcnow().strftime('%Y%m%d_%H%M%S')}.md"
                     ),
                     caption=preview[:1024],
                 )

@@ -8,9 +8,9 @@ import json
 import os
 import sqlite3
 import time
-from datetime import datetime
 from typing import Any
 
+from bot.timeutil import utcnow
 from mcp_server import common
 from mcp_server.common import logger, mcp
 
@@ -162,7 +162,7 @@ def manager_set_engine(
         "session_id": row["session_id"],
     }
     new_session_id = common._new_session_id(engine)
-    now = datetime.utcnow().isoformat()
+    now = utcnow().isoformat()
 
     # Если переключаемся на тот же движок (только модель) — контекст сохраняется
     # автоматически (тот же session_id). transfer_context игнорируем.
@@ -261,7 +261,7 @@ def manager_set_browser(
 ) -> dict[str, Any]:
     """Persistently set the topic's mcp_playwright flag."""
     target_chat_id = chat_id if chat_id is not None else common._default_chat_id()
-    now = datetime.utcnow().isoformat()
+    now = utcnow().isoformat()
     with common._connect() as conn:
         row = conn.execute(
             "SELECT cwd, engine, topic_title, mcp_playwright FROM sessions "
@@ -374,7 +374,7 @@ def manager_create_topic(
     color_actual = int(result.get("icon_color", color))
 
     session_id = common._new_session_id(engine)
-    now = datetime.utcnow().isoformat()
+    now = utcnow().isoformat()
     with common._connect() as conn:
         conn.execute(
             "INSERT INTO sessions(chat_id, thread_id, session_id, cwd, engine, "
@@ -437,7 +437,7 @@ def manager_close_session(
 ) -> dict[str, Any]:
     """Close a topic's session: reset engine context, keep the topic."""
     target_chat_id = chat_id if chat_id is not None else common._default_chat_id()
-    now = datetime.utcnow().isoformat()
+    now = utcnow().isoformat()
 
     with common._connect() as conn:
         common._ensure_close_requested_column(conn)
@@ -760,7 +760,7 @@ async def manager_delete_topic(
         )
         logger.info("manager_delete_topic: topic already gone (%s)", exc)
 
-    now = datetime.utcnow().isoformat()
+    now = utcnow().isoformat()
     with common._connect() as conn:
         cancelled_jobs = [
             r[0] for r in conn.execute(

@@ -16,12 +16,12 @@ import asyncio
 import json
 import logging
 import os
-from datetime import datetime
 
 from telegram import Update
 
 from bot.db import _db
 from bot.settings import int_env
+from bot.timeutil import utcnow
 from engines.process_control import terminate_process_tree
 
 logger = logging.getLogger(__name__)
@@ -119,7 +119,7 @@ def save_message_context(chat_id: int, message_id: int, ctx: dict) -> None:
             "INSERT OR REPLACE INTO messages(chat_id, message_id, context_json, created_at) "
             "VALUES (?, ?, ?, ?)",
             (chat_id, message_id, json.dumps(ctx, ensure_ascii=False),
-             datetime.utcnow().isoformat()),
+             utcnow().isoformat()),
         )
 
 

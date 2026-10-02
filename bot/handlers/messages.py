@@ -12,7 +12,6 @@ import json
 import logging
 import os
 import uuid
-from datetime import datetime
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
@@ -46,6 +45,7 @@ from bot.sessions import (
     update_session_id,
 )
 from bot.settings import CLAUDE_CWD, MEDIA_DIR
+from bot.timeutil import utcnow
 from bot.topics import (
     _key,
     _kill_persistent_worker,
@@ -654,7 +654,7 @@ async def _download_tg_file(update: Update, file_id: str, suggested_name: str) -
     os.makedirs(dest_dir, exist_ok=True)
     dest = os.path.join(
         dest_dir,
-        f"{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{safe_name}",
+        f"{utcnow().strftime('%Y%m%d_%H%M%S')}_{safe_name}",
     )
     await tg_file.download_to_drive(dest)
     return dest

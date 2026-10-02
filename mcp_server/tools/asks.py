@@ -7,9 +7,9 @@ import json
 import re
 import sqlite3
 import time
-from datetime import datetime
 from typing import Any
 
+from bot.timeutil import utcnow
 from mcp_server import common
 from mcp_server.common import logger, mcp
 
@@ -63,7 +63,7 @@ def _touch_ask(ask_id: int) -> None:
         with common._connect() as conn:
             conn.execute(
                 "UPDATE ask_requests SET polled_at = ? WHERE id = ?",
-                (datetime.utcnow().isoformat(), ask_id),
+                (utcnow().isoformat(), ask_id),
             )
     except sqlite3.OperationalError:
         # Бот ещё не перезапущен и колонки нет — работаем без пульса.
@@ -75,7 +75,7 @@ def _expire_ask(ask_id: int) -> None:
         conn.execute(
             "UPDATE ask_requests SET status = 'timed_out', answered_at = ? "
             "WHERE id = ? AND status = 'pending'",
-            (datetime.utcnow().isoformat(), ask_id),
+            (utcnow().isoformat(), ask_id),
         )
 
 
@@ -149,7 +149,7 @@ async def ask_user(
             ),
         }
 
-    now = datetime.utcnow().isoformat()
+    now = utcnow().isoformat()
 
     with common._connect() as conn:
         cur = conn.execute(

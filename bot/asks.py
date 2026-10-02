@@ -19,6 +19,7 @@ from telegram.ext import ContextTypes
 
 from bot.db import _db
 from bot.formatting import _html_escape
+from bot.timeutil import utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +38,7 @@ def get_pending_ask(chat_id: int, thread_id: int) -> dict | None:
     обычным ходом (с grace-пометкой), а не в пустоту. ``polled_at IS NULL`` —
     вопрос от MCP-сервера старой версии, пульса он не пишет: считаем живым.
     """
-    stale_before = (datetime.utcnow() - timedelta(seconds=POLL_STALE_SECONDS)).isoformat()
+    stale_before = (utcnow() - timedelta(seconds=POLL_STALE_SECONDS)).isoformat()
     with _db() as conn:
         conn.row_factory = sqlite3.Row
         cur = conn.execute(
@@ -80,7 +81,7 @@ def get_recent_timed_out_ask(
         expired_at = datetime.fromisoformat(ask["answered_at"] or ask["created_at"])
     except (TypeError, ValueError):
         return None
-    if datetime.utcnow() - expired_at > timedelta(minutes=within_minutes):
+    if utcnow() - expired_at > timedelta(minutes=within_minutes):
         return None
     return ask
 
@@ -94,7 +95,7 @@ def answer_ask(
             "UPDATE ask_requests SET status = 'answered', answer = ?, "
             "option_index = ?, via = ?, answered_at = ? "
             "WHERE id = ? AND status = 'pending'",
-            (answer, option_index, via, datetime.utcnow().isoformat(), ask_id),
+            (answer, option_index, via, utcnow().isoformat(), ask_id),
         )
     return cur.rowcount == 1
 
@@ -105,19 +106,9 @@ def mark_ask_late_answered(ask_id: int, answer: str) -> bool:
         cur = conn.execute(
             "UPDATE ask_requests SET status = 'answered_late', answer = ?, "
             "via = 'text_late', answered_at = ? WHERE id = ? AND status = 'timed_out'",
-            (answer, datetime.utcnow().isoformat(), ask_id),
+            (answer, utcnow().isoformat(), ask_id),
         )
     return cur.rowcount == 1
-
-
-def ask_question_text(question: str, options: list[str] | None) -> str:
-    """Как вопрос выглядит в топике. Используется и ботом, и MCP-сервером."""
-    body = f"❓ {question}"
-    if not options:
-        body += "\n\n<i>Ответь сообщением в этот топик.</i>"
-    else:
-        body += "\n\n<i>Выбери вариант или ответь сообщением.</i>"
-    return body
 
 
 async def _mark_ask_answered(chat, ask: dict, answer: str) -> None:
