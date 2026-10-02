@@ -21,7 +21,7 @@ BUILTIN_TOOL_MODULES = (
 
 def _plugin_names() -> list[str]:
     raw = common._env_or_dotenv("JARVIS_PLUGINS") or ""
-    return [name.strip() for name in raw.split(",") if name.strip()]
+    return [name.strip().lower() for name in raw.split(",") if name.strip()]
 
 
 def load_tools() -> None:
