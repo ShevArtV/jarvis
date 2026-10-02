@@ -19,7 +19,7 @@ from unittest.mock import patch
 import httpx
 
 from bot import db as bot_db
-from integrations import queuewarden_bot as qw
+from plugins.queuewarden import notifications as qw
 
 TOPIC = (-1001, 77)
 BASE = "https://qw.test"

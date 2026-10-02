@@ -24,14 +24,14 @@ import imaplib
 import json
 import logging
 import os
-import sqlite3
 from collections.abc import Awaitable, Callable
 from datetime import datetime
 from email.header import decode_header, make_header
 
+from bot.db import _db
+
 logger = logging.getLogger(__name__)
 
-_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot_state.db")
 
 NoticeCallback = Callable[[str, str], Awaitable[None]]
 
@@ -39,16 +39,13 @@ NoticeCallback = Callable[[str, str], Awaitable[None]]
 def _mark_seen(account_key: str, uid: int) -> bool:
     """Вставляет UID в imap_state. Возвращает True если UID новый."""
     try:
-        conn = sqlite3.connect(_DB_PATH)
-        conn.execute("PRAGMA journal_mode=WAL")
-        with conn:
+        with _db() as conn:
             conn.execute(
                 "INSERT OR IGNORE INTO imap_state(account, uid, seen_at) "
                 "VALUES (?, ?, ?)",
                 (account_key, uid, datetime.utcnow().isoformat()),
             )
             new = conn.execute("SELECT changes()").fetchone()[0]
-        conn.close()
         return bool(new)
     except Exception:
         logger.exception("imap: _mark_seen failed account=%s uid=%d", account_key, uid)

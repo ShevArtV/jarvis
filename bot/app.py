@@ -82,9 +82,9 @@ from bot.workers import (
 )
 from config import ALLOWED_USER_IDS, TELEGRAM_TOKEN
 from engines import prewarm_models
-from imap_watcher import run_imap_watcher
-from integrations.queuewarden_bot import queuewarden_notifications_worker
-from webhook_server import run_webhook_server
+from plugins.imap.watcher import run_imap_watcher
+from plugins.queuewarden.notifications import queuewarden_notifications_worker
+from plugins.webhook.server import run_webhook_server
 
 logger = logging.getLogger(__name__)
 

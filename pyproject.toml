@@ -22,4 +22,4 @@ ignore = [
 "tests/*" = ["B"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["bot", "engines", "integrations", "scripts", "config", "telegram_bot", "webhook_server", "imap_watcher"]
+known-first-party = ["bot", "engines", "plugins", "mcp_server", "scripts", "config", "telegram_bot"]

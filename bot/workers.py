@@ -29,7 +29,6 @@ from bot.queues import (
     finish_agent_trigger,
     finish_job,
 )
-from bot.reminders import compute_next_fire, parse_reminder_schedule
 from bot.sessions import clear_close_request, close_session, get_session
 from bot.settings import CLAUDE_CWD
 from bot.topics import (
@@ -42,7 +41,8 @@ from bot.topics import (
     resolve_teamlead_topic,
 )
 from engines.process_control import terminate_process_tree
-from integrations.queuewarden_bot import prune_attachments
+from plugins.queuewarden.notifications import prune_attachments
+from plugins.reminders.schedule import compute_next_fire, parse_reminder_schedule
 
 logger = logging.getLogger(__name__)
 

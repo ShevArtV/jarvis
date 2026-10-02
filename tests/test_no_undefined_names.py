@@ -67,9 +67,9 @@ class NoUndefinedNamesTest(unittest.TestCase):
         paths = [
             REPO / "telegram_bot.py",
             REPO / "config.py",
-            REPO / "webhook_server.py",
-            REPO / "imap_watcher.py",
             *sorted((REPO / "engines").glob("*.py")),
+            *sorted((REPO / "plugins").rglob("*.py")),
+            *sorted((REPO / "mcp_server").rglob("*.py")),
             *sorted((REPO / "scripts").glob("*.py")),
         ]
         self.assertEqual(self._fatal_for([p for p in paths if p.is_file()]), [])

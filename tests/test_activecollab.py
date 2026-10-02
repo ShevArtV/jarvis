@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from bot import db as bot_db
-from integrations.activecollab import ActiveCollabClient
+from plugins.activecollab.client import ActiveCollabClient
 from scripts import jarvis_mcp_server as manager_mcp
 
 

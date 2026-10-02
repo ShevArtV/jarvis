@@ -651,7 +651,7 @@ Per-topic MCP — часть контракта `Engine.call_stream` (см.
 
 ### QueueWarden: канал уведомлений «Бот»
 
-`integrations/queuewarden_bot.py` держит long-poll `GET <url>/api/bot/notifications?wait=25`
+`plugins/queuewarden/notifications.py` держит long-poll `GET <url>/api/bot/notifications?wait=25`
 токеном учётки-моста по каждой установке QW — отдельной задачей, со своим backoff:
 
 ```
@@ -805,9 +805,7 @@ journalctl --user -u jarvis-bot -f
 Прочее:
 
 - `config.py` — чтение `.env`, токен и whitelist.
-- `webhook_server.py` — HTTP-приём внешних уведомлений.
-- `imap_watcher.py` — вотчер почты (см. `JARVIS_IMAP_*`).
-- `integrations/queuewarden_bot.py` — long-poll уведомлений QueueWarden (см. выше).
+- `plugins/` — подключаемые интеграции (QueueWarden, ActiveCollab, напоминания, IMAP, webhook).
 - `engines/` — адаптеры CLI, Playwright MCP, topic-MCP, кэш моделей (см. выше).
 - `scripts/jarvis_mcp_server.py` — Jarvis Manager MCP (`ask_user`, `manager_*`).
 - `bot_state.db` — sqlite: сессии, `jobs`, `agent_triggers`, `messages_log`,

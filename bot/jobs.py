@@ -465,7 +465,7 @@ async def _process_agent_trigger(app: Application, trigger: dict) -> tuple[bool,
     # промолчать, если оператору писать не о чем.
     allow_silent = source == "queuewarden"
     if allow_silent:
-        from integrations.queuewarden_bot import build_batch_prompt
+        from plugins.queuewarden.notifications import build_batch_prompt
 
         text = build_batch_prompt(trigger.get("texts") or [text])
     try:

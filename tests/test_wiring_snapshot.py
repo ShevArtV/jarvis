@@ -106,14 +106,14 @@ EXPECTED_LAYOUT = {
     ],
     "bot.llm": ["build_system_prefix", "call_llm_stream"],
     # Импортируется MCP-сервером — ломать адрес нельзя.
-    "bot.reminders": ["parse_reminder_schedule", "compute_next_fire"],
+    "plugins.reminders.schedule": ["parse_reminder_schedule", "compute_next_fire"],
     "bot.jobs": ["_run_manager_job", "_run_spawn", "_process_agent_trigger"],
     "bot.workers": [
         "cleanup_worker", "reminders_worker", "persistent_reaper",
         "close_requests_worker", "health_worker", "jobs_worker",
         "agent_triggers_worker", "_apply_close_request",
     ],
-    "integrations.queuewarden_bot": ["queuewarden_notifications_worker"],
+    "plugins.queuewarden.notifications": ["queuewarden_notifications_worker"],
     "bot.app": ["build_application", "_post_init", "BOT_COMMANDS"],
     "telegram_bot": ["main"],
 }

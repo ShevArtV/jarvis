@@ -13,14 +13,14 @@ import hmac
 import json
 import logging
 import os
-import sqlite3
 from collections.abc import Awaitable, Callable
 from datetime import datetime
 from urllib.parse import parse_qs
 
+from bot.db import _db
+
 logger = logging.getLogger(__name__)
 
-_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot_state.db")
 
 NoticeCallback = Callable[[str, str], Awaitable[None]]
 
@@ -35,16 +35,13 @@ _BITRIX_EVENTS: dict[str, str] = {
 
 def _log_event(source: str, event: str, payload: dict) -> None:
     try:
-        conn = sqlite3.connect(_DB_PATH)
-        conn.execute("PRAGMA journal_mode=WAL")
-        with conn:
+        with _db() as conn:
             conn.execute(
                 "INSERT INTO webhook_log(source, event, payload, received_at) "
                 "VALUES (?, ?, ?, ?)",
                 (source, event, json.dumps(payload, ensure_ascii=False),
                  datetime.utcnow().isoformat()),
             )
-        conn.close()
     except Exception:
         logger.exception("webhook: log failed source=%s event=%s", source, event)
 

@@ -111,7 +111,7 @@ def _activecollab_client():
             "ACTIVE_COLLAB_TOKEN in Jarvis .env"
         )
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-    from integrations.activecollab import ActiveCollabClient  # type: ignore
+    from plugins.activecollab.client import ActiveCollabClient  # type: ignore
     return ActiveCollabClient(url, token)
 
 
@@ -1033,7 +1033,7 @@ def manager_remind_add(
     # Парсим schedule и считаем next_fire_at через python из bot-модуля
     # (там же логика TZ). Импортируем lazy.
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-    from bot.reminders import compute_next_fire, parse_reminder_schedule  # type: ignore
+    from plugins.reminders.schedule import compute_next_fire, parse_reminder_schedule  # type: ignore
 
     parsed = parse_reminder_schedule(schedule)
     next_fire = compute_next_fire(parsed)
@@ -1260,7 +1260,7 @@ def manager_remind_toggle(reminder_id: int, enabled: bool) -> dict[str, Any]:
         raise RuntimeError(f"reminder {reminder_id} not found")
     if enabled:
         sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-        from bot.reminders import compute_next_fire, parse_reminder_schedule  # type: ignore
+        from plugins.reminders.schedule import compute_next_fire, parse_reminder_schedule  # type: ignore
         try:
             parsed = parse_reminder_schedule(row["schedule"])
             next_fire = compute_next_fire(parsed)
