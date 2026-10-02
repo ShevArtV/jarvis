@@ -124,7 +124,7 @@ class ClaudeUsageAggregationTest(unittest.TestCase):
                 "\n".join(json.dumps(row) for row in (duplicate_a, duplicate_b, unique)),
                 encoding="utf-8",
             )
-            with patch.dict(os.environ, {"HOME": tmp}):
+            with patch("pathlib.Path.home", return_value=Path(tmp)):
                 usage = aggregate_claude_usage(session_id, cwd)
 
         totals = usage.by_model["claude-sonnet-5"]

@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from engines.model_cache import cached_models, cli_models, prewarm, split_models
-from engines.process_control import terminate_process_tree
+from engines.process_control import feed_stdin, spawn, terminate_process_tree
 
 logger = logging.getLogger(__name__)
 
@@ -311,7 +311,6 @@ class OpenCodeEngine:
             cmd.extend(["--variant", variant])
         if resume_mode:
             cmd.extend(["--session", session_id])
-        cmd.append(full_prompt)
 
         logger.info(
             "opencode start: key=%s session=%s mode=%s cwd=%s prompt_len=%d spawn_id=%s",
@@ -333,18 +332,12 @@ class OpenCodeEngine:
             env["OPENCODE_CONFIG"] = pw_config_path
 
         try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=effective_cwd,
-                env=env,
-                start_new_session=True,
-                limit=10 * 1024 * 1024,
-            )
+            proc = await spawn(cmd, cwd=effective_cwd, stdin=asyncio.subprocess.PIPE, env=env)
         except FileNotFoundError:
             _cleanup_tempfile(pw_config_path)
             return False, f"`{OPENCODE_BIN}` не найден в PATH.", session_id, None
+
+        await feed_stdin(proc, full_prompt)
 
         if is_spawn:
             spawn_procs[(key[0], key[1], spawn_id)] = proc

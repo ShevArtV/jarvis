@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -297,7 +298,8 @@ class EngineRenderingTest(TopicMcpTestBase):
 
         self.assertEqual(flags[0], "--profile")
         self.assertNotIn("manager-token", "\n".join(flags))
-        self.assertEqual(mode, 0o600)
+        if os.name != "nt":  # права POSIX на Windows не применяются
+            self.assertEqual(mode, 0o600)
         self.assertIn("[mcp_servers.mxboard]", profile_text)
         self.assertIn("manager-token", profile_text)
         self.assertNotIn("agent-token", profile_text)

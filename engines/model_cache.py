@@ -19,6 +19,8 @@ import threading
 import time
 from collections.abc import Callable, Iterable
 
+from engines.process_control import run_cli
+
 logger = logging.getLogger(__name__)
 
 MODELS_TTL = float(os.environ.get("JARVIS_MODELS_TTL", "600"))
@@ -63,7 +65,7 @@ def dedup(models: Iterable[str]) -> list[str]:
 def cli_models(cmd: list[str], timeout: float = 20.0) -> list[str]:
     """Спросить у CLI его список моделей. Любая осечка → пустой список."""
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        proc = run_cli(cmd, capture_output=True, timeout=timeout)
     except (OSError, subprocess.TimeoutExpired):
         logger.warning("model discovery failed: %s", " ".join(cmd), exc_info=True)
         return []

@@ -28,6 +28,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from engines.process_control import run_cli
+
 logger = logging.getLogger(__name__)
 
 HOME = Path.home()
@@ -173,7 +175,7 @@ def _disable_claude(claude_bin: str) -> None:
     if shutil.which(claude) is None and not Path(claude).exists():
         # No claude binary — nothing global to clean.
         return
-    subprocess.run(
+    run_cli(
         [claude, "mcp", "remove", "--scope", "user", SERVER_NAME],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,

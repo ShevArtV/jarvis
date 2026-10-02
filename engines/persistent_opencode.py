@@ -34,7 +34,7 @@ from engines.opencode_engine import (
     _opencode_mcp_config,
     _tool_summary,
 )
-from engines.process_control import terminate_process_tree
+from engines.process_control import spawn, terminate_process_tree
 
 logger = logging.getLogger(__name__)
 
@@ -400,15 +400,7 @@ async def start_persistent(
         key, session_id, effective_cwd, model,
     )
     try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-            cwd=effective_cwd,
-            env=env,
-            start_new_session=True,
-            limit=10 * 1024 * 1024,
-        )
+        proc = await spawn(cmd, cwd=effective_cwd, stderr=asyncio.subprocess.STDOUT, env=env)
     except Exception:
         _cleanup_tempfile(config_path)
         raise

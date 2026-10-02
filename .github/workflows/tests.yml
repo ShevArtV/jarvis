@@ -12,12 +12,13 @@ concurrency:
 
 jobs:
   tests:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       # Нужны результаты по ВСЕМ версиям: иначе падение на 3.11 скроет
       # состояние 3.12, и придётся гадать, версия виновата или код.
       fail-fast: false
       matrix:
+        os: [ubuntu-latest, windows-latest]
         python-version: ['3.11', '3.12']
 
     steps:
@@ -35,6 +36,8 @@ jobs:
       # и это часть проверки: тесты обязаны работать на чистой машине, иначе
       # они проверяют не код, а окружение автора.
       - name: Unit tests
+        env:
+          PYTHONUTF8: '1'
         run: python -m unittest discover -s tests -t . -v
 
       - name: Lint (ruff)
@@ -50,6 +53,7 @@ jobs:
       # без внешних MCP-серверов. Регрессия здесь означает, что проект снова
       # требует личной настройки автора, чтобы просто запуститься.
       - name: Fresh install smoke
+        shell: bash
         run: |
           printf 'TELEGRAM_TOKEN=123456:fake\nALLOWED_USER_IDS=1\n' > .env
           python - <<'PY'

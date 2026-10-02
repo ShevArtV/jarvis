@@ -29,7 +29,7 @@ from contextvars import ContextVar
 from pathlib import Path
 
 from engines.model_cache import cached_models, prewarm, split_models
-from engines.process_control import terminate_process_tree
+from engines.process_control import feed_stdin, spawn, terminate_process_tree
 
 logger = logging.getLogger(__name__)
 
@@ -288,7 +288,7 @@ class CodexEngine:
                 CODEX_BIN, *global_flags, "exec", "resume",
                 *shared_flags,
                 *model_flags,
-                session_id, full_prompt,
+                session_id, "-",
             ]
         else:
             # Новая сессия: можем (и хотим) явно задать sandbox и cwd.
@@ -298,7 +298,7 @@ class CodexEngine:
                 *model_flags,
                 "--sandbox", "danger-full-access",
                 "-C", effective_cwd,
-                full_prompt,
+                "-",
             ]
 
         logger.info(
@@ -317,20 +317,15 @@ class CodexEngine:
             )
 
         try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=effective_cwd,
-                start_new_session=True,
-                limit=10 * 1024 * 1024,
-            )
+            proc = await spawn(cmd, cwd=effective_cwd, stdin=asyncio.subprocess.PIPE)
         except FileNotFoundError:
             _cleanup_paths(mcp_cleanup_paths)
             return False, f"`{CODEX_BIN}` не найден в PATH.", session_id, None
         except Exception:
             _cleanup_paths(mcp_cleanup_paths)
             raise
+
+        await feed_stdin(proc, full_prompt)
 
         if is_spawn:
             spawn_procs[(key[0], key[1], spawn_id)] = proc

@@ -246,7 +246,8 @@ def _estimate_tokens_from_bytes(size: int | None) -> int | None:
 
 
 def _claude_sessions_dir_for(cwd: str) -> Path:
-    encoded = re.sub(r"[/.]+", "-", cwd)
+    # Та же кодировка, что у Claude CLI и engines.claude_engine._sessions_dir_for.
+    encoded = re.sub(r"[^A-Za-z0-9]", "-", cwd)
     return Path.home() / ".claude" / "projects" / encoded
 
 

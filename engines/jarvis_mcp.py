@@ -17,6 +17,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from engines.process_control import run_cli
+
 logger = logging.getLogger(__name__)
 
 HOME = Path.home()
@@ -25,7 +27,9 @@ SERVER_NAME = os.environ.get("JARVIS_MCP_NAME", "jarvis")
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_SCRIPT = REPO_ROOT / "scripts" / "jarvis_mcp_server.py"
 DEFAULT_DB = REPO_ROOT / "bot_state.db"
-DEFAULT_PYTHON = REPO_ROOT / "venv" / "bin" / "python"
+DEFAULT_PYTHON = REPO_ROOT / "venv" / (
+    "Scripts/python.exe" if sys.platform == "win32" else "bin/python"
+)
 
 CODEX_CONFIG = Path(
     os.environ.get("CODEX_CONFIG", HOME / ".codex" / "config.toml")
@@ -166,13 +170,13 @@ def _configure_claude(claude_bin: str, python: str, args: list[str]) -> None:
         {"type": "stdio", "command": python, "args": args},
         ensure_ascii=False,
     )
-    subprocess.run(
+    run_cli(
         [claude, "mcp", "remove", "--scope", "user", SERVER_NAME],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         check=False,
     )
-    result = subprocess.run(
+    result = run_cli(
         [claude, "mcp", "add-json", "--scope", "user", SERVER_NAME, server_json],
         text=True,
         capture_output=True,

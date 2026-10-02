@@ -22,7 +22,7 @@ from engines.codex_engine import (
     CodexEngine,
     _is_placeholder,
 )
-from engines.process_control import terminate_process_tree
+from engines.process_control import spawn, terminate_process_tree
 
 logger = logging.getLogger(__name__)
 
@@ -471,15 +471,7 @@ async def start_persistent(
         model,
     )
     try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=effective_cwd,
-            start_new_session=True,
-            limit=10 * 1024 * 1024,
-        )
+        proc = await spawn(cmd, cwd=effective_cwd, stdin=asyncio.subprocess.PIPE)
     except Exception:
         from engines.topic_mcp import cleanup_codex_profile
 

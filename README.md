@@ -75,6 +75,8 @@ cp .env.example .env
 # отредактировать .env: TELEGRAM_TOKEN + ALLOWED_USER_IDS
 ```
 
+На Windows — те же шаги в PowerShell, см. [docs/windows.md](docs/windows.md).
+
 Убедись, что `claude` доступен в PATH и авторизован:
 
 ```bash

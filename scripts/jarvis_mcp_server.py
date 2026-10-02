@@ -670,7 +670,7 @@ def manager_create_topic(
     title = title.strip()
     if not title:
         raise ValueError("title is required")
-    if not cwd or not cwd.startswith("/"):
+    if not cwd or not os.path.isabs(cwd):
         raise ValueError("cwd must be an absolute path")
     engine = engine.strip().lower()
     if engine not in {"claude", "codex", "opencode"}:

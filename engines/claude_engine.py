@@ -11,11 +11,13 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
 import re
 import subprocess
+import tempfile
 import time
 import uuid
 from collections.abc import Awaitable, Callable
@@ -23,7 +25,7 @@ from contextvars import ContextVar
 from pathlib import Path
 
 from engines.model_cache import cached_models, prewarm, remember_labels, split_models
-from engines.process_control import terminate_process_tree
+from engines.process_control import feed_stdin, pid_alive, run_cli, spawn, terminate_process_tree
 
 logger = logging.getLogger(__name__)
 
@@ -53,10 +55,25 @@ CURRENT_MODEL: ContextVar[str | None] = ContextVar("claude_model", default=None)
 
 
 def _sessions_dir_for(cwd: str) -> Path:
-    """~/.claude/projects/<encoded-cwd>/  (Claude CLI заменяет '/' и '.' на '-':
-    /home/user/projects/visa-center.ru → -home-user-projects-visa-center-ru)."""
-    encoded = re.sub(r"[/.]+", "-", cwd)
+    """~/.claude/projects/<encoded-cwd>/. Claude CLI заменяет каждый символ, кроме
+    латинских букв и цифр, на '-': /home/user/visa-center.ru → -home-user-visa-center-ru,
+    C:\\Users\\me\\proj → C--Users-me-proj."""
+    encoded = re.sub(r"[^A-Za-z0-9]", "-", cwd)
     return Path.home() / ".claude" / "projects" / encoded
+
+
+def _system_prompt_file(text: str) -> str:
+    """Файл для --append-system-prompt-file. Многострочный текст в argv ломается
+    на Windows (cmd.exe) и упирается в лимит длины аргумента. Имя — хеш
+    содержимого: одинаковый промпт пишется один раз."""
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+    path = Path(tempfile.gettempdir()) / "jarvis-prompts" / f"{digest}.txt"
+    if not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(f".{os.getpid()}.tmp")
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, path)
+    return str(path)
 
 
 def _mcp_config_flags(mcp_playwright: bool, mcp_topic_role: str | None) -> list[str]:
@@ -118,8 +135,9 @@ _MCP_ICONS = {"ask_user": "❓", "codegraph_explore": "🔎", "kb_explore": "�
 
 def _short_value(key: str, value: object, cwd: str | None) -> str:
     text = " ".join(str(value).split())
-    if key in _PATH_KEYS and cwd and text.startswith(cwd.rstrip("/") + "/"):
-        text = text[len(cwd.rstrip("/")) + 1:]
+    root = (cwd or "").rstrip("/\\")
+    if key in _PATH_KEYS and root and text.startswith(root) and text[len(root):len(root) + 1] in ("/", "\\"):
+        text = text[len(root) + 1:]
     return text[:120]
 
 
@@ -345,7 +363,7 @@ async def start_persistent(
         "--input-format", "stream-json",
         "--output-format", "stream-json",
         "--verbose",
-        "--append-system-prompt", append_system,
+        "--append-system-prompt-file", _system_prompt_file(append_system),
         *mcp_flags,
         *model_flags,
         *session_flags,
@@ -354,15 +372,7 @@ async def start_persistent(
         "persistent claude start: key=%s session=%s mode=%s cwd=%s",
         key, session_id, "resume" if resume_mode else "new", cwd,
     )
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        cwd=cwd,
-        start_new_session=True,
-        limit=10 * 1024 * 1024,
-    )
+    proc = await spawn(cmd, cwd=cwd, stdin=asyncio.subprocess.PIPE)
     worker = PersistentClaudeWorker(key, proc, session_id, cwd)
     worker.reader_task = asyncio.create_task(worker._read_loop())
     return worker
@@ -415,10 +425,10 @@ def _models_from_claude_init(timeout: float = 30.0) -> list[str]:
         "request": {"subtype": "initialize"},
     })
     try:
-        proc = subprocess.run(
+        proc = run_cli(
             [CLAUDE_BIN, "-p", "--input-format", "stream-json",
              "--output-format", "stream-json", "--verbose"],
-            input=request + "\n", capture_output=True, text=True, timeout=timeout,
+            input=request + "\n", capture_output=True, timeout=timeout,
         )
     except (OSError, subprocess.TimeoutExpired):
         logger.warning("claude model discovery failed", exc_info=True)
@@ -484,22 +494,13 @@ class ClaudeEngine:
             return
         for p in sessions_dir.glob("*.json"):
             try:
-                data = json.loads(p.read_text())
+                data = json.loads(p.read_text(encoding="utf-8"))
             except Exception:
                 continue
             if data.get("sessionId") != session_id:
                 continue
             pid = data.get("pid")
-            alive = False
-            if isinstance(pid, int):
-                try:
-                    os.kill(pid, 0)
-                    alive = True
-                except ProcessLookupError:
-                    alive = False
-                except PermissionError:
-                    alive = True  # чужой процесс, не трогаем
-            if not alive:
+            if not (isinstance(pid, int) and pid_alive(pid)):
                 try:
                     p.unlink()
                     logger.info(
@@ -561,12 +562,10 @@ class ClaudeEngine:
             "--input-format", "text",
             "--output-format", "stream-json",
             "--verbose",
-            "--append-system-prompt", append_system,
+            "--append-system-prompt-file", _system_prompt_file(append_system),
             *mcp_flags,
             *model_flags,
             *session_flags,
-            "--",
-            prompt,
         ]
 
         logger.info(
@@ -584,16 +583,11 @@ class ClaudeEngine:
             )
 
         try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=effective_cwd,
-                start_new_session=True,
-                limit=10 * 1024 * 1024,
-            )
+            proc = await spawn(cmd, cwd=effective_cwd, stdin=asyncio.subprocess.PIPE)
         except FileNotFoundError:
             return False, f"`{CLAUDE_BIN}` не найден в PATH.", session_id, None
+
+        await feed_stdin(proc, prompt)
 
         if is_spawn:
             spawn_procs[(key[0], key[1], spawn_id)] = proc
