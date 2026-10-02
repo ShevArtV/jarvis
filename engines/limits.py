@@ -16,7 +16,7 @@ import os
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -121,7 +121,7 @@ def claude_limits() -> EngineLimits:
             result.windows = _claude_windows(payload)
             result.live = True
             result.source = CLAUDE_USAGE_URL
-            result.fetched_at = datetime.now(timezone.utc)
+            result.fetched_at = datetime.now(UTC)
             if not result.windows:
                 result.note = "API ответил, но знакомых окон в ответе нет"
             return result
@@ -169,7 +169,7 @@ def _claude_limits_from_cache() -> EngineLimits:
 
     fetched_at_ms = cached.get("fetchedAtMs")
     if isinstance(fetched_at_ms, (int, float)):
-        result.fetched_at = datetime.fromtimestamp(fetched_at_ms / 1000, tz=timezone.utc)
+        result.fetched_at = datetime.fromtimestamp(fetched_at_ms / 1000, tz=UTC)
 
     utilization = cached.get("utilization")
     if not isinstance(utilization, dict):
@@ -281,7 +281,7 @@ def _codex_api_windows(payload: dict[str, Any]) -> list[LimitWindow]:
                     name=f"{name} · {suffix}" if suffix else name,
                     used_percent=_as_float(window.get("used_percent")),
                     resets_at=(
-                        datetime.fromtimestamp(reset_at, tz=timezone.utc)
+                        datetime.fromtimestamp(reset_at, tz=UTC)
                         if isinstance(reset_at, (int, float)) else None
                     ),
                 )
@@ -328,7 +328,7 @@ def codex_limits() -> EngineLimits:
             result.windows = _codex_api_windows(payload)
             result.live = True
             result.source = CODEX_USAGE_URL
-            result.fetched_at = datetime.now(timezone.utc)
+            result.fetched_at = datetime.now(UTC)
             if not result.windows:
                 result.note = "API ответил, но окон лимитов в ответе нет"
             return result
@@ -348,7 +348,7 @@ def _codex_limits_from_rollouts() -> EngineLimits:
         result.note = "каталог сессий codex не найден"
         return result
 
-    cutoff = datetime.now(timezone.utc).timestamp() - 30 * 86400
+    cutoff = datetime.now(UTC).timestamp() - 30 * 86400
     latest_path: Path | None = None
     latest_mtime = -1.0
     try:
@@ -423,7 +423,7 @@ def _codex_limits_from_rollouts() -> EngineLimits:
                     name=name,
                     used_percent=_as_float(window.get("used_percent")),
                     resets_at=(
-                        datetime.fromtimestamp(resets_at, tz=timezone.utc)
+                        datetime.fromtimestamp(resets_at, tz=UTC)
                         if isinstance(resets_at, (int, float))
                         else None
                     ),
@@ -535,7 +535,7 @@ def _format_window_line(window: LimitWindow, now: datetime) -> str:
 def format_limits_block(items: list[EngineLimits], now: datetime | None = None) -> str:
     """Markdown-сводка: заголовок движка и по строке на окно лимита."""
     if now is None:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
     blocks: list[str] = []
     for item in items:
         lines = [f"**{item.engine}**"]

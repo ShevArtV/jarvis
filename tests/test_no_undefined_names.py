@@ -18,7 +18,6 @@ import unittest
 
 try:
     from pyflakes.api import check
-    from pyflakes.reporter import Reporter
 except ImportError:  # pragma: no cover - без pyflakes проверка просто пропускается
     check = None
 

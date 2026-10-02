@@ -17,8 +17,9 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager
-from typing import Protocol, Awaitable, Callable, Iterator
+from typing import Protocol
 
 logger = logging.getLogger(__name__)
 

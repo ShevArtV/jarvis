@@ -49,11 +49,11 @@ async def terminate_process_tree(
     try:
         await asyncio.wait_for(proc.wait(), timeout=terminate_timeout)
         return
-    except asyncio.TimeoutError:
+    except TimeoutError:
         pass
 
     signal_process_group(proc, signal.SIGKILL)
     try:
         await asyncio.wait_for(proc.wait(), timeout=kill_timeout)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         pass

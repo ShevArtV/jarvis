@@ -11,7 +11,6 @@ from bot.topics import (
     resolve_topic_role,
 )
 
-
 SERVICE_ENV = {
     "JARVIS_MANAGER_CHAT_ID",
     "JARVIS_MANAGER_THREAD_ID",

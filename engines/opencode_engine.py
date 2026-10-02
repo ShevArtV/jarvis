@@ -14,9 +14,10 @@ import os
 import tempfile
 import time
 import uuid
+from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any
 
 from engines.model_cache import cached_models, cli_models, prewarm, split_models
 from engines.process_control import terminate_process_tree
@@ -482,7 +483,7 @@ class OpenCodeEngine:
         try:
             try:
                 await asyncio.wait_for(read_stream(), timeout=OPENCODE_TIMEOUT)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 await terminate_process_tree(proc)
                 return False, f"Timeout: opencode не ответил за {OPENCODE_TIMEOUT}с.", session_id, actual_model
             await proc.wait()

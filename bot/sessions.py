@@ -16,11 +16,11 @@ from __future__ import annotations
 import json
 import logging
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
-from engines import get_engine_by_name
 from bot.db import _db
 from bot.settings import DEFAULT_ENGINE, DEFAULT_ENGINE_NAME, SESSION_IDLE_MINUTES
+from engines import get_engine_by_name
 
 logger = logging.getLogger(__name__)
 
@@ -204,7 +204,7 @@ def _instructions_changed(cwd: str | None, started_at: str | None) -> bool:
         # tzinfo naive-строка трактуется как ЛОКАЛЬНОЕ время — и в UTC+3 сеанс
         # переоткрывался бы на каждом сообщении.
         started = datetime.fromisoformat(started_at).replace(
-            tzinfo=timezone.utc).timestamp()
+            tzinfo=UTC).timestamp()
     except ValueError:
         return False
     for name in INSTRUCTION_FILES:

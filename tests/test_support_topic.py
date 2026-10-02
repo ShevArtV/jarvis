@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from telegram.ext import ApplicationHandlerStop
+
 from bot import app
 
 

@@ -7,7 +7,7 @@ import argparse
 import os
 import sqlite3
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -113,9 +113,9 @@ def main() -> None:
         if args.since:
             since = datetime.fromisoformat(args.since)
             if since.tzinfo is None:
-                since = since.replace(tzinfo=timezone.utc)
+                since = since.replace(tzinfo=UTC)
         else:
-            since = datetime.now(timezone.utc) - timedelta(hours=args.hours)
+            since = datetime.now(UTC) - timedelta(hours=args.hours)
         period = aggregate_usage(engine, session_id, cwd, since=since)
         print_period(period)
     else:

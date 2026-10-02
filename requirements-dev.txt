@@ -1,3 +1,5 @@
 # Инструменты разработки (для прогона тестов достаточно stdlib).
+# ruff — линтер, настройки в pyproject.toml.
+ruff>=0.6
 # pyflakes — статическая проверка неопределённых имён, см. tests/test_no_undefined_names.py
 pyflakes>=3.0

@@ -4,7 +4,7 @@ import json
 import os
 import tempfile
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -58,7 +58,7 @@ class ClaudeLimitsFromCacheTest(unittest.TestCase):
         self.assertEqual(seven_day.used_percent, 15)
         self.assertEqual(
             result.fetched_at,
-            datetime.fromtimestamp(1788615429095 / 1000, tz=timezone.utc),
+            datetime.fromtimestamp(1788615429095 / 1000, tz=UTC),
         )
 
     def test_missing_file_returns_empty_windows_and_note(self) -> None:
@@ -150,7 +150,7 @@ class CodexLimitsFromRolloutsTest(unittest.TestCase):
         self.assertEqual(window.used_percent, 26.0)
         self.assertEqual(window.name, "30 дней")
         self.assertEqual(
-            window.resets_at, datetime.fromtimestamp(1790971501, tz=timezone.utc)
+            window.resets_at, datetime.fromtimestamp(1790971501, tz=UTC)
         )
 
     def test_missing_sessions_dir_returns_empty_windows_and_note(self) -> None:
@@ -232,7 +232,7 @@ class CodexLimitsLiveTest(unittest.TestCase):
         self.assertIn("30 дней", window.name)
         self.assertEqual(window.used_percent, 100)
         self.assertEqual(
-            window.resets_at, datetime.fromtimestamp(1790971501, tz=timezone.utc)
+            window.resets_at, datetime.fromtimestamp(1790971501, tz=UTC)
         )
 
     def test_api_error_falls_back_to_rollouts(self) -> None:
@@ -255,7 +255,7 @@ class CodexLimitsLiveTest(unittest.TestCase):
 
 class FormatLimitsBlockTest(unittest.TestCase):
     def test_percentages_expired_window_and_opencode_note(self) -> None:
-        now = datetime(2026, 9, 5, 13, 0, 0, tzinfo=timezone.utc)
+        now = datetime(2026, 9, 5, 13, 0, 0, tzinfo=UTC)
         items = [
             EngineLimits(
                 engine="claude",
@@ -298,7 +298,7 @@ class FormatLimitsBlockTest(unittest.TestCase):
                 self.assertEqual(_format_countdown(seconds), expected)
 
     def test_reset_line_contains_countdown(self) -> None:
-        now = datetime(2026, 9, 5, 13, 0, 0, tzinfo=timezone.utc)
+        now = datetime(2026, 9, 5, 13, 0, 0, tzinfo=UTC)
         items = [
             EngineLimits(
                 engine="claude",
@@ -315,7 +315,7 @@ class FormatLimitsBlockTest(unittest.TestCase):
         self.assertIn("(через 1 день 2 часа 5 минут)", body)
 
     def test_shows_remaining_not_spent(self) -> None:
-        now = datetime(2026, 9, 5, 13, 0, 0, tzinfo=timezone.utc)
+        now = datetime(2026, 9, 5, 13, 0, 0, tzinfo=UTC)
         items = [
             EngineLimits(
                 engine="claude",
@@ -326,7 +326,7 @@ class FormatLimitsBlockTest(unittest.TestCase):
         self.assertIn("осталось 69%", body)
 
     def test_non_live_result_marks_cache(self) -> None:
-        now = datetime(2026, 9, 5, 13, 0, 0, tzinfo=timezone.utc)
+        now = datetime(2026, 9, 5, 13, 0, 0, tzinfo=UTC)
         items = [
             EngineLimits(
                 engine="claude",

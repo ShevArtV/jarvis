@@ -7,30 +7,28 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import re
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
-import hashlib
-import re
 from bot.delivery import send_to_topic
 from bot.handlers.commands import _usage_line
-from bot.sessions import _persistent_column_for_engine, close_session, get_mcp_playwright, get_persistent_for_engine, get_session, set_mcp_playwright, set_persistent_for_engine
+from bot.sessions import (
+    _persistent_column_for_engine,
+    close_session,
+    get_mcp_playwright,
+    get_persistent_for_engine,
+    get_session,
+    set_mcp_playwright,
+    set_persistent_for_engine,
+)
 from bot.settings import CLAUDE_CWD, CONTEXT_WARN_TOKENS, DONE_CONFIRM_ON_DONE
 from bot.topics import _key, _kill_persistent_worker
 from engines.session_usage import inspect_session_usage
-from telegram.error import BadRequest
-
-
-
-
-
-
-
-
-
-
 
 logger = logging.getLogger(__name__)
 

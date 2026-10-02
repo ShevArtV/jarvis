@@ -18,18 +18,15 @@ from datetime import datetime, timedelta
 
 from telegram.ext import Application
 
-from engines.process_control import terminate_process_tree
-from integrations.queuewarden_bot import prune_attachments
-
 from bot.db import _db, log_message
 from bot.delivery import _send_manager_notice, send_to_topic
 from bot.jobs import _process_agent_trigger, _run_manager_job
 from bot.queues import (
     _log_ttl_days,
-    finish_agent_trigger,
     claim_next_agent_trigger,
     claim_next_job,
     cleanup_old_log_entries,
+    finish_agent_trigger,
     finish_job,
 )
 from bot.reminders import compute_next_fire, parse_reminder_schedule
@@ -44,6 +41,8 @@ from bot.topics import (
     resolve_secretary_topic,
     resolve_teamlead_topic,
 )
+from engines.process_control import terminate_process_tree
+from integrations.queuewarden_bot import prune_attachments
 
 logger = logging.getLogger(__name__)
 

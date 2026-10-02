@@ -11,8 +11,7 @@ import asyncio
 import unittest
 from unittest.mock import AsyncMock, patch
 
-from bot import jobs
-from bot import topics
+from bot import jobs, topics
 from bot.handlers import messages
 
 KEY = (-100, 7)

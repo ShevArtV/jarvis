@@ -13,8 +13,8 @@ import logging
 import os
 import time
 from collections import deque
+from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Awaitable, Callable
 
 from engines.codex_engine import (
     CODEX_BIN,
@@ -155,7 +155,7 @@ class PersistentCodexWorker:
 
     async def submit(
         self, text: str, *, exclusive: bool = False,
-    ) -> tuple[bool, "asyncio.Future | None"]:
+    ) -> tuple[bool, asyncio.Future | None]:
         """Start a new turn or steer the active one.
 
         Returns ``(is_new_turn, future)``. The future resolves to

@@ -608,13 +608,13 @@ async def _send_rich_message(
     try:
         files = [
             InputFile(fh, filename=os.path.basename(path), attach=True)
-            for fh, (path, _cap) in zip(handles, media)
+            for fh, (path, _cap) in zip(handles, media, strict=True)
         ]
         rich: dict = {"markdown": markdown}
         if files:
             rich["media"] = [
                 {"id": f"m{i}", "media": {"type": _rich_kind(path), "media": f.attach_uri}}
-                for i, (f, (path, _cap)) in enumerate(zip(files, media))
+                for i, (f, (path, _cap)) in enumerate(zip(files, media, strict=True))
             ]
         api_kwargs: dict = {"chat_id": chat.id, "rich_message": rich}
         if thread_id:

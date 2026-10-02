@@ -1,0 +1,25 @@
+[project]
+name = "jarvis"
+version = "0.1.0"
+description = "Telegram bot that turns forum topics into workspaces for claude, codex and opencode CLIs"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+extend-exclude = ["venv", "temp"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = [
+    "E501",   # длинные строки — не цель линтера; переносит форматтер
+    "B008",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["bot", "engines", "integrations", "scripts", "config", "telegram_bot", "webhook_server", "imap_watcher"]

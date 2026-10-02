@@ -18,14 +18,7 @@ import secrets
 from telegram import Update
 from telegram.ext import Application
 
-from engines import engine_model_scope, get_engine_by_name
-from engines.claude_engine import CLAUDE_TIMEOUT
-from engines.codex_engine import CODEX_TIMEOUT
-from engines.opencode_engine import OPENCODE_TIMEOUT
-from engines.process_control import terminate_process_tree
-
 from bot.db import _db, log_message
-from bot.formatting import _html_escape
 from bot.delivery import (
     ProgressJournal,
     _send_manager_notice,
@@ -35,6 +28,7 @@ from bot.delivery import (
     send_to_topic,
     split_media_markers,
 )
+from bot.formatting import _html_escape
 from bot.llm import call_llm_stream
 from bot.sessions import (
     clear_pending_summary,
@@ -53,6 +47,11 @@ from bot.topics import (
     resolve_job_notice_target,
     wait_turn_end,
 )
+from engines import engine_model_scope, get_engine_by_name
+from engines.claude_engine import CLAUDE_TIMEOUT
+from engines.codex_engine import CODEX_TIMEOUT
+from engines.opencode_engine import OPENCODE_TIMEOUT
+from engines.process_control import terminate_process_tree
 
 logger = logging.getLogger(__name__)
 
@@ -153,7 +152,7 @@ async def _run_job_turn_persistent(
     worker.on_intermediate = on_intermediate
     try:
         return await asyncio.wait_for(fut, timeout=timeout)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         logger.warning("persistent job turn timeout key=%s", key)
         await _kill_persistent_worker(key, "")
         return False, f"Timeout: живой процесс не ответил за {timeout}с."
@@ -301,7 +300,7 @@ async def _run_manager_job(app: Application, job: dict) -> tuple[bool, int | Non
             while not watcher_stop.is_set():
                 try:
                     await asyncio.wait_for(watcher_stop.wait(), timeout=2.0)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     pass
                 if watcher_stop.is_set():
                     return
@@ -362,7 +361,7 @@ async def _run_manager_job(app: Application, job: dict) -> tuple[bool, int | Non
             watcher_stop.set()
             try:
                 await asyncio.wait_for(watcher_task, timeout=3.0)
-            except (asyncio.TimeoutError, asyncio.CancelledError):
+            except (TimeoutError, asyncio.CancelledError):
                 watcher_task.cancel()
 
         if journal is not None:

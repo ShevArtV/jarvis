@@ -7,12 +7,11 @@ import os
 import sqlite3
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from engines.session_usage import aggregate_claude_usage
 from bot import db as bot_db
 from bot import workers as bot_workers
 from bot.handlers.toggles import (
@@ -21,6 +20,7 @@ from bot.handlers.toggles import (
     _looks_like_waiting_for_user,
     _session_confirm_token,
 )
+from engines.session_usage import aggregate_claude_usage
 
 
 class DoneDetectorTest(unittest.TestCase):
@@ -75,7 +75,7 @@ class ClaudeUsageAggregationTest(unittest.TestCase):
         session_id = "session-1"
         cwd = "/tmp/jarvis-session-control-test"
         encoded_cwd = "-tmp-jarvis-session-control-test"
-        ts = datetime(2026, 7, 19, 12, 0, tzinfo=timezone.utc).isoformat()
+        ts = datetime(2026, 7, 19, 12, 0, tzinfo=UTC).isoformat()
 
         duplicate_a = {
             "timestamp": ts,

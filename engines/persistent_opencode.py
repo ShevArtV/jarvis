@@ -18,8 +18,9 @@ import os
 import re
 import time
 from collections import deque
+from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any
 
 import httpx
 
@@ -160,7 +161,7 @@ class PersistentOpenCodeWorker:
 
     async def submit(
         self, text: str, *, exclusive: bool = False,
-    ) -> tuple[bool, "asyncio.Future | None"]:
+    ) -> tuple[bool, asyncio.Future | None]:
         """Start a new turn or add the message to the running one.
 
         Returns ``(is_new_turn, future)`` like the Claude/Codex workers,

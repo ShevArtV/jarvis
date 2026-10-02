@@ -11,8 +11,6 @@ from __future__ import annotations
 import json
 import logging
 
-from engines import Engine, ensure_engine_tools
-
 from bot.sessions import (
     get_mcp_playwright,
     reset_session,
@@ -21,6 +19,7 @@ from bot.sessions import (
 )
 from bot.settings import CLAUDE_CWD
 from bot.topics import active_procs, resolve_topic_role, spawn_procs
+from engines import Engine, ensure_engine_tools
 
 logger = logging.getLogger(__name__)
 

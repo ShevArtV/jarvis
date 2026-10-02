@@ -13,11 +13,11 @@ import asyncio
 import logging
 
 from telegram import (
-    Update,
     BotCommand,
     BotCommandScopeAllGroupChats,
     BotCommandScopeAllPrivateChats,
     MenuButtonCommands,
+    Update,
 )
 from telegram.ext import (
     AIORateLimiter,
@@ -30,14 +30,7 @@ from telegram.ext import (
     filters,
 )
 
-from config import ALLOWED_USER_IDS, TELEGRAM_TOKEN
-from engines import prewarm_models
-from imap_watcher import run_imap_watcher
-from webhook_server import run_webhook_server
-
-from bot.settings import SUPPORT_CHAT_ID, SUPPORT_THREAD_ID
 from bot.asks import on_ask_answer
-from bot.rich_message import RICH_MESSAGE
 from bot.delivery import _send_manager_notice
 from bot.handlers.commands import (
     cmd_bind,
@@ -76,6 +69,8 @@ from bot.handlers.toggles import (
     on_done_confirm,
     on_persistent_toggle,
 )
+from bot.rich_message import RICH_MESSAGE
+from bot.settings import SUPPORT_CHAT_ID, SUPPORT_THREAD_ID
 from bot.workers import (
     agent_triggers_worker,
     cleanup_worker,
@@ -85,7 +80,11 @@ from bot.workers import (
     persistent_reaper,
     reminders_worker,
 )
+from config import ALLOWED_USER_IDS, TELEGRAM_TOKEN
+from engines import prewarm_models
+from imap_watcher import run_imap_watcher
 from integrations.queuewarden_bot import queuewarden_notifications_worker
+from webhook_server import run_webhook_server
 
 logger = logging.getLogger(__name__)
 

@@ -29,7 +29,6 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
-
 logger = logging.getLogger("jarvis-mcp")
 
 # Filled in main(); module-level so tool functions can close over it without
@@ -471,8 +470,9 @@ def manager_set_engine(
 
     # Lazy import — same reason as manager_engines.
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-    from engines import get_engine_by_name  # type: ignore
     import shutil
+
+    from engines import get_engine_by_name  # type: ignore
 
     try:
         eng = get_engine_by_name(engine)

@@ -11,7 +11,6 @@ from unittest.mock import patch
 
 from bot import db as bot_db
 
-
 OLD_TRIGGERS_SCHEMA = """
 CREATE TABLE agent_triggers (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

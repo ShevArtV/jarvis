@@ -14,7 +14,6 @@ from bot import delivery as bot_delivery
 from bot.queues import claim_next_job
 from bot.topics import resolve_job_notice_target
 
-
 OLD_JOBS_SCHEMA = """
 CREATE TABLE jobs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

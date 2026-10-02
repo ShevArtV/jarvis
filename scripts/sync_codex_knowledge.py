@@ -25,7 +25,7 @@ from __future__ import annotations
 import os
 import re
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 HOME = Path.home()
@@ -193,7 +193,7 @@ def _build_memory_section() -> str:
 
 
 def build_agents_md() -> str:
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    now = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
     lines: list[str] = []
     lines.append(
         f"<!-- Автоматически сгенерировано scripts/sync_codex_knowledge.py ({now}). "

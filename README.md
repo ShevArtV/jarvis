@@ -822,14 +822,14 @@ journalctl --user -u jarvis-bot -f
 ## Тесты
 
 ```bash
-./venv/bin/python -m unittest discover -s tests
+./venv/bin/python -m unittest discover -s tests -t .
 ```
 
 Внешних сервисов и токенов не требуют: конфиги подкладываются во временные
 каталоги, Telegram API и запуски CLI мокаются.
 
 На каждый push и pull request то же самое прогоняет GitHub Actions
-(`.github/workflows/tests.yml`) на Python 3.11 и 3.12: юнит-тесты, `pyflakes`
+(`.github/workflows/tests.yml`) на Python 3.11 и 3.12: юнит-тесты, `ruff`, `pyflakes`
 без поблажек (неиспользованный импорт тоже красит сборку) и смоук свежей
 установки — бот обязан собираться с `.env` из двух строк, без Менеджера и без
 внешних MCP-серверов.

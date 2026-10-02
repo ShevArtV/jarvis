@@ -20,12 +20,11 @@
 
 import logging
 
-from config import ALLOWED_USER_IDS, TELEGRAM_TOKEN
-from engines import ensure_engine_tools
-
 from bot.app import build_application
 from bot.db import init_db
 from bot.settings import CLAUDE_CWD, DEFAULT_ENGINE, DEFAULT_ENGINE_NAME
+from config import ALLOWED_USER_IDS, TELEGRAM_TOKEN
+from engines import ensure_engine_tools
 
 logger = logging.getLogger(__name__)
 

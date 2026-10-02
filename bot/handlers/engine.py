@@ -8,13 +8,14 @@
 from __future__ import annotations
 
 import logging
+import re
+import shutil
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
+from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
-import re
-import shutil
 from bot.delivery import send_to_topic
 from bot.formatting import _html_escape
 from bot.handlers.commands import _topic_status_block
@@ -24,17 +25,6 @@ from bot.topics import _key, _kill_persistent_worker, _lock_for, active_procs
 from engines import SUPPORTED_ENGINES, ensure_engine_tools, get_engine_by_name
 from engines.model_cache import label_for
 from engines.process_control import terminate_process_tree
-from telegram.error import BadRequest
-
-
-
-
-
-
-
-
-
-
 
 logger = logging.getLogger(__name__)
 

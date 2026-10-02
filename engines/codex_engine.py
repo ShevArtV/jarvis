@@ -24,9 +24,9 @@ import os
 import re
 import time
 import uuid
+from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
 from pathlib import Path
-from typing import Awaitable, Callable
 
 from engines.model_cache import cached_models, prewarm, split_models
 from engines.process_control import terminate_process_tree
@@ -446,7 +446,7 @@ class CodexEngine:
         try:
             try:
                 await asyncio.wait_for(read_stream(), timeout=CODEX_TIMEOUT)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 await terminate_process_tree(proc)
                 return False, f"Timeout: codex не ответил за {CODEX_TIMEOUT}с.", session_id, actual_model
             await proc.wait()

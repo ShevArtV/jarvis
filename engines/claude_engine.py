@@ -18,9 +18,9 @@ import re
 import subprocess
 import time
 import uuid
+from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
 from pathlib import Path
-from typing import Awaitable, Callable
 
 from engines.model_cache import cached_models, prewarm, remember_labels, split_models
 from engines.process_control import terminate_process_tree
@@ -209,7 +209,7 @@ class PersistentClaudeWorker:
 
     async def submit(
         self, text: str, *, exclusive: bool = False,
-    ) -> tuple[bool, "asyncio.Future | None"]:
+    ) -> tuple[bool, asyncio.Future | None]:
         """Отправить реплику живому процессу.
 
         Возвращает (is_new_turn, future). ``future`` резолвится в
@@ -657,7 +657,7 @@ class ClaudeEngine:
         try:
             try:
                 await asyncio.wait_for(read_stream(), timeout=CLAUDE_TIMEOUT)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 await terminate_process_tree(proc)
                 return False, f"Timeout: claude не ответил за {CLAUDE_TIMEOUT}с.", session_id, actual_model
             await proc.wait()

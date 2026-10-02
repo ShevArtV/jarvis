@@ -9,7 +9,6 @@ from unittest.mock import patch
 from bot import db as bot_db
 from bot import sessions as bot_sessions
 
-
 # Схема "до миграции" — persistent_claude/persistent_codex без NOT NULL,
 # чтобы можно было вставить NULL и проверить трактовку значения.
 LEGACY_SESSIONS_SCHEMA = """

@@ -35,7 +35,10 @@ jobs:
       # и это часть проверки: тесты обязаны работать на чистой машине, иначе
       # они проверяют не код, а окружение автора.
       - name: Unit tests
-        run: python -m unittest discover -s tests -v
+        run: python -m unittest discover -s tests -t . -v
+
+      - name: Lint (ruff)
+        run: python -m ruff check .
 
       # Ловит имена, потерянные при переносе кода между модулями. Отдельным
       # шагом, а не внутри тестов: NameError в теле функции не проявляется ни

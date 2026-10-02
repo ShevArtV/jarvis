@@ -6,34 +6,36 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import os
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, WebAppInfo
 from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 
-import asyncio
-import os
 from bot.formatting import _html_escape, md_to_html
-from bot.sessions import _persistent_column_for_engine, _session_state_line, clear_cwd, close_session, get_actual_model, get_mcp_playwright, get_model, get_persistent_for_engine, get_session, reset_session, set_cwd, touch_session
+from bot.jobs import _run_spawn
+from bot.sessions import (
+    _persistent_column_for_engine,
+    _session_state_line,
+    clear_cwd,
+    close_session,
+    get_actual_model,
+    get_mcp_playwright,
+    get_model,
+    get_persistent_for_engine,
+    get_session,
+    reset_session,
+    set_cwd,
+    touch_session,
+)
 from bot.settings import BOARD_MINIAPPS, CLAUDE_CWD, DEFAULT_ENGINE_NAME, SESSION_IDLE_MINUTES
 from bot.topics import _key, _kill_persistent_worker, active_procs, persistent_workers, spawn_procs
 from engines import get_engine_by_name
 from engines.limits import all_limits, format_limits_block
 from engines.process_control import terminate_process_tree
 from engines.session_usage import SessionUsage, inspect_session_usage
-
-
-
-
-
-
-
-
-
-
-
-from bot.jobs import _run_spawn
 
 logger = logging.getLogger(__name__)
 

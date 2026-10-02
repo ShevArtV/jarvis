@@ -63,7 +63,7 @@ def parse_reminder_schedule(schedule: str) -> dict:
                 raise ValueError
             return h, m
         except (ValueError, AttributeError):
-            raise ValueError(f"invalid HH:MM: {token!r}")
+            raise ValueError(f"invalid HH:MM: {token!r}") from None
 
     parts = raw.split()
     kind = parts[0]
@@ -90,7 +90,7 @@ def parse_reminder_schedule(schedule: str) -> dict:
         try:
             day = int(parts[1])
         except ValueError:
-            raise ValueError(f"monthly: day must be int, got {parts[1]!r}")
+            raise ValueError(f"monthly: day must be int, got {parts[1]!r}") from None
         if not (1 <= day <= 28):
             raise ValueError("monthly: day must be 1..28 (защита от февраля)")
         h, m = parse_hm(parts[2])
@@ -102,7 +102,7 @@ def parse_reminder_schedule(schedule: str) -> dict:
         try:
             datetime.strptime(date_str, "%Y-%m-%d")
         except ValueError:
-            raise ValueError(f"once: date must be YYYY-MM-DD, got {date_str!r}")
+            raise ValueError(f"once: date must be YYYY-MM-DD, got {date_str!r}") from None
         return {"type": "once", "date": date_str, "hour": h, "minute": m}
 
     raise ValueError(

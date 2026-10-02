@@ -20,10 +20,9 @@ from datetime import datetime
 
 from telegram import Update
 
-from engines.process_control import terminate_process_tree
-
 from bot.db import _db
 from bot.settings import int_env
+from engines.process_control import terminate_process_tree
 
 logger = logging.getLogger(__name__)
 

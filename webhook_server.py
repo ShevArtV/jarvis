@@ -11,8 +11,8 @@ import json
 import logging
 import os
 import sqlite3
+from collections.abc import Awaitable, Callable
 from datetime import datetime
-from typing import Awaitable, Callable
 from urllib.parse import parse_qs
 
 logger = logging.getLogger(__name__)

@@ -1,12 +1,15 @@
 import os
 
-try:
-    from dotenv import load_dotenv
-    load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
-except ImportError:
-    pass
-
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# JARVIS_DOTENV=0 выключает чтение .env: тесты обязаны видеть чистое окружение,
+# а не настройки того, кто их запустил (см. tests/__init__.py).
+if os.environ.get("JARVIS_DOTENV", "1") != "0":
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(os.path.join(BASE_DIR, ".env"))
+    except ImportError:
+        pass
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 

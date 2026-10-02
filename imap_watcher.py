@@ -25,9 +25,9 @@ import json
 import logging
 import os
 import sqlite3
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 from email.header import decode_header, make_header
-from typing import Awaitable, Callable
 
 logger = logging.getLogger(__name__)
 
