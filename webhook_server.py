@@ -1,12 +1,15 @@
 """Webhook receiver for external events (Bitrix24, etc.).
 
 Env:
-  JARVIS_WEBHOOK_TOKEN  — обязательный секрет, ?token=... в URL
+  JARVIS_WEBHOOK_TOKEN  — обязательный секрет: заголовок X-Jarvis-Token или ?token=...
+                          в URL (Битрикс24 умеет только второе)
+  JARVIS_WEBHOOK_HOST   — адрес (default: 127.0.0.1; наружу — через reverse proxy с TLS)
   JARVIS_WEBHOOK_PORT   — порт (default: 8765)
 
 Если JARVIS_WEBHOOK_TOKEN не задан — сервер не запускается.
 """
 import asyncio
+import hmac
 import json
 import logging
 import os
@@ -53,7 +56,8 @@ def _make_starlette_app(send_notice: NoticeCallback, token: str):
     from starlette.routing import Route
 
     async def bitrix24(request: Request) -> Response:
-        if request.query_params.get("token", "") != token:
+        given = request.headers.get("x-jarvis-token") or request.query_params.get("token", "")
+        if not hmac.compare_digest(given.encode(), token.encode()):
             return Response("Unauthorized", status_code=401)
         try:
             body = await request.body()
@@ -91,6 +95,7 @@ async def run_webhook_server(send_notice: NoticeCallback) -> None:
         logger.info("JARVIS_WEBHOOK_TOKEN not set — webhook server disabled")
         return
 
+    host = os.environ.get("JARVIS_WEBHOOK_HOST", "127.0.0.1")
     port = int(os.environ.get("JARVIS_WEBHOOK_PORT", "8765"))
 
     try:
@@ -103,12 +108,12 @@ async def run_webhook_server(send_notice: NoticeCallback) -> None:
         return
 
     app = _make_starlette_app(send_notice, token)
-    config = uvicorn.Config(app, host="0.0.0.0", port=port, log_level="warning")
+    config = uvicorn.Config(app, host=host, port=port, log_level="warning")
     server = uvicorn.Server(config)
     # Отключаем uvicorn'овский перехват сигналов — в основном event loop
     # сигналы обрабатывает PTB.
     server.install_signal_handlers = lambda: None  # type: ignore[method-assign]
-    logger.info("webhook_server: starting on :%d", port)
+    logger.info("webhook_server: starting on %s:%d", host, port)
     try:
         await server.serve()
     except Exception:

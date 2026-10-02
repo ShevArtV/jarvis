@@ -65,9 +65,9 @@ FILE_MARKER_RE = re.compile(
 # Миниаппы досок QueueWarden: URL нужен для web_app-кнопки в личке (там разрешён
 # только https-адрес), а короткое имя (direct link из BotFather) — для ссылки t.me
 # в группах/форумах, где web_app-кнопки запрещены. Досок сколько угодно:
-# BOARD_MINIAPPS=artsites|https://…/miniapp|qwboard,tako|https://…/miniapp|qwtako.
+# BOARD_MINIAPPS=alpha|https://…/miniapp|qwalpha,beta|https://…/miniapp|qwbeta.
 # Без списка — одна доска из BOARD_MINIAPP_URL/BOARD_MINIAPP_SHORT_NAME.
-BOARD_MINIAPP_URL = os.environ.get("BOARD_MINIAPP_URL", "https://stage.queuewarden.ru/miniapp")
+BOARD_MINIAPP_URL = os.environ.get("BOARD_MINIAPP_URL", "")
 BOARD_MINIAPP_SHORT_NAME = os.environ.get("BOARD_MINIAPP_SHORT_NAME", "qwboard")
 
 

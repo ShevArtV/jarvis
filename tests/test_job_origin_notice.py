@@ -31,11 +31,11 @@ CREATE TABLE jobs (
 
 SERVICE_ENV = {
     "JARVIS_MANAGER_CHAT_ID": "-100",
-    "JARVIS_MANAGER_THREAD_ID": "2338",
+    "JARVIS_MANAGER_THREAD_ID": "101",
     "JARVIS_SECRETARY_CHAT_ID": "-100",
-    "JARVIS_SECRETARY_THREAD_ID": "2338",
+    "JARVIS_SECRETARY_THREAD_ID": "101",
     "JARVIS_TEAMLEAD_CHAT_ID": "-100",
-    "JARVIS_TEAMLEAD_THREAD_ID": "16376",
+    "JARVIS_TEAMLEAD_THREAD_ID": "202",
 }
 
 
@@ -85,8 +85,8 @@ class JobOriginNoticeTest(unittest.TestCase):
         self.assertIn("origin_thread_id", cols)
 
     def test_target_falls_back_to_teamlead_without_origin(self) -> None:
-        self.assertEqual(resolve_job_notice_target(None, None), (-100, 16376))
-        self.assertEqual(resolve_job_notice_target(-100, None), (-100, 16376))
+        self.assertEqual(resolve_job_notice_target(None, None), (-100, 202))
+        self.assertEqual(resolve_job_notice_target(-100, None), (-100, 202))
 
     def test_target_is_origin_topic_when_known(self) -> None:
         self.assertEqual(resolve_job_notice_target(-100, 453), (-100, 453))
@@ -99,15 +99,15 @@ class JobOriginNoticeTest(unittest.TestCase):
                 conn.execute(
                     "INSERT INTO sessions(chat_id, thread_id, session_id, cwd, "
                     "engine, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
-                    (-100, 2338, "sid", "/tmp", "codex",
+                    (-100, 101, "sid", "/tmp", "codex",
                      datetime.utcnow().isoformat()),
                 )
             mcp_server._DB_PATH = Path(db_path)
             result = mcp_server.manager_send(
-                thread_id=2338,
+                thread_id=101,
                 text="Заведи карточку",
                 chat_id=-100,
-                origin_thread_id=16376,
+                origin_thread_id=202,
                 origin_chat_id=-100,
             )
             with bot_db.connect(db_path) as conn:
@@ -115,8 +115,8 @@ class JobOriginNoticeTest(unittest.TestCase):
                     "SELECT origin_chat_id, origin_thread_id FROM jobs WHERE id = ?",
                     (result["job_id"],),
                 ).fetchone()
-        self.assertEqual(row, (-100, 16376))
-        self.assertEqual(result["origin_thread_id"], 16376)
+        self.assertEqual(row, (-100, 202))
+        self.assertEqual(result["origin_thread_id"], 202)
 
     def test_manager_send_without_origin_keeps_nulls(self) -> None:
         mcp_server = _load_mcp_server()
@@ -126,12 +126,12 @@ class JobOriginNoticeTest(unittest.TestCase):
                 conn.execute(
                     "INSERT INTO sessions(chat_id, thread_id, session_id, cwd, "
                     "engine, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
-                    (-100, 2338, "sid", "/tmp", "codex",
+                    (-100, 101, "sid", "/tmp", "codex",
                      datetime.utcnow().isoformat()),
                 )
             mcp_server._DB_PATH = Path(db_path)
             result = mcp_server.manager_send(
-                thread_id=2338, text="Без инициатора", chat_id=-100,
+                thread_id=101, text="Без инициатора", chat_id=-100,
             )
             with bot_db.connect(db_path) as conn:
                 row = conn.execute(
@@ -149,13 +149,13 @@ class JobOriginNoticeTest(unittest.TestCase):
                         "INSERT INTO jobs(chat_id, thread_id, text, source, "
                         "status, created_at, origin_chat_id, origin_thread_id) "
                         "VALUES (?, ?, ?, 'manager', 'pending', ?, ?, ?)",
-                        (-100, 2338, "текст", datetime.utcnow().isoformat(),
-                         -100, 16376),
+                        (-100, 101, "текст", datetime.utcnow().isoformat(),
+                         -100, 202),
                     )
                 job = claim_next_job()
         self.assertIsNotNone(job)
         self.assertEqual(job["origin_chat_id"], -100)
-        self.assertEqual(job["origin_thread_id"], 16376)
+        self.assertEqual(job["origin_thread_id"], 202)
 
     def _notice_to(self, db_path: str, target):
         """Отправить нотис и вернуть (thread_id доставки, thread_id auto-kick)."""
@@ -181,16 +181,16 @@ class JobOriginNoticeTest(unittest.TestCase):
     def test_notice_goes_to_origin_not_teamlead(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             db_path = self._fresh_db(tmp)
-            delivered, kick = self._notice_to(db_path, (-100, 2338))
-        self.assertEqual(delivered, 2338)
-        self.assertEqual(kick, [(-100, 2338)])
+            delivered, kick = self._notice_to(db_path, (-100, 101))
+        self.assertEqual(delivered, 101)
+        self.assertEqual(kick, [(-100, 101)])
 
     def test_notice_without_target_uses_role(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             db_path = self._fresh_db(tmp)
             delivered, kick = self._notice_to(db_path, None)
-        self.assertEqual(delivered, 16376)
-        self.assertEqual(kick, [(-100, 16376)])
+        self.assertEqual(delivered, 202)
+        self.assertEqual(kick, [(-100, 202)])
 
 
 if __name__ == "__main__":

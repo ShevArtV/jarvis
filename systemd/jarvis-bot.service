@@ -8,10 +8,6 @@ Type=simple
 WorkingDirectory=%h/projects/jarvis
 # Движок выбирается через JARVIS_ENGINE (claude|codex|opencode). Перезадай в override.conf
 # (`systemctl --user edit jarvis-bot.service`) или через .env проекта.
-#
-# Для codex: раскомментируй ExecStartPre, чтобы перед каждым стартом
-# обновлять ~/.codex/AGENTS.md из claude-настроек и ~/knowledge/.
-# ExecStartPre=%h/projects/jarvis/venv/bin/python %h/projects/jarvis/scripts/sync_codex_knowledge.py
 ExecStart=%h/projects/jarvis/venv/bin/python %h/projects/jarvis/telegram_bot.py
 Restart=always
 RestartSec=5

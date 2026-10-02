@@ -31,10 +31,10 @@ class UnhandledMessageTest(unittest.TestCase):
         return prompt, reply
 
     def test_unknown_command_goes_to_agent(self) -> None:
-        prompt, reply = self._run(_msg(text="/home/shevartv/x — глянь",
+        prompt, reply = self._run(_msg(text="/home/user/x — глянь",
                                        entities=[{"type": "bot_command", "offset": 0, "length": 5}]))
         prompt.assert_awaited_once()
-        self.assertEqual(prompt.await_args.args[1], "/home/shevartv/x — глянь")
+        self.assertEqual(prompt.await_args.args[1], "/home/user/x — глянь")
         reply.assert_not_awaited()
 
     def test_voice_gets_reply(self) -> None:

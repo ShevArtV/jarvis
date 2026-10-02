@@ -8,7 +8,7 @@
 сверяет её с задачей через MCP установки и пишет оператору только по делу,
 иначе отвечает ``[[SILENT]]`` и в топик ничего не уходит.
 
-Установок QW может быть несколько (``QUEUEWARDEN_INSTALLATIONS=artsites,tako``,
+Установок QW может быть несколько (``QUEUEWARDEN_INSTALLATIONS=alpha,beta``,
 у каждой ``QUEUEWARDEN_<SLUG>_URL`` и ``QUEUEWARDEN_<SLUG>_TOKEN``) — каждая
 опрашивается своей задачей, недоступность одной не мешает остальным. Агент
 разбирает уведомление через MCP ``queuewarden_<slug>`` своей установки. Без
@@ -49,7 +49,6 @@ from bot.topics import TopicKey, _resolve_topic_from_env, resolve_teamlead_topic
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_URL = "https://stage.queuewarden.ru"
 SOURCE = "queuewarden"
 SEEN_INTEGRATION = "queuewarden"
 SEEN_KIND = "bot_notification"
@@ -108,7 +107,10 @@ def load_installations() -> list[Installation]:
         token = (os.environ.get("QUEUEWARDEN_MCP_TOKEN") or "").strip()
         if not token:
             return []
-        url = (os.environ.get("QUEUEWARDEN_URL") or DEFAULT_URL).strip().rstrip("/")
+        url = (os.environ.get("QUEUEWARDEN_URL") or "").strip().rstrip("/")
+        if not url:
+            logger.warning("queuewarden: QUEUEWARDEN_MCP_TOKEN set without QUEUEWARDEN_URL — skipped")
+            return []
         return [Installation(LEGACY_SLUG, url, token, LEGACY_MCP)]
 
     result: list[Installation] = []
@@ -295,7 +297,7 @@ def build_trigger_text(item: dict, inst: Installation,
 
 def build_batch_prompt(events: list[str]) -> str:
     """Ход Тимлида-советника по серии уведомлений (см. coalesce в
-    claim_next_agent_trigger). Правила докладов — teamlead/AGENTS.md."""
+    claim_next_agent_trigger). Правила докладов — в AGENTS.md рабочего каталога топика."""
     parts = [
         f"Пришли уведомления QueueWarden (канал «Бот»), {len(events)} шт., "
         "от старых к новым:",
@@ -303,7 +305,7 @@ def build_batch_prompt(events: list[str]) -> str:
     parts += [f"--- {n} ---\n{text}" for n, text in enumerate(events, 1)]
     parts.append(
         "Ты — технический советник оператора по задачам QueueWarden; правила — "
-        "раздел «QueueWarden» в teamlead/AGENTS.md. В QueueWarden сам ничего не "
+        "раздел «QueueWarden» в AGENTS.md твоего рабочего каталога. В QueueWarden сам ничего не "
         "меняй: не подтверждай gate, не двигай, не возвращай и не перезапускай задачи.\n"
         "Сверь уведомления с актуальным состоянием задачи через MCP-сервер её "
         "установки (queuewarden_task_get, комментарии; сервер другой установки "

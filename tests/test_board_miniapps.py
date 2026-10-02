@@ -8,15 +8,15 @@ from bot.handlers.commands import board_keyboard
 from bot.settings import parse_board_miniapps
 
 BOARDS = [
-    ("artsites", "https://artsites.test/miniapp", "qwboard"),
-    ("tako", "https://tako.test/miniapp", "qwtako"),
+    ("alpha", "https://alpha.test/miniapp", "qwalpha"),
+    ("beta", "https://beta.test/miniapp", "qwbeta"),
 ]
 
 
 class ParseBoardsTest(unittest.TestCase):
     def test_parses_list(self) -> None:
-        raw = ("artsites|https://artsites.test/miniapp|qwboard, "
-               "tako | https://tako.test/miniapp | qwtako")
+        raw = ("alpha|https://alpha.test/miniapp|qwalpha, "
+               "beta | https://beta.test/miniapp | qwbeta")
         self.assertEqual(parse_board_miniapps(raw), BOARDS)
 
     def test_short_name_optional_and_bad_entries_skipped(self) -> None:
@@ -28,18 +28,18 @@ class ParseBoardsTest(unittest.TestCase):
 class BoardKeyboardTest(unittest.TestCase):
     def test_private_chat_gets_web_app_per_board(self) -> None:
         rows = board_keyboard(BOARDS, True, "jarvisbot").inline_keyboard
-        self.assertEqual([r[0].text for r in rows], ["Доска artsites", "Доска tako"])
+        self.assertEqual([r[0].text for r in rows], ["Доска alpha", "Доска beta"])
         self.assertEqual([r[0].web_app.url for r in rows],
-                         ["https://artsites.test/miniapp", "https://tako.test/miniapp"])
+                         ["https://alpha.test/miniapp", "https://beta.test/miniapp"])
 
     def test_group_gets_direct_links_and_skips_boards_without_short_name(self) -> None:
         boards = BOARDS + [("nolink", "https://n.test/miniapp", "")]
         rows = board_keyboard(boards, False, "jarvisbot").inline_keyboard
         self.assertEqual([r[0].url for r in rows],
-                         ["https://t.me/jarvisbot/qwboard", "https://t.me/jarvisbot/qwtako"])
+                         ["https://t.me/jarvisbot/qwalpha", "https://t.me/jarvisbot/qwbeta"])
 
     def test_legacy_single_board_label_and_empty(self) -> None:
-        rows = board_keyboard([("", "https://a.test/miniapp", "qwboard")], True, "b").inline_keyboard
+        rows = board_keyboard([("", "https://a.test/miniapp", "qwalpha")], True, "b").inline_keyboard
         self.assertEqual(rows[0][0].text, "Открыть доску")
         self.assertIsNone(board_keyboard([], True, "b"))
         self.assertIsNone(board_keyboard([("x", "https://x.test", "")], False, "b"))

@@ -47,7 +47,7 @@ def _item(n: int, notification_id: int | None = None) -> dict:
         "body": "Задача переведена в «В работе»",
         "taskId": 500 + n,
         "projectId": 7,
-        "url": f"https://stage.queuewarden.ru/task/{500 + n}",
+        "url": f"https://qw.example/task/{500 + n}",
         "createdAt": "2026-09-23T10:00:00Z",
     }
 
@@ -123,7 +123,7 @@ class ParseTest(unittest.TestCase):
     def test_trigger_text_carries_notification(self) -> None:
         text = qw.build_trigger_text(_item(1), INST)
         for part in ("task.moved", "QW-1: Починить корзину", "«В работе»",
-                     "https://stage.queuewarden.ru/task/501", "taskId: 501",
+                     "https://qw.example/task/501", "taskId: 501",
                      "projectId: 7"):
             self.assertIn(part, text)
 
@@ -133,7 +133,7 @@ class ParseTest(unittest.TestCase):
         self.assertLess(prompt.index("--- 1 ---\nсобытие А"),
                         prompt.index("--- 2 ---\nсобытие Б"))
         for part in ("queuewarden_task_get", "не подтверждай gate", "ask_user",
-                     "teamlead/AGENTS.md", "`**[<установка>] <номер задачи>",
+                     "AGENTS.md твоего рабочего каталога", "`**[<установка>] <номер задачи>",
                      "6) новая задача (task.created) — докладывай ВСЕГДА",
                      "участие уже проверено", "<тег>"):
             self.assertIn(part, prompt)
@@ -270,11 +270,11 @@ class WorkerLoopTest(_DbCase):
 
 
 MULTI_ENV = {
-    "QUEUEWARDEN_INSTALLATIONS": "artsites, Tako,artsites",
-    "QUEUEWARDEN_ARTSITES_URL": "https://artsites.test/",
-    "QUEUEWARDEN_ARTSITES_TOKEN": "tok-a",
-    "QUEUEWARDEN_TAKO_URL": "https://tako.test",
-    "QUEUEWARDEN_TAKO_TOKEN": "tok-t",
+    "QUEUEWARDEN_INSTALLATIONS": "alpha, Beta,alpha",
+    "QUEUEWARDEN_ALPHA_URL": "https://alpha.test/",
+    "QUEUEWARDEN_ALPHA_TOKEN": "tok-a",
+    "QUEUEWARDEN_BETA_URL": "https://beta.test",
+    "QUEUEWARDEN_BETA_TOKEN": "tok-t",
 }
 
 
@@ -289,46 +289,46 @@ class InstallationsTest(unittest.TestCase):
     def test_list_of_installations(self) -> None:
         with patch.dict(os.environ, {**ENV, **MULTI_ENV}):
             self.assertEqual(qw.load_installations(), [
-                qw.Installation("artsites", "https://artsites.test", "tok-a",
-                                "queuewarden_artsites"),
-                qw.Installation("tako", "https://tako.test", "tok-t", "queuewarden_tako"),
+                qw.Installation("alpha", "https://alpha.test", "tok-a",
+                                "queuewarden_alpha"),
+                qw.Installation("beta", "https://beta.test", "tok-t", "queuewarden_beta"),
             ])
 
     def test_installation_without_token_or_bad_slug_skipped(self) -> None:
-        env = {**ENV, **MULTI_ENV, "QUEUEWARDEN_INSTALLATIONS": "artsites,tako,bad.slug",
-               "QUEUEWARDEN_TAKO_TOKEN": ""}
+        env = {**ENV, **MULTI_ENV, "QUEUEWARDEN_INSTALLATIONS": "alpha,beta,bad.slug",
+               "QUEUEWARDEN_BETA_TOKEN": ""}
         with patch.dict(os.environ, env):
-            self.assertEqual([i.slug for i in qw.load_installations()], ["artsites"])
+            self.assertEqual([i.slug for i in qw.load_installations()], ["alpha"])
 
     def test_trigger_text_names_installation_mcp(self) -> None:
-        inst = qw.Installation("tako", "https://tako.test", "t", "queuewarden_tako")
+        inst = qw.Installation("beta", "https://beta.test", "t", "queuewarden_beta")
         text = qw.build_trigger_text(_item(1), inst)
-        self.assertIn("Установка: tako (https://tako.test), MCP-сервер: queuewarden_tako", text)
+        self.assertIn("Установка: beta (https://beta.test), MCP-сервер: queuewarden_beta", text)
 
     def test_hashtag_from_task_key_in_title(self) -> None:
-        tako = qw.Installation("tako", "https://tako.test", "t", "queuewarden_tako")
+        beta = qw.Installation("beta", "https://beta.test", "t", "queuewarden_beta")
         item = {**_item(1), "title": "2609-2: Починить корзину"}
-        self.assertEqual(qw.task_hashtag(item, tako), "#qwtako2609_2")
-        self.assertIn("Тег: #qwtako2609_2", qw.build_trigger_text(item, tako))
+        self.assertEqual(qw.task_hashtag(item, beta), "#qwbeta2609_2")
+        self.assertIn("Тег: #qwbeta2609_2", qw.build_trigger_text(item, beta))
         self.assertEqual(qw.task_hashtag(item, INST), "#qw2609_2")
 
     def test_no_hashtag_without_task_key(self) -> None:
-        tako = qw.Installation("tako", "https://tako.test", "t", "queuewarden_tako")
-        self.assertEqual(qw.task_hashtag(_item(1), tako), "")
-        self.assertNotIn("Тег:", qw.build_trigger_text(_item(1), tako))
+        beta = qw.Installation("beta", "https://beta.test", "t", "queuewarden_beta")
+        self.assertEqual(qw.task_hashtag(_item(1), beta), "")
+        self.assertNotIn("Тег:", qw.build_trigger_text(_item(1), beta))
 
 
 class MultiInstallationTest(_DbCase):
     def test_same_notification_id_from_two_installations_not_deduped(self) -> None:
-        a = qw.Installation("artsites", "https://a.test", "t", "queuewarden_artsites")
-        t = qw.Installation("tako", "https://t.test", "t", "queuewarden_tako")
+        a = qw.Installation("alpha", "https://a.test", "t", "queuewarden_alpha")
+        t = qw.Installation("beta", "https://t.test", "t", "queuewarden_beta")
         self.assertIsNotNone(qw.enqueue_notification(_item(1), TOPIC, a))
         self.assertIsNotNone(qw.enqueue_notification(_item(1), TOPIC, t))
         self.assertIsNone(qw.enqueue_notification(_item(1), TOPIC, t))
         rows = self.triggers()
         self.assertEqual(len(rows), 2)
-        self.assertIn("queuewarden_artsites", rows[0][2])
-        self.assertIn("queuewarden_tako", rows[1][2])
+        self.assertIn("queuewarden_alpha", rows[0][2])
+        self.assertIn("queuewarden_beta", rows[1][2])
 
     def test_worker_polls_every_installation_with_its_token(self) -> None:
         # После уведомления — 404, чтобы каждая установка дошла до sleep и
@@ -360,8 +360,8 @@ class MultiInstallationTest(_DbCase):
             self.assertEqual(server.auth[0], f"Bearer {tok}")
         texts = sorted(r[2] for r in self.triggers())
         self.assertEqual(len(texts), 2)
-        self.assertIn("queuewarden_artsites", texts[0])
-        self.assertIn("queuewarden_tako", texts[1])
+        self.assertIn("queuewarden_alpha", texts[0])
+        self.assertIn("queuewarden_beta", texts[1])
 
 
 CREATOR, ME = "u-tikhon", "u-me"
@@ -455,8 +455,8 @@ class CreatedCardTest(unittest.TestCase):
         self.assertIn("big.mp4", text)
 
     def test_prune_removes_only_stale_task_dirs(self) -> None:
-        old = os.path.join(self._tmp.name, "tako", "2609-1")
-        new = os.path.join(self._tmp.name, "tako", "2609-2")
+        old = os.path.join(self._tmp.name, "beta", "2609-1")
+        new = os.path.join(self._tmp.name, "beta", "2609-2")
         os.makedirs(old)
         os.makedirs(new)
         os.utime(old, (0, 0))

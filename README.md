@@ -655,15 +655,15 @@ Per-topic MCP — часть контракта `Engine.call_stream` (см.
 токеном учётки-моста по каждой установке QW — отдельной задачей, со своим backoff:
 
 ```
-QUEUEWARDEN_INSTALLATIONS=artsites,tako
-QUEUEWARDEN_ARTSITES_URL=https://artsites.queuewarden.ru
-QUEUEWARDEN_ARTSITES_TOKEN=<токен моста artsites>
-QUEUEWARDEN_TAKO_URL=https://tako.queuewarden.ru
-QUEUEWARDEN_TAKO_TOKEN=<токен моста tako>
+QUEUEWARDEN_INSTALLATIONS=alpha,beta
+QUEUEWARDEN_ALPHA_URL=https://alpha.example.com
+QUEUEWARDEN_ALPHA_TOKEN=<токен моста alpha>
+QUEUEWARDEN_BETA_URL=https://beta.example.com
+QUEUEWARDEN_BETA_TOKEN=<токен моста beta>
 ```
 
-Без `QUEUEWARDEN_INSTALLATIONS` — одна установка из `QUEUEWARDEN_URL` (по умолчанию
-`https://stage.queuewarden.ru`) и `QUEUEWARDEN_MCP_TOKEN`, MCP `queuewarden`.
+Без `QUEUEWARDEN_INSTALLATIONS` — одна установка из `QUEUEWARDEN_URL` и
+`QUEUEWARDEN_MCP_TOKEN` (нужны оба), MCP `queuewarden`.
 Каждое уведомление — отдельный `agent_triggers` с `source='queuewarden'` в топик Тимлида
 (переопределение — `JARVIS_QW_NOTICE_CHAT_ID`/`JARVIS_QW_NOTICE_THREAD_ID`); в тексте — установка
 и MCP-сервер `queuewarden_<slug>`, через который агент сверяет уведомление с задачей. Эти серверы Тимлиду выдаёт `JARVIS_TOPIC_MCP_CONFIG` (роль `teamlead`, токен моста
@@ -677,7 +677,7 @@ QUEUEWARDEN_TAKO_TOKEN=<токен моста tako>
 вместе с ним все ожидающие триггеры QW этого топика — Тимлид получает серию одним ходом
 (`build_batch_prompt`) и видит актуальное состояние, а не хвост очереди. Тимлид — технический
 советник: пишет оператору только о плане, переводе в «Готово», отказе из бэклога, проблемах и
-human gate (правила — `teamlead/AGENTS.md` в БЗ), каждый блок с шапкой
+human gate (правила — раздел «QueueWarden» в `AGENTS.md` рабочего каталога топика), каждый блок с шапкой
 `[<установка>] <задача> · <проект> · <название>`. Писать не о чем — отвечает `[[SILENT]]`: такой
 ответ в топик не уходит, журнал хода удаляется. Маркер действует только для триггеров QW.
 
@@ -687,7 +687,7 @@ human gate (правила — `teamlead/AGENTS.md` в БЗ), каждый бл�
 через запятую):
 
 ```
-BOARD_MINIAPPS=artsites|https://artsites.queuewarden.ru/miniapp|qwboard,tako|https://tako.queuewarden.ru/miniapp|qwtako
+BOARD_MINIAPPS=alpha|https://alpha.example.com/miniapp|qwalpha,beta|https://beta.example.com/miniapp|qwbeta
 ```
 
 В личке кнопка — web_app, в группах/форумах (там web_app запрещён) — ссылка
@@ -730,14 +730,9 @@ opencode mcp list
 ### Переход на Codex CLI
 
 1. `npm i -g @openai/codex`, затем `codex login` (ChatGPT) или `export OPENAI_API_KEY=...`.
-2. Синхронизировать пользовательские правила и память в `~/.codex/AGENTS.md`:
-   ```bash
-   ./venv/bin/python scripts/sync_codex_knowledge.py
-   ```
-   Скрипт идемпотентен, запускается перед стартом бота или вручную.
-3. Добавить в `.env`: `JARVIS_ENGINE=codex`. При необходимости зафиксировать
+2. Добавить в `.env`: `JARVIS_ENGINE=codex`. При необходимости зафиксировать
    модель: `CODEX_MODEL=gpt-5.5`.
-4. `systemctl --user restart jarvis-bot.service`.
+3. `systemctl --user restart jarvis-bot.service`.
 
 ### Переход на opencode
 
@@ -815,7 +810,6 @@ journalctl --user -u jarvis-bot -f
 - `integrations/queuewarden_bot.py` — long-poll уведомлений QueueWarden (см. выше).
 - `engines/` — адаптеры CLI, Playwright MCP, topic-MCP, кэш моделей (см. выше).
 - `scripts/jarvis_mcp_server.py` — Jarvis Manager MCP (`ask_user`, `manager_*`).
-- `scripts/sync_codex_knowledge.py` — личная утилита автора; для установки не нужна.
 - `bot_state.db` — sqlite: сессии, `jobs`, `agent_triggers`, `messages_log`,
   `reminders`, метаданные исходящих сообщений (для reply-to).
 - `temp/media/` — скачанные пользовательские вложения.
