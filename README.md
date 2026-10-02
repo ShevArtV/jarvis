@@ -57,11 +57,37 @@ Scheduler or NSSM and the Windows-specific notes are in
   sets the topic's working directory; `/session`, `/stop`, `/close` do what
   they say.
 - Default engine for new topics: `JARVIS_ENGINE=claude|codex|opencode` in `.env`.
-- Optional integrations (QueueWarden, ActiveCollab, reminders, IMAP, webhook,
-  support topic) live in `plugins/` and are off by default; enable them with
-  `JARVIS_PLUGINS=name1,name2`. A plugin is a package whose `plugin.py`
-  exposes `PLUGIN = Plugin(...)` (see `bot/plugins.py`).
 - Every other setting is documented in `.env.example`.
+
+### Plugins
+
+Integrations live in `plugins/<name>/` and are **off by default**. Enable them
+with a comma-separated list in `.env` and restart the bot:
+
+```bash
+JARVIS_PLUGINS=reminders,imap
+```
+
+| Plugin | What it does | Portable? |
+|---|---|---|
+| `reminders` | the agent schedules reminders (`daily 09:00`, `once 2026-12-31 18:00`, …) via MCP tools; they are posted to the topic they were set in | yes |
+| `imap` | watches IMAP mailboxes, posts "new mail" notices (`JARVIS_IMAP_ACCOUNTS`) | yes |
+| `webhook` | receives **Bitrix24** webhooks at `/hook/bitrix24` (`JARVIS_WEBHOOK_TOKEN`) | Bitrix24 only; other services need a new route |
+| `activecollab` | MCP tools for ActiveCollab tasks, comments, time records | if you use ActiveCollab |
+| `queuewarden` | QueueWarden notifications and the `/board` mini app | only with a QueueWarden install |
+| `support_topic` | makes the bot ignore one topic owned by another bot | yes |
+
+`imap`, `webhook` and `queuewarden` post their notices to a **service topic**
+and wake the agent there. Set at least `JARVIS_MANAGER_CHAT_ID` and
+`JARVIS_MANAGER_THREAD_ID`; with no service topic configured, those notices
+are silently dropped. Both ids show up in the bot log: post in the topic and
+look for `update …: chat=<CHAT_ID> thread=<THREAD_ID>`.
+
+Writing a plugin: create `plugins/<name>/plugin.py` exposing
+`PLUGIN = Plugin(name=..., workers=..., commands=..., setup=...,
+trigger_sources=..., schema=...)` (contract in `bot/plugins.py`), and
+optionally `plugins/<name>/mcp_tools.py` with `register(mcp)` for agent tools.
+The Russian section «Плагины» below has a full example.
 
 ## Что умеет
 
@@ -157,12 +183,90 @@ claude -p "hello"   # проверка, что авторизация работ
 > обоим `409 Conflict`. Проверяйте `env | grep TELEGRAM_TOKEN`, если поведение не
 > соответствует файлу.
 
-### Топик техподдержки
+### Плагины
 
-Для отдельного бота поддержки включите плагин `support_topic` в `JARVIS_PLUGINS` и задайте
-`JARVIS_SUPPORT_CHAT_ID` и `JARVIS_SUPPORT_THREAD_ID`. Jarvis полностью пропускает сообщения и команды
-этого топика, чтобы ответы клиентам не запускали LLM. Оба значения обязательны;
-без них поведение остальных топиков не меняется. Активация требует перезапуска.
+Ядро Jarvis — топики, сеансы, движки, очереди `jobs`/`agent_triggers` и Manager
+MCP. Всё, что ходит во внешние сервисы, вынесено в плагины `plugins/<имя>/` и по
+умолчанию **выключено**: чистая установка не тянет чужих зависимостей и никуда
+не стучится.
+
+**Включение** — список имён через запятую в `.env`, затем перезапуск бота:
+
+```bash
+JARVIS_PLUGINS=reminders,imap
+```
+
+Список читают и бот (фоновые задачи, команды, таблицы), и MCP-сервер (тулы
+плагина для агента; `.env` он ищет рядом с `--db`). Имя без учёта регистра.
+Плагин, который не импортировался, пропускается с ошибкой в журнале — остальные
+работают. В журнале при старте: `plugins loaded: …`.
+
+| Плагин | Что делает | Настройка | Где пригоден |
+|---|---|---|---|
+| `reminders` | агент ставит напоминания по расписанию (`daily 09:00`, `weekly mon,thu 10:00`, `once 2026-12-31 18:00`…) тулами `manager_remind_*`; бот присылает их в топик, где они созданы | `JARVIS_REMINDERS_TZ`, `JARVIS_REMINDERS_INTERVAL` — необязательно | везде |
+| `imap` | следит за ящиками IMAP и присылает нотис «📧 Новое письмо» с отправителем и темой | `JARVIS_IMAP_ACCOUNTS` (JSON, пароль — через `password_env`), `JARVIS_IMAP_INTERVAL` | любой IMAP-ящик; нужен служебный топик (ниже) |
+| `webhook` | HTTP-приёмник событий **Битрикс24** (`/hook/bitrix24`): новые задачи, дела CRM, события календаря → нотис | `JARVIS_WEBHOOK_TOKEN` (без него сервер не стартует), `JARVIS_WEBHOOK_HOST`, `JARVIS_WEBHOOK_PORT`; наружу — через reverse proxy с TLS | только Битрикс24; другой сервис — новый маршрут в `plugins/webhook/server.py`; нужен служебный топик |
+| `activecollab` | MCP-тулы `manager_activecollab_*`: свои задачи и обновления, комментарий, учёт времени, перенос между стадиями | `ACTIVE_COLLAB_URL`, `ACTIVE_COLLAB_TOKEN` | у кого ActiveCollab; см. раздел «ActiveCollab» |
+| `queuewarden` | уведомления из QueueWarden будят агента в топике, команда `/board` открывает доску-миниапп | `QUEUEWARDEN_*`, `BOARD_MINIAPP*`; см. разделы «QueueWarden» | только с развёрнутым QueueWarden |
+| `support_topic` | бот полностью пропускает один топик — там отвечает другой бот (поддержка клиентов), и LLM не запускается | `JARVIS_SUPPORT_CHAT_ID` и `JARVIS_SUPPORT_THREAD_ID`, оба обязательны | везде, где бот делит форум с другим ботом |
+
+#### Куда приходят нотисы
+
+`imap`, `webhook` и `queuewarden` шлют нотисы не в произвольный топик, а в
+**служебный**, и заодно будят в нём агента, чтобы тот разобрал свежие
+события:
+
+- `imap`, `webhook` — в топик Секретаря: `JARVIS_SECRETARY_CHAT_ID`/`_THREAD_ID`,
+  иначе `JARVIS_MANAGER_CHAT_ID`/`_THREAD_ID`;
+- `queuewarden` — `JARVIS_QW_NOTICE_*`, иначе Тимлид (`JARVIS_TEAMLEAD_*`),
+  иначе Секретарь.
+
+**Ни одна пара не задана — нотисы молча не отправляются.** Минимальная
+настройка — один топик Менеджера: `JARVIS_MANAGER_CHAT_ID` и
+`JARVIS_MANAGER_THREAD_ID`. Оба id видны в журнале бота: напишите в нужный
+топик и найдите строку `update …: chat=<CHAT_ID> thread=<THREAD_ID>`.
+`reminders` от служебных топиков не зависит: напоминание приходит туда, где его
+поставили, а в служебном топике ещё и будит агента.
+
+#### Свой плагин
+
+Пакет `plugins/<имя>/` с файлом `plugin.py`, где объявлен `PLUGIN`
+(контракт — `bot/plugins.py`):
+
+```python
+from bot.plugins import Command, Plugin, TriggerSource
+
+async def my_worker(app):            # фоновая задача, живёт всё время работы бота
+    ...
+
+async def cmd_hello(update, context):
+    await update.effective_message.reply_text("hi")
+
+PLUGIN = Plugin(
+    name="myplugin",
+    workers=(my_worker,),
+    commands=(Command("hello", cmd_hello, "поздороваться"),),  # + в меню бота
+    setup=None,                      # Application -> None: свои хендлеры, группы
+    trigger_sources={"myplugin": TriggerSource(build_prompt=lambda texts: "\n".join(texts))},
+    schema=("CREATE TABLE IF NOT EXISTS myplugin_state (id INTEGER PRIMARY KEY)",),
+)
+```
+
+- `workers` — корутины от `Application`, бот запускает их при старте.
+- `commands` регистрируются с тем же whitelist, что и команды ядра, и попадают в
+  меню.
+- `trigger_sources` — как исполнять строки `agent_triggers` с этим `source`
+  (см. «Внешние триггеры»): `build_prompt` собирает промпт хода,
+  `coalesce_seconds` склеивает серию триггеров топика в один ход,
+  `allow_silent` разрешает агенту промолчать ответом `[[SILENT]]`.
+- `schema` — идемпотентный DDL своих таблиц, выполняется при старте в общей
+  `bot_state.db`.
+- MCP-тулы для агента — `plugins/<имя>/mcp_tools.py` с функцией
+  `register(mcp)`, внутри — обычные `@mcp.tool(...)`. MCP-сервер работает
+  отдельным процессом: этот модуль не должен импортировать Telegram-часть
+  бота.
+- `plugin.py` импортирует только бот; держите тяжёлые зависимости внутри
+  плагина и добавьте их в `requirements.txt` с пометкой, какому плагину они нужны.
 
 ### Whitelist
 
