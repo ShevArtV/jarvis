@@ -8,8 +8,9 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from bot import db as bot_db
+from mcp_server import common
+from plugins.activecollab import mcp_tools as activecollab_tools
 from plugins.activecollab.client import ActiveCollabClient
-from scripts import jarvis_mcp_server as manager_mcp
 
 
 class _Response:
@@ -95,11 +96,11 @@ class ActiveCollabDeltaTest(unittest.TestCase):
         self.db_patch = patch.object(bot_db, "DB_PATH", str(self.db_path))
         self.db_patch.start()
         bot_db.init_db()
-        self.old_db_path = manager_mcp._DB_PATH
-        manager_mcp._DB_PATH = self.db_path
+        self.old_db_path = common._DB_PATH
+        common._DB_PATH = self.db_path
 
     def tearDown(self) -> None:
-        manager_mcp._DB_PATH = self.old_db_path
+        common._DB_PATH = self.old_db_path
         self.db_patch.stop()
         self.tmp.cleanup()
 
@@ -113,8 +114,8 @@ class ActiveCollabDeltaTest(unittest.TestCase):
     def test_first_check_is_baseline_then_only_returns_delta(self) -> None:
         first_tasks = [{"id": 10, "is_completed": False, "name": "Existing"}]
         first_notifications = [{"id": 20, "task_id": 10}]
-        with patch.object(manager_mcp, "_activecollab_client", return_value=self._client(first_tasks, first_notifications)):
-            first = manager_mcp._activecollab_check_updates()
+        with patch.object(activecollab_tools, "_activecollab_client", return_value=self._client(first_tasks, first_notifications)):
+            first = activecollab_tools._activecollab_check_updates()
 
         self.assertTrue(first["initial_check"])
         self.assertEqual([task["id"] for task in first["open_tasks"]], [10])
@@ -123,8 +124,8 @@ class ActiveCollabDeltaTest(unittest.TestCase):
 
         second_tasks = first_tasks + [{"id": 11, "is_completed": False, "name": "New"}]
         second_notifications = first_notifications + [{"id": 21, "task_id": 11}]
-        with patch.object(manager_mcp, "_activecollab_client", return_value=self._client(second_tasks, second_notifications)):
-            second = manager_mcp._activecollab_check_updates()
+        with patch.object(activecollab_tools, "_activecollab_client", return_value=self._client(second_tasks, second_notifications)):
+            second = activecollab_tools._activecollab_check_updates()
 
         self.assertFalse(second["initial_check"])
         self.assertEqual([task["id"] for task in second["new_tasks"]], [11])

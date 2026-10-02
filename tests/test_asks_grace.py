@@ -12,7 +12,7 @@ from bot.asks import get_pending_ask, get_recent_timed_out_ask, mark_ask_late_an
 
 class AsksGraceTest(unittest.TestCase):
     """Grace-окно: ответ текстом на вопрос, истёкший по таймауту, не должен
-    теряться бесследно (см. ask_user в scripts/jarvis_mcp_server.py)."""
+    теряться бесследно (см. ask_user в mcp_server/tools/asks.py)."""
 
     def _fresh_db(self, tmp: str) -> str:
         db_path = str(Path(tmp) / "bot_state.db")

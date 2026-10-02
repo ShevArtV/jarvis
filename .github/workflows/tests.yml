@@ -47,7 +47,7 @@ jobs:
       # шагом, а не внутри тестов: NameError в теле функции не проявляется ни
       # при импорте модуля, ни в юнит-тестах — только при вызове.
       - name: Undefined names (pyflakes)
-        run: python -m pyflakes bot telegram_bot.py config.py plugins engines scripts
+        run: python -m pyflakes bot telegram_bot.py config.py plugins engines scripts mcp_server
 
       # Свежий клон обязан подниматься с .env из двух строк: без Менеджера и
       # без внешних MCP-серверов. Регрессия здесь означает, что проект снова

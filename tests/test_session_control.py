@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import importlib.util
 import json
 import os
 import tempfile
@@ -20,6 +19,8 @@ from bot.handlers.toggles import (
     _session_confirm_token,
 )
 from engines.session_usage import aggregate_claude_usage
+from mcp_server import common
+from mcp_server.tools import topics
 
 
 class DoneDetectorTest(unittest.TestCase):
@@ -135,16 +136,6 @@ class ClaudeUsageAggregationTest(unittest.TestCase):
         self.assertIn("deduplicated 1", usage.note or "")
 
 
-def _load_mcp_server():
-    """scripts/ не пакет — грузим MCP-сервер по пути."""
-    path = Path(__file__).resolve().parent.parent / "scripts" / "jarvis_mcp_server.py"
-    spec = importlib.util.spec_from_file_location("jarvis_mcp_server_under_test", path)
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(module)
-    return module
-
-
 class _FakeChat:
     def __init__(self) -> None:
         self.sent: list[tuple[str, dict]] = []
@@ -167,6 +158,13 @@ class ManagerCloseSessionTest(unittest.TestCase):
     """manager_close_session (MCP) → close_requests_worker (бот): закрытие
     сеанса чужого топика через БД, потому что процессы топика видит только бот."""
 
+    def setUp(self) -> None:
+        # Модуль сервера общий на все тесты — состояние возвращаем на место.
+        for name, value in (("_DB_PATH", None), ("_JOBS_ORIGIN_COLS", None)):
+            patcher = patch.object(common, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
     CHAT_ID = -100500
     THREAD_ID = 77
 
@@ -187,15 +185,14 @@ class ManagerCloseSessionTest(unittest.TestCase):
             )
 
     def test_close_request_flows_from_mcp_to_bot(self) -> None:
-        mcp_server = _load_mcp_server()
         with tempfile.TemporaryDirectory() as tmp:
             db_path = str(Path(tmp) / "bot_state.db")
             with patch.object(bot_db, "DB_PATH", db_path):
                 bot_db.init_db()
                 self._seed(db_path)
 
-                mcp_server._DB_PATH = Path(db_path)
-                result = mcp_server.manager_close_session(
+                common._DB_PATH = Path(db_path)
+                result = topics.manager_close_session(
                     thread_id=self.THREAD_ID, chat_id=self.CHAT_ID,
                 )
 
@@ -247,26 +244,24 @@ class ManagerCloseSessionTest(unittest.TestCase):
                 # уже завершён — прерывать нечего).
                 with bot_db.connect(db_path) as conn:
                     conn.execute("UPDATE jobs SET status = 'done'")
-                repeat = mcp_server.manager_close_session(
+                repeat = topics.manager_close_session(
                     thread_id=self.THREAD_ID, chat_id=self.CHAT_ID,
                 )
                 self.assertFalse(repeat["was_open"])
                 self.assertEqual(repeat["interrupted_jobs"], [])
 
     def test_unknown_topic_is_rejected(self) -> None:
-        mcp_server = _load_mcp_server()
         with tempfile.TemporaryDirectory() as tmp:
             db_path = str(Path(tmp) / "bot_state.db")
             with patch.object(bot_db, "DB_PATH", db_path):
                 bot_db.init_db()
-            mcp_server._DB_PATH = Path(db_path)
+            common._DB_PATH = Path(db_path)
             with self.assertRaises(RuntimeError):
-                mcp_server.manager_close_session(thread_id=1, chat_id=self.CHAT_ID)
+                topics.manager_close_session(thread_id=1, chat_id=self.CHAT_ID)
 
     def test_mcp_adds_close_requested_column_on_old_db(self) -> None:
         """MCP-сервер может подняться раньше бота новой версии — колонку
         заводит сам, иначе инструмент падал бы на 'no such column'."""
-        mcp_server = _load_mcp_server()
         with tempfile.TemporaryDirectory() as tmp:
             db_path = str(Path(tmp) / "old.db")
             with bot_db.connect(db_path) as conn:
@@ -274,7 +269,7 @@ class ManagerCloseSessionTest(unittest.TestCase):
                     "CREATE TABLE sessions (chat_id INTEGER NOT NULL, "
                     "thread_id INTEGER NOT NULL, session_id TEXT NOT NULL)"
                 )
-                mcp_server._ensure_close_requested_column(conn)
+                common._ensure_close_requested_column(conn)
                 cols = [r[1] for r in conn.execute(
                     "PRAGMA table_info(sessions)"
                 ).fetchall()]
@@ -284,6 +279,13 @@ class ManagerCloseSessionTest(unittest.TestCase):
 class TopicAdminTest(unittest.TestCase):
     """manager_archive_topic / manager_delete_topic: жизненный цикл временного
     топика. Telegram мокается — тесты не ходят в сеть и не трогают форум."""
+
+    def setUp(self) -> None:
+        # Модуль сервера общий на все тесты — состояние возвращаем на место.
+        for name, value in (("_DB_PATH", None), ("_JOBS_ORIGIN_COLS", None)):
+            patcher = patch.object(common, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
     CHAT_ID = -100500
     THREAD_ID = 88
@@ -321,14 +323,13 @@ class TopicAdminTest(unittest.TestCase):
             )
 
     def _prepared(self, tmp: str, **seed_kwargs):
-        """Готовая БД + MCP-модуль, нацеленный на неё."""
+        """Готовая БД, на которую нацелен MCP-сервер."""
         db_path = str(Path(tmp) / "bot_state.db")
         with patch.object(bot_db, "DB_PATH", db_path):
             bot_db.init_db()
         self._seed(db_path, **seed_kwargs)
-        mcp_server = _load_mcp_server()
-        mcp_server._DB_PATH = Path(db_path)
-        return mcp_server, db_path
+        common._DB_PATH = Path(db_path)
+        return db_path
 
     @staticmethod
     def _session_row(db_path: str, chat_id: int, thread_id: int):
@@ -342,7 +343,7 @@ class TopicAdminTest(unittest.TestCase):
         """Хелпер возвращает True только когда бот погасил close_requested —
         до этого момента живые процессы топика ещё не убиты."""
         with tempfile.TemporaryDirectory() as tmp:
-            mcp_server, db_path = self._prepared(tmp)
+            db_path = self._prepared(tmp)
             key = (self.CHAT_ID, self.THREAD_ID)
 
             async def fake_bot() -> None:
@@ -367,12 +368,12 @@ class TopicAdminTest(unittest.TestCase):
 
             async def scenario() -> tuple[bool, bool]:
                 # Бот молчит: флаг стоит, гасить его некому — False.
-                timed_out = await mcp_server._await_bot_close(
+                timed_out = await topics._await_bot_close(
                     *key, timeout=0.0, poll=0.01,
                 )
                 # Бот жив и гасит флаг — дожидаемся подтверждения.
                 confirmed, _ = await asyncio.gather(
-                    mcp_server._await_bot_close(*key, timeout=2.0, poll=0.01),
+                    topics._await_bot_close(*key, timeout=2.0, poll=0.01),
                     fake_bot(),
                 )
                 return timed_out, confirmed
@@ -383,11 +384,11 @@ class TopicAdminTest(unittest.TestCase):
 
     def test_archive_folds_topic_and_keeps_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            mcp_server, db_path = self._prepared(tmp)
-            with patch.object(mcp_server, "_telegram_api") as api, patch.object(
-                mcp_server, "_await_bot_close", new=AsyncMock(return_value=True)
+            db_path = self._prepared(tmp)
+            with patch.object(common, "_telegram_api") as api, patch.object(
+                topics, "_await_bot_close", new=AsyncMock(return_value=True)
             ):
-                result = asyncio.run(mcp_server.manager_archive_topic(
+                result = asyncio.run(topics.manager_archive_topic(
                     thread_id=self.THREAD_ID, chat_id=self.CHAT_ID,
                 ))
             self.assertEqual(api.call_args.args[0], "closeForumTopic")
@@ -403,11 +404,11 @@ class TopicAdminTest(unittest.TestCase):
 
     def test_archive_reopen_unfolds_and_keeps_session_closed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            mcp_server, _ = self._prepared(tmp)
-            with patch.object(mcp_server, "_telegram_api") as api, patch.object(
-                mcp_server, "_await_bot_close", new=AsyncMock(return_value=True)
+            self._prepared(tmp)
+            with patch.object(common, "_telegram_api") as api, patch.object(
+                topics, "_await_bot_close", new=AsyncMock(return_value=True)
             ) as await_close:
-                result = asyncio.run(mcp_server.manager_archive_topic(
+                result = asyncio.run(topics.manager_archive_topic(
                     thread_id=self.THREAD_ID, chat_id=self.CHAT_ID, reopen=True,
                 ))
             self.assertEqual(api.call_args.args[0], "reopenForumTopic")
@@ -417,11 +418,11 @@ class TopicAdminTest(unittest.TestCase):
 
     def test_delete_removes_state_and_defuses_pending_work(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            mcp_server, db_path = self._prepared(tmp)
-            with patch.object(mcp_server, "_telegram_api") as api, patch.object(
-                mcp_server, "_await_bot_close", new=AsyncMock(return_value=True)
+            db_path = self._prepared(tmp)
+            with patch.object(common, "_telegram_api") as api, patch.object(
+                topics, "_await_bot_close", new=AsyncMock(return_value=True)
             ):
-                result = asyncio.run(mcp_server.manager_delete_topic(
+                result = asyncio.run(topics.manager_delete_topic(
                     thread_id=self.THREAD_ID, chat_id=self.CHAT_ID,
                 ))
             self.assertEqual(api.call_args.args[0], "deleteForumTopic")
@@ -452,11 +453,11 @@ class TopicAdminTest(unittest.TestCase):
 
     def test_delete_with_purge_log_drops_the_history_too(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            mcp_server, db_path = self._prepared(tmp)
-            with patch.object(mcp_server, "_telegram_api"), patch.object(
-                mcp_server, "_await_bot_close", new=AsyncMock(return_value=True)
+            db_path = self._prepared(tmp)
+            with patch.object(common, "_telegram_api"), patch.object(
+                topics, "_await_bot_close", new=AsyncMock(return_value=True)
             ):
-                result = asyncio.run(mcp_server.manager_delete_topic(
+                result = asyncio.run(topics.manager_delete_topic(
                     thread_id=self.THREAD_ID, chat_id=self.CHAT_ID, purge_log=True,
                 ))
             with bot_db.connect(db_path) as conn:
@@ -471,16 +472,16 @@ class TopicAdminTest(unittest.TestCase):
         """Топик удалили руками в Telegram — строка в sessions осиротела;
         инструмент обязан её убрать, а не упасть."""
         with tempfile.TemporaryDirectory() as tmp:
-            mcp_server, db_path = self._prepared(tmp)
+            db_path = self._prepared(tmp)
             gone = RuntimeError(
                 "Telegram deleteForumTopic failed: Bad Request: message thread not found"
             )
             with patch.object(
-                mcp_server, "_telegram_api", side_effect=gone
+                common, "_telegram_api", side_effect=gone
             ), patch.object(
-                mcp_server, "_await_bot_close", new=AsyncMock(return_value=True)
+                topics, "_await_bot_close", new=AsyncMock(return_value=True)
             ):
-                result = asyncio.run(mcp_server.manager_delete_topic(
+                result = asyncio.run(topics.manager_delete_topic(
                     thread_id=self.THREAD_ID, chat_id=self.CHAT_ID,
                 ))
             with bot_db.connect(db_path) as conn:
@@ -492,17 +493,17 @@ class TopicAdminTest(unittest.TestCase):
     def test_delete_propagates_other_telegram_errors(self) -> None:
         """Нет прав — не наш случай «топика уже нет»: состояние трогать нельзя."""
         with tempfile.TemporaryDirectory() as tmp:
-            mcp_server, db_path = self._prepared(tmp)
+            db_path = self._prepared(tmp)
             denied = RuntimeError(
                 "Telegram deleteForumTopic failed: Bad Request: not enough rights"
             )
             with patch.object(
-                mcp_server, "_telegram_api", side_effect=denied
+                common, "_telegram_api", side_effect=denied
             ), patch.object(
-                mcp_server, "_await_bot_close", new=AsyncMock(return_value=True)
+                topics, "_await_bot_close", new=AsyncMock(return_value=True)
             ):
                 with self.assertRaises(RuntimeError):
-                    asyncio.run(mcp_server.manager_delete_topic(
+                    asyncio.run(topics.manager_delete_topic(
                         thread_id=self.THREAD_ID, chat_id=self.CHAT_ID,
                     ))
             with bot_db.connect(db_path) as conn:
@@ -511,9 +512,9 @@ class TopicAdminTest(unittest.TestCase):
 
     def test_delete_refuses_general_and_manager_topics(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            mcp_server, _ = self._prepared(tmp)
+            self._prepared(tmp)
             with self.assertRaises(RuntimeError) as general:
-                asyncio.run(mcp_server.manager_delete_topic(
+                asyncio.run(topics.manager_delete_topic(
                     thread_id=1, chat_id=self.CHAT_ID,
                 ))
             self.assertIn("General", str(general.exception))
@@ -522,7 +523,7 @@ class TopicAdminTest(unittest.TestCase):
                 os.environ, {"JARVIS_MANAGER_THREAD_ID": str(self.THREAD_ID)}
             ):
                 with self.assertRaises(RuntimeError) as manager:
-                    asyncio.run(mcp_server.manager_delete_topic(
+                    asyncio.run(topics.manager_delete_topic(
                         thread_id=self.THREAD_ID, chat_id=self.CHAT_ID,
                     ))
         self.assertIn("Manager", str(manager.exception))
@@ -532,7 +533,7 @@ class TopicAdminTest(unittest.TestCase):
         наследует не всегда: читай guard только из os.environ — топик
         Менеджера удалялся бы как обычный там, где задан лишь .env."""
         with tempfile.TemporaryDirectory() as tmp:
-            mcp_server, db_path = self._prepared(tmp)
+            db_path = self._prepared(tmp)
             (Path(db_path).parent / ".env").write_text(
                 f"TELEGRAM_TOKEN=123:fake\nJARVIS_MANAGER_THREAD_ID={self.THREAD_ID}\n",
                 encoding="utf-8",
@@ -543,32 +544,32 @@ class TopicAdminTest(unittest.TestCase):
             }
             with patch.dict(os.environ, env_without_manager, clear=True):
                 with self.assertRaises(RuntimeError) as manager:
-                    asyncio.run(mcp_server.manager_delete_topic(
+                    asyncio.run(topics.manager_delete_topic(
                         thread_id=self.THREAD_ID, chat_id=self.CHAT_ID,
                     ))
         self.assertIn("Manager", str(manager.exception))
 
     def test_delete_refuses_unknown_topic(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            mcp_server, _ = self._prepared(tmp)
+            self._prepared(tmp)
             with self.assertRaises(RuntimeError):
-                asyncio.run(mcp_server.manager_delete_topic(
+                asyncio.run(topics.manager_delete_topic(
                     thread_id=999, chat_id=self.CHAT_ID,
                 ))
 
     def test_delete_refuses_busy_topic_unless_forced(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            mcp_server, db_path = self._prepared(tmp, job_status="in_progress")
-            with patch.object(mcp_server, "_telegram_api"), patch.object(
-                mcp_server, "_await_bot_close", new=AsyncMock(return_value=True)
+            db_path = self._prepared(tmp, job_status="in_progress")
+            with patch.object(common, "_telegram_api"), patch.object(
+                topics, "_await_bot_close", new=AsyncMock(return_value=True)
             ):
                 with self.assertRaises(RuntimeError) as busy:
-                    asyncio.run(mcp_server.manager_delete_topic(
+                    asyncio.run(topics.manager_delete_topic(
                         thread_id=self.THREAD_ID, chat_id=self.CHAT_ID,
                     ))
                 self.assertIn("in_progress", str(busy.exception))
 
-                forced = asyncio.run(mcp_server.manager_delete_topic(
+                forced = asyncio.run(topics.manager_delete_topic(
                     thread_id=self.THREAD_ID, chat_id=self.CHAT_ID, force=True,
                 ))
             with bot_db.connect(db_path) as conn:
@@ -579,18 +580,18 @@ class TopicAdminTest(unittest.TestCase):
     def test_delete_refuses_when_bot_did_not_confirm(self) -> None:
         """Бот не отозвался — его процессы пережили бы топик. Только force."""
         with tempfile.TemporaryDirectory() as tmp:
-            mcp_server, db_path = self._prepared(tmp)
-            with patch.object(mcp_server, "_telegram_api"), patch.object(
-                mcp_server, "_await_bot_close", new=AsyncMock(return_value=False)
+            db_path = self._prepared(tmp)
+            with patch.object(common, "_telegram_api"), patch.object(
+                topics, "_await_bot_close", new=AsyncMock(return_value=False)
             ):
                 with self.assertRaises(RuntimeError) as silent:
-                    asyncio.run(mcp_server.manager_delete_topic(
+                    asyncio.run(topics.manager_delete_topic(
                         thread_id=self.THREAD_ID, chat_id=self.CHAT_ID,
                         wait_seconds=0.0,
                     ))
                 self.assertIn("force=true", str(silent.exception))
 
-                forced = asyncio.run(mcp_server.manager_delete_topic(
+                forced = asyncio.run(topics.manager_delete_topic(
                     thread_id=self.THREAD_ID, chat_id=self.CHAT_ID, force=True,
                 ))
             with bot_db.connect(db_path) as conn:

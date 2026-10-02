@@ -603,7 +603,8 @@ Per-topic MCP — часть контракта `Engine.call_stream` (см.
 
 По той же схеме Jarvis регистрирует свой собственный stdio MCP-сервер,
 дающий доступ к состоянию бота и согласованным действиям Менеджера. Сервер
-живёт в `scripts/jarvis_mcp_server.py` и запускается тем же venv-Python'ом.
+живёт в пакете `mcp_server/` (точка входа — `scripts/jarvis_mcp_server.py`) и
+запускается тем же venv-Python'ом.
 
 Доступные tools (Этап 1):
 
@@ -630,7 +631,8 @@ Per-topic MCP — часть контракта `Engine.call_stream` (см.
   `messages_log` по умолчанию сохраняется, `purge_log=true` сносит и его.
 
 (Это не полный список — есть и write-tools: `manager_send`, `manager_set_engine`,
-`manager_create_topic` и др. См. декораторы `@mcp.tool` в `scripts/jarvis_mcp_server.py`.)
+`manager_create_topic` и др. См. декораторы `@mcp.tool` в `mcp_server/tools/` и
+`plugins/*/mcp_tools.py`.)
 
 #### Кому уходит нотис по job
 
@@ -807,7 +809,10 @@ journalctl --user -u jarvis-bot -f
 - `config.py` — чтение `.env`, токен и whitelist.
 - `plugins/` — подключаемые интеграции (QueueWarden, ActiveCollab, напоминания, IMAP, webhook).
 - `engines/` — адаптеры CLI, Playwright MCP, topic-MCP, кэш моделей (см. выше).
-- `scripts/jarvis_mcp_server.py` — Jarvis Manager MCP (`ask_user`, `manager_*`).
+- `scripts/jarvis_mcp_server.py` — точка входа Jarvis Manager MCP (путь прописан в конфигах движков).
+- `mcp_server/` — сам MCP-сервер: `common.py` (БД, Telegram API, объект FastMCP),
+  `tools/` (`ask_user`, `manager_*`), `server.py` (`main`, загрузка тулов плагинов
+  из `JARVIS_PLUGINS` через `plugins/<имя>/mcp_tools.py`).
 - `bot_state.db` — sqlite: сессии, `jobs`, `agent_triggers`, `messages_log`,
   `reminders`, метаданные исходящих сообщений (для reply-to).
 - `temp/media/` — скачанные пользовательские вложения.

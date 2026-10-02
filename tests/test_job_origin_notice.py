@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import importlib.util
 import tempfile
 import unittest
 from datetime import datetime
@@ -12,6 +11,8 @@ from bot import db as bot_db
 from bot import delivery as bot_delivery
 from bot.queues import claim_next_job
 from bot.topics import resolve_job_notice_target
+from mcp_server import common
+from mcp_server.tools import jobs
 
 OLD_JOBS_SCHEMA = """
 CREATE TABLE jobs (
@@ -39,16 +40,6 @@ SERVICE_ENV = {
 }
 
 
-def _load_mcp_server():
-    """scripts/ не пакет — грузим MCP-сервер по пути."""
-    path = Path(__file__).resolve().parent.parent / "scripts" / "jarvis_mcp_server.py"
-    spec = importlib.util.spec_from_file_location("jarvis_mcp_server_origin_test", path)
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(module)
-    return module
-
-
 class JobOriginNoticeTest(unittest.TestCase):
     """Нотис об ответе на job уходит топику, который job делегировал.
 
@@ -60,6 +51,11 @@ class JobOriginNoticeTest(unittest.TestCase):
     def setUp(self) -> None:
         self.env_patcher = patch.dict("os.environ", SERVICE_ENV, clear=False)
         self.env_patcher.start()
+        # Модуль сервера общий на все тесты — состояние возвращаем на место.
+        for name, value in (("_DB_PATH", None), ("_JOBS_ORIGIN_COLS", None)):
+            patcher = patch.object(common, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
     def tearDown(self) -> None:
         self.env_patcher.stop()
@@ -92,7 +88,6 @@ class JobOriginNoticeTest(unittest.TestCase):
         self.assertEqual(resolve_job_notice_target(-100, 453), (-100, 453))
 
     def test_manager_send_records_origin(self) -> None:
-        mcp_server = _load_mcp_server()
         with tempfile.TemporaryDirectory() as tmp:
             db_path = self._fresh_db(tmp)
             with bot_db.connect(db_path) as conn:
@@ -102,8 +97,8 @@ class JobOriginNoticeTest(unittest.TestCase):
                     (-100, 101, "sid", "/tmp", "codex",
                      datetime.utcnow().isoformat()),
                 )
-            mcp_server._DB_PATH = Path(db_path)
-            result = mcp_server.manager_send(
+            common._DB_PATH = Path(db_path)
+            result = jobs.manager_send(
                 thread_id=101,
                 text="Заведи карточку",
                 chat_id=-100,
@@ -119,7 +114,6 @@ class JobOriginNoticeTest(unittest.TestCase):
         self.assertEqual(result["origin_thread_id"], 202)
 
     def test_manager_send_without_origin_keeps_nulls(self) -> None:
-        mcp_server = _load_mcp_server()
         with tempfile.TemporaryDirectory() as tmp:
             db_path = self._fresh_db(tmp)
             with bot_db.connect(db_path) as conn:
@@ -129,8 +123,8 @@ class JobOriginNoticeTest(unittest.TestCase):
                     (-100, 101, "sid", "/tmp", "codex",
                      datetime.utcnow().isoformat()),
                 )
-            mcp_server._DB_PATH = Path(db_path)
-            result = mcp_server.manager_send(
+            common._DB_PATH = Path(db_path)
+            result = jobs.manager_send(
                 thread_id=101, text="Без инициатора", chat_id=-100,
             )
             with bot_db.connect(db_path) as conn:
