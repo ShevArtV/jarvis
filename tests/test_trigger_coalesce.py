@@ -57,7 +57,7 @@ class ClaimCoalesceTest(unittest.TestCase):
         b = self.add("b", age=30)
         c = self.add("c", age=1)
         other = self.add("x", topic=OTHER, age=100)
-        mxb = self.add("m", source="mxboard", age=110)
+        mxb = self.add("m", source="tracker", age=110)
         trig = queues.claim_next_agent_trigger(coalesce=QW)
         self.assertEqual(trig["ids"], [a, b, c])
         self.assertEqual(trig["texts"], ["a", "b", "c"])
@@ -68,8 +68,8 @@ class ClaimCoalesceTest(unittest.TestCase):
             self.assertEqual(self.status(tid), "pending")
 
     def test_other_sources_not_delayed_or_merged(self) -> None:
-        a = self.add("m1", source="mxboard", age=1)
-        self.add("m2", source="mxboard", age=0)
+        a = self.add("m1", source="tracker", age=1)
+        self.add("m2", source="tracker", age=0)
         trig = queues.claim_next_agent_trigger(coalesce=QW)
         self.assertEqual(trig["ids"], [a])
 

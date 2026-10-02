@@ -8,9 +8,7 @@ one Telegram forum can talk to the same service under two identities without
 either identity leaking into the other's topics.
 
 Jarvis itself knows nothing about any particular service: the whole
-integration is a JSON file pointed at by ``JARVIS_TOPIC_MCP_CONFIG``. A live
-example is the ``jarvis-mxboard-poller`` project, which bridges an mxBoard
-kanban into Jarvis and ships its own template for this file.
+integration is a JSON file pointed at by ``JARVIS_TOPIC_MCP_CONFIG``.
 
 Config format (``roles`` is optional — without it the server is attached to
 every role using the top-level ``headers``)::
@@ -18,7 +16,7 @@ every role using the top-level ``headers``)::
     {
       "servers": [
         {
-          "name": "mxboard",
+          "name": "tracker",
           "url": "https://example.org/rest-mcp.php",
           "roles": {
             "manager":   {"headers": {"Authorization": "Bearer <manager-token>"}},

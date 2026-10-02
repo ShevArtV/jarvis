@@ -266,7 +266,7 @@ def init_db() -> None:
         # любого интегратора (issue tracker, CI, cron): вставь строку, и бот
         # проведёт обычный LLM turn в топике, но без job_id, health_worker,
         # manager_interrupt и safety-notice Менеджеру на ответ или interrupt.
-        # source — свободная метка интеграции ('mxboard' у поллера доски),
+        # source — свободная метка интеграции (например, 'tracker'),
         # нужна только для логов и гарда ask_user ниже.
         conn.execute(
             """

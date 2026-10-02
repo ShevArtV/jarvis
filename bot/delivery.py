@@ -122,7 +122,7 @@ async def _send_manager_notice(
     свежие нотисы вместе при текущем запуске.
 
     target_role='secretary' — коммуникационные уведомления/reminders.
-    target_role='teamlead' — инженерные job/heartbeat/mxBoard-notices.
+    target_role='teamlead' — инженерные job/heartbeat-notices и события трекера.
     Старое имя функции сохраняется как compatibility API.
 
     target=(chat_id, thread_id) перебивает роль: нотис по job уходит топику,

@@ -17,7 +17,7 @@ CREATE TABLE agent_triggers (
     chat_id INTEGER NOT NULL,
     thread_id INTEGER NOT NULL,
     text TEXT NOT NULL,
-    source TEXT NOT NULL DEFAULT 'mxboard',
+    source TEXT NOT NULL DEFAULT 'tracker',
     status TEXT NOT NULL DEFAULT 'pending',
     created_at TEXT NOT NULL,
     claimed_at TEXT,
@@ -38,7 +38,7 @@ class AskUserExternalGuardTest(unittest.TestCase):
     закрыт: ответ в нём осел бы мимо задачи. Менеджера это не касается.
 
     Гард смотрит на role, а НЕ на source: контракт общий для любой
-    интеграции, не только для mxBoard (обобщено 2026-07-25)."""
+    интеграции, не только для одного трекера (обобщено 2026-07-25)."""
 
     def setUp(self) -> None:
         # Модуль сервера общий на все тесты — состояние возвращаем на место.
@@ -55,7 +55,7 @@ class AskUserExternalGuardTest(unittest.TestCase):
 
     def _add_trigger(
         self, db_path: str, role: str | None, status: str = "in_progress",
-        source: str = "mxboard", thread_id: int = 77,
+        source: str = "tracker", thread_id: int = 77,
     ) -> None:
         with bot_db.connect(db_path) as conn:
             conn.execute(
@@ -92,7 +92,7 @@ class AskUserExternalGuardTest(unittest.TestCase):
                 ))
         self.assertEqual(result["status"], "blocked")
         self.assertEqual(result["task"], "#482")
-        self.assertEqual(result["source"], "mxboard")
+        self.assertEqual(result["source"], "tracker")
         self.assertIn("#482", result["error"])
         api.assert_not_called()
 
@@ -115,7 +115,7 @@ class AskUserExternalGuardTest(unittest.TestCase):
 
     def test_guard_is_not_limited_to_one_integration(self) -> None:
         """Любой source с role=executor блокирует — до 2026-07-25 в SQL был
-        зашит source='mxboard', и чужая интеграция гард не получала."""
+        зашит source='tracker', и чужая интеграция гард не получала."""
         with tempfile.TemporaryDirectory() as tmp:
             db_path = self._fresh_db(tmp)
             common._DB_PATH = Path(db_path)
@@ -131,7 +131,7 @@ class AskUserExternalGuardTest(unittest.TestCase):
                 conn.execute(OLD_TRIGGERS_SCHEMA)
                 conn.execute(
                     "INSERT INTO agent_triggers(chat_id, thread_id, text, source, "
-                    "status, created_at) VALUES (?, ?, ?, 'mxboard', 'in_progress', ?)",
+                    "status, created_at) VALUES (?, ?, ?, 'tracker', 'in_progress', ?)",
                     (-100, 77, TRIGGER_TEXT, utcnow().isoformat()),
                 )
             common._DB_PATH = Path(db_path)
@@ -143,13 +143,13 @@ class AskUserExternalGuardTest(unittest.TestCase):
             with bot_db.connect(db_path) as conn:
                 conn.execute(
                     "INSERT INTO agent_triggers(chat_id, thread_id, text, source, role, "
-                    "status, created_at) VALUES (?, ?, ?, 'mxboard', 'executor', "
+                    "status, created_at) VALUES (?, ?, ?, 'tracker', 'executor', "
                     "'in_progress', ?)",
                     (-100, 88, "Событие по задаче без тега", utcnow().isoformat()),
                 )
             common._DB_PATH = Path(db_path)
             self.assertEqual(
-                asks._external_executor_task(-100, 88), ("#?", "mxboard"),
+                asks._external_executor_task(-100, 88), ("#?", "tracker"),
             )
 
 

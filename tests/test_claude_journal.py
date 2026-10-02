@@ -45,7 +45,7 @@ class ClaudeJournalStepsTest(unittest.TestCase):
             _tool_step("mcp__codegraph__codegraph_explore", {"query": "ProgressJournal"}),
             "🔎 codegraph · codegraph_explore: ProgressJournal",
         )
-        self.assertEqual(_tool_step("mcp__mxboard__board_list", {}), "🔌 mxboard · board_list")
+        self.assertEqual(_tool_step("mcp__tracker__board_list", {}), "🔌 tracker · board_list")
 
     def test_unknown_tool_keeps_name(self) -> None:
         self.assertEqual(_tool_step("ToolSearch", {"query": "x"}), "🔧 ToolSearch")

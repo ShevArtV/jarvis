@@ -20,7 +20,7 @@ from engines.opencode_engine import _opencode_mcp_config
 CONFIG = {
     "servers": [
         {
-            "name": "mxboard",
+            "name": "tracker",
             "url": "https://example.test/mcp.php",
             "roles": {
                 "manager": {"headers": {"Authorization": "Bearer manager-token"}},
@@ -118,7 +118,7 @@ class RoleResolutionTest(TopicMcpTestBase):
 
     def test_service_roles_may_have_explicit_credentials(self) -> None:
         data = {"servers": [{
-            "name": "mxboard",
+            "name": "tracker",
             "url": "https://example.test/mcp.php",
             "roles": {
                 "manager": {"headers": {"Authorization": "Bearer manager-token"}},
@@ -280,8 +280,8 @@ class EngineRenderingTest(TopicMcpTestBase):
 
         self.assertEqual(flags[0], "--mcp-config")
         servers = json.loads(flags[1])["mcpServers"]
-        self.assertEqual(servers["mxboard"]["type"], "http")
-        self.assertEqual(servers["mxboard"]["headers"]["Authorization"], "Bearer agent-token")
+        self.assertEqual(servers["tracker"]["type"], "http")
+        self.assertEqual(servers["tracker"]["headers"]["Authorization"], "Bearer agent-token")
 
     def test_codex_uses_profile_and_keeps_token_out_of_argv(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -299,7 +299,7 @@ class EngineRenderingTest(TopicMcpTestBase):
         self.assertNotIn("manager-token", "\n".join(flags))
         if os.name != "nt":  # права POSIX на Windows не применяются
             self.assertEqual(mode, 0o600)
-        self.assertIn("[mcp_servers.mxboard]", profile_text)
+        self.assertIn("[mcp_servers.tracker]", profile_text)
         self.assertIn("manager-token", profile_text)
         self.assertNotIn("agent-token", profile_text)
 
@@ -337,10 +337,10 @@ class EngineRenderingTest(TopicMcpTestBase):
                 Path(temp_path).unlink(missing_ok=True)
 
         self.assertEqual(data["mcp"]["jarvis"]["type"], "local")
-        self.assertEqual(data["mcp"]["mxboard"]["type"], "remote")
-        self.assertEqual(data["mcp"]["mxboard"]["url"], "https://example.test/mcp.php")
+        self.assertEqual(data["mcp"]["tracker"]["type"], "remote")
+        self.assertEqual(data["mcp"]["tracker"]["url"], "https://example.test/mcp.php")
         self.assertEqual(
-            data["mcp"]["mxboard"]["headers"]["Authorization"], "Bearer agent-token",
+            data["mcp"]["tracker"]["headers"]["Authorization"], "Bearer agent-token",
         )
 
     def test_persistent_codex_uses_inline_config_not_profile(self) -> None:
@@ -352,8 +352,8 @@ class EngineRenderingTest(TopicMcpTestBase):
         joined = "\n".join(flags)
         self.assertNotIn("--profile", flags)
         self.assertEqual(cleanup_paths, [])
-        self.assertIn("mcp_servers.mxboard.url", joined)
-        self.assertIn("mcp_servers.mxboard.http_headers", joined)
+        self.assertIn("mcp_servers.tracker.url", joined)
+        self.assertIn("mcp_servers.tracker.http_headers", joined)
         self.assertIn("manager-token", joined)
 
     def test_codex_global_flags_move_before_subcommand(self) -> None:
