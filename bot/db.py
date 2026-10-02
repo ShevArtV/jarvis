@@ -22,8 +22,20 @@ from bot.settings import DB_PATH
 
 logger = logging.getLogger(__name__)
 
+class _ClosingConnection(sqlite3.Connection):
+    """``with`` у sqlite3 только фиксирует транзакцию, а соединение оставляет
+    открытым до сборщика мусора. На Windows открытый файл нельзя удалить или
+    переименовать, поэтому закрываем соединение на выходе из блока."""
+
+    def __exit__(self, *exc):
+        try:
+            return super().__exit__(*exc)
+        finally:
+            self.close()
+
+
 def _db() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, factory=_ClosingConnection)
     conn.execute("PRAGMA journal_mode=WAL")
     return conn
 
