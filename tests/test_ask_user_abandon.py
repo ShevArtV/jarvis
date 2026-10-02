@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
-import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -45,7 +44,7 @@ class AskUserAbandonTest(unittest.TestCase):
             with patch.object(mcp_server, "_telegram_api", return_value={"message_id": 5}):
                 asyncio.run(run())
 
-            with sqlite3.connect(db_path) as conn:
+            with bot_db.connect(db_path) as conn:
                 status, polled_at = conn.execute(
                     "SELECT status, polled_at FROM ask_requests"
                 ).fetchone()

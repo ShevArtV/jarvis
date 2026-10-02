@@ -4,7 +4,6 @@ import asyncio
 import importlib.util
 import json
 import os
-import sqlite3
 import tempfile
 import unittest
 from datetime import UTC, datetime
@@ -173,7 +172,7 @@ class ManagerCloseSessionTest(unittest.TestCase):
 
     def _seed(self, db_path: str) -> None:
         now = datetime.utcnow().isoformat()
-        with sqlite3.connect(db_path) as conn:
+        with bot_db.connect(db_path) as conn:
             conn.execute(
                 "INSERT INTO sessions(chat_id, thread_id, session_id, cwd, engine, "
                 "model, updated_at, last_activity_at, session_started_at) "
@@ -205,7 +204,7 @@ class ManagerCloseSessionTest(unittest.TestCase):
                 self.assertTrue(result["was_open"])
                 self.assertEqual(len(result["interrupted_jobs"]), 1)
                 self.assertEqual(result["engine"], "claude")
-                with sqlite3.connect(db_path) as conn:
+                with bot_db.connect(db_path) as conn:
                     row = conn.execute(
                         "SELECT last_activity_at, close_requested FROM sessions "
                         "WHERE chat_id = ? AND thread_id = ?",
@@ -229,7 +228,7 @@ class ManagerCloseSessionTest(unittest.TestCase):
                 kill.assert_awaited_once()
                 self.assertEqual(kill.await_args.args[0], key)
 
-                with sqlite3.connect(db_path) as conn:
+                with bot_db.connect(db_path) as conn:
                     flag = conn.execute(
                         "SELECT close_requested FROM sessions "
                         "WHERE chat_id = ? AND thread_id = ?",
@@ -246,7 +245,7 @@ class ManagerCloseSessionTest(unittest.TestCase):
 
                 # Повтор на закрытом сеансе идемпотентен (job к этому моменту
                 # уже завершён — прерывать нечего).
-                with sqlite3.connect(db_path) as conn:
+                with bot_db.connect(db_path) as conn:
                     conn.execute("UPDATE jobs SET status = 'done'")
                 repeat = mcp_server.manager_close_session(
                     thread_id=self.THREAD_ID, chat_id=self.CHAT_ID,
@@ -270,7 +269,7 @@ class ManagerCloseSessionTest(unittest.TestCase):
         mcp_server = _load_mcp_server()
         with tempfile.TemporaryDirectory() as tmp:
             db_path = str(Path(tmp) / "old.db")
-            with sqlite3.connect(db_path) as conn:
+            with bot_db.connect(db_path) as conn:
                 conn.execute(
                     "CREATE TABLE sessions (chat_id INTEGER NOT NULL, "
                     "thread_id INTEGER NOT NULL, session_id TEXT NOT NULL)"
@@ -291,7 +290,7 @@ class TopicAdminTest(unittest.TestCase):
 
     def _seed(self, db_path: str, *, job_status: str = "pending") -> None:
         now = datetime.utcnow().isoformat()
-        with sqlite3.connect(db_path) as conn:
+        with bot_db.connect(db_path) as conn:
             conn.execute(
                 "INSERT INTO sessions(chat_id, thread_id, session_id, cwd, engine, "
                 "model, topic_title, updated_at, last_activity_at, session_started_at) "
@@ -333,7 +332,7 @@ class TopicAdminTest(unittest.TestCase):
 
     @staticmethod
     def _session_row(db_path: str, chat_id: int, thread_id: int):
-        with sqlite3.connect(db_path) as conn:
+        with bot_db.connect(db_path) as conn:
             return conn.execute(
                 "SELECT last_activity_at FROM sessions WHERE chat_id = ? AND thread_id = ?",
                 (chat_id, thread_id),
@@ -350,7 +349,7 @@ class TopicAdminTest(unittest.TestCase):
                 """close_requests_worker в миниатюре: дожидается флага и
                 отрабатывает закрытие, как это делает живой бот."""
                 for _ in range(200):
-                    with sqlite3.connect(db_path) as conn:
+                    with bot_db.connect(db_path) as conn:
                         flag = conn.execute(
                             "SELECT close_requested FROM sessions "
                             "WHERE chat_id = ? AND thread_id = ?", key,
@@ -428,7 +427,7 @@ class TopicAdminTest(unittest.TestCase):
             self.assertEqual(api.call_args.args[0], "deleteForumTopic")
             self.assertTrue(result["telegram_deleted"])
 
-            with sqlite3.connect(db_path) as conn:
+            with bot_db.connect(db_path) as conn:
                 self.assertIsNone(conn.execute(
                     "SELECT 1 FROM sessions WHERE chat_id=? AND thread_id=?",
                     (self.CHAT_ID, self.THREAD_ID),
@@ -460,7 +459,7 @@ class TopicAdminTest(unittest.TestCase):
                 result = asyncio.run(mcp_server.manager_delete_topic(
                     thread_id=self.THREAD_ID, chat_id=self.CHAT_ID, purge_log=True,
                 ))
-            with sqlite3.connect(db_path) as conn:
+            with bot_db.connect(db_path) as conn:
                 log_rows = conn.execute(
                     "SELECT COUNT(*) FROM messages_log"
                 ).fetchone()[0]
@@ -484,7 +483,7 @@ class TopicAdminTest(unittest.TestCase):
                 result = asyncio.run(mcp_server.manager_delete_topic(
                     thread_id=self.THREAD_ID, chat_id=self.CHAT_ID,
                 ))
-            with sqlite3.connect(db_path) as conn:
+            with bot_db.connect(db_path) as conn:
                 left = conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
         self.assertFalse(result["telegram_deleted"])
         self.assertIn("already gone", result["warning"])
@@ -506,7 +505,7 @@ class TopicAdminTest(unittest.TestCase):
                     asyncio.run(mcp_server.manager_delete_topic(
                         thread_id=self.THREAD_ID, chat_id=self.CHAT_ID,
                     ))
-            with sqlite3.connect(db_path) as conn:
+            with bot_db.connect(db_path) as conn:
                 left = conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
         self.assertEqual(left, 1)
 
@@ -572,7 +571,7 @@ class TopicAdminTest(unittest.TestCase):
                 forced = asyncio.run(mcp_server.manager_delete_topic(
                     thread_id=self.THREAD_ID, chat_id=self.CHAT_ID, force=True,
                 ))
-            with sqlite3.connect(db_path) as conn:
+            with bot_db.connect(db_path) as conn:
                 left = conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
         self.assertEqual(len(forced["interrupted_jobs"]), 1)
         self.assertEqual(left, 0)
@@ -594,7 +593,7 @@ class TopicAdminTest(unittest.TestCase):
                 forced = asyncio.run(mcp_server.manager_delete_topic(
                     thread_id=self.THREAD_ID, chat_id=self.CHAT_ID, force=True,
                 ))
-            with sqlite3.connect(db_path) as conn:
+            with bot_db.connect(db_path) as conn:
                 left = conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
         self.assertFalse(forced["bot_confirmed"])
         self.assertEqual(left, 0)

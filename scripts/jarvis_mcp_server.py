@@ -48,10 +48,21 @@ _ICON_NAMES = {
 _PLACEHOLDER_ENGINES = {"codex", "opencode"}
 
 
+class _ClosingConnection(sqlite3.Connection):
+    """Закрывается на выходе из ``with`` (как bot.db.connect): на Windows
+    незакрытое соединение держит файл БД."""
+
+    def __exit__(self, *exc):
+        try:
+            return super().__exit__(*exc)
+        finally:
+            self.close()
+
+
 def _connect() -> sqlite3.Connection:
     if _DB_PATH is None:
         raise RuntimeError("MCP server is not initialised (no --db)")
-    conn = sqlite3.connect(_DB_PATH, isolation_level=None)
+    conn = sqlite3.connect(_DB_PATH, isolation_level=None, factory=_ClosingConnection)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     return conn

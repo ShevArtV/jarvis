@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
-import sqlite3
 import tempfile
 import unittest
 from datetime import datetime
@@ -74,11 +73,11 @@ class JobOriginNoticeTest(unittest.TestCase):
     def test_init_db_migrates_old_jobs_table(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             db_path = str(Path(tmp) / "old.db")
-            with sqlite3.connect(db_path) as conn:
+            with bot_db.connect(db_path) as conn:
                 conn.execute(OLD_JOBS_SCHEMA)
             with patch.object(bot_db, "DB_PATH", db_path):
                 bot_db.init_db()
-            with sqlite3.connect(db_path) as conn:
+            with bot_db.connect(db_path) as conn:
                 cols = [r[1] for r in conn.execute(
                     "PRAGMA table_info(jobs)"
                 ).fetchall()]
@@ -96,7 +95,7 @@ class JobOriginNoticeTest(unittest.TestCase):
         mcp_server = _load_mcp_server()
         with tempfile.TemporaryDirectory() as tmp:
             db_path = self._fresh_db(tmp)
-            with sqlite3.connect(db_path) as conn:
+            with bot_db.connect(db_path) as conn:
                 conn.execute(
                     "INSERT INTO sessions(chat_id, thread_id, session_id, cwd, "
                     "engine, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
@@ -111,7 +110,7 @@ class JobOriginNoticeTest(unittest.TestCase):
                 origin_thread_id=16376,
                 origin_chat_id=-100,
             )
-            with sqlite3.connect(db_path) as conn:
+            with bot_db.connect(db_path) as conn:
                 row = conn.execute(
                     "SELECT origin_chat_id, origin_thread_id FROM jobs WHERE id = ?",
                     (result["job_id"],),
@@ -123,7 +122,7 @@ class JobOriginNoticeTest(unittest.TestCase):
         mcp_server = _load_mcp_server()
         with tempfile.TemporaryDirectory() as tmp:
             db_path = self._fresh_db(tmp)
-            with sqlite3.connect(db_path) as conn:
+            with bot_db.connect(db_path) as conn:
                 conn.execute(
                     "INSERT INTO sessions(chat_id, thread_id, session_id, cwd, "
                     "engine, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
@@ -134,7 +133,7 @@ class JobOriginNoticeTest(unittest.TestCase):
             result = mcp_server.manager_send(
                 thread_id=2338, text="Без инициатора", chat_id=-100,
             )
-            with sqlite3.connect(db_path) as conn:
+            with bot_db.connect(db_path) as conn:
                 row = conn.execute(
                     "SELECT origin_chat_id, origin_thread_id FROM jobs WHERE id = ?",
                     (result["job_id"],),
@@ -145,7 +144,7 @@ class JobOriginNoticeTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = self._fresh_db(tmp)
             with patch.object(bot_db, "DB_PATH", db_path):
-                with sqlite3.connect(db_path) as conn:
+                with bot_db.connect(db_path) as conn:
                     conn.execute(
                         "INSERT INTO jobs(chat_id, thread_id, text, source, "
                         "status, created_at, origin_chat_id, origin_thread_id) "
@@ -173,7 +172,7 @@ class JobOriginNoticeTest(unittest.TestCase):
                 target_role="teamlead", target=target,
             ))
         delivered_thread = send_mock.await_args.args[1]
-        with sqlite3.connect(db_path) as conn:
+        with bot_db.connect(db_path) as conn:
             kick = conn.execute(
                 "SELECT chat_id, thread_id FROM jobs WHERE source='self_notice'"
             ).fetchall()

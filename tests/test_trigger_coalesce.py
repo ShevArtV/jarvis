@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import asyncio
-import sqlite3
 import tempfile
 import unittest
 from datetime import datetime, timedelta
@@ -38,13 +37,13 @@ class ClaimCoalesceTest(unittest.TestCase):
             age: float = 120) -> int:
         tid = queues.enqueue_agent_trigger(*topic, text, source)
         created = (datetime.utcnow() - timedelta(seconds=age)).isoformat()
-        with sqlite3.connect(self.db_path) as conn:
+        with bot_db.connect(self.db_path) as conn:
             conn.execute("UPDATE agent_triggers SET created_at = ? WHERE id = ?",
                          (created, tid))
         return tid
 
     def status(self, tid: int) -> str:
-        with sqlite3.connect(self.db_path) as conn:
+        with bot_db.connect(self.db_path) as conn:
             return conn.execute("SELECT status FROM agent_triggers WHERE id = ?",
                                 (tid,)).fetchone()[0]
 

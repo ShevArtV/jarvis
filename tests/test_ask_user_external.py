@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
-import sqlite3
 import tempfile
 import unittest
 from datetime import datetime
@@ -60,7 +59,7 @@ class AskUserExternalGuardTest(unittest.TestCase):
         self, db_path: str, role: str | None, status: str = "in_progress",
         source: str = "mxboard", thread_id: int = 77,
     ) -> None:
-        with sqlite3.connect(db_path) as conn:
+        with bot_db.connect(db_path) as conn:
             conn.execute(
                 "INSERT INTO agent_triggers(chat_id, thread_id, text, source, role, "
                 "status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -71,11 +70,11 @@ class AskUserExternalGuardTest(unittest.TestCase):
     def test_init_db_migrates_old_agent_triggers(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             db_path = str(Path(tmp) / "old.db")
-            with sqlite3.connect(db_path) as conn:
+            with bot_db.connect(db_path) as conn:
                 conn.execute(OLD_TRIGGERS_SCHEMA)
             with patch.object(bot_db, "DB_PATH", db_path):
                 bot_db.init_db()
-            with sqlite3.connect(db_path) as conn:
+            with bot_db.connect(db_path) as conn:
                 cols = [r[1] for r in conn.execute(
                     "PRAGMA table_info(agent_triggers)"
                 ).fetchall()]
@@ -134,7 +133,7 @@ class AskUserExternalGuardTest(unittest.TestCase):
         mcp_server = _load_mcp_server()
         with tempfile.TemporaryDirectory() as tmp:
             db_path = str(Path(tmp) / "old.db")
-            with sqlite3.connect(db_path) as conn:
+            with bot_db.connect(db_path) as conn:
                 conn.execute(OLD_TRIGGERS_SCHEMA)
                 conn.execute(
                     "INSERT INTO agent_triggers(chat_id, thread_id, text, source, "
@@ -148,7 +147,7 @@ class AskUserExternalGuardTest(unittest.TestCase):
         mcp_server = _load_mcp_server()
         with tempfile.TemporaryDirectory() as tmp:
             db_path = self._fresh_db(tmp)
-            with sqlite3.connect(db_path) as conn:
+            with bot_db.connect(db_path) as conn:
                 conn.execute(
                     "INSERT INTO agent_triggers(chat_id, thread_id, text, source, role, "
                     "status, created_at) VALUES (?, ?, ?, 'mxboard', 'executor', "

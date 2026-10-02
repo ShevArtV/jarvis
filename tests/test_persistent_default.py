@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -47,7 +46,7 @@ class PersistentDefaultOnTest(unittest.TestCase):
     def test_null_column_value_is_persistent(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             db_path = str(Path(tmp) / "legacy.db")
-            with sqlite3.connect(db_path) as conn:
+            with bot_db.connect(db_path) as conn:
                 conn.execute(LEGACY_SESSIONS_SCHEMA)
                 conn.execute(
                     "INSERT INTO sessions(chat_id, thread_id, session_id, engine, "
@@ -84,7 +83,7 @@ class PersistentDefaultOnTest(unittest.TestCase):
     def test_schema_columns_default_to_one(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             db_path = self._fresh_db(tmp)
-            with sqlite3.connect(db_path) as conn:
+            with bot_db.connect(db_path) as conn:
                 defaults = {
                     row[1]: row[4]
                     for row in conn.execute("PRAGMA table_info(sessions)").fetchall()
@@ -98,7 +97,7 @@ class PersistentDefaultOnTest(unittest.TestCase):
         решил включить всем, кто поддерживает persistent."""
         with tempfile.TemporaryDirectory() as tmp:
             db_path = str(Path(tmp) / "legacy.db")
-            with sqlite3.connect(db_path) as conn:
+            with bot_db.connect(db_path) as conn:
                 conn.execute(LEGACY_SESSIONS_SCHEMA)
                 conn.execute(
                     "INSERT INTO sessions(chat_id, thread_id, session_id, engine, "
@@ -107,7 +106,7 @@ class PersistentDefaultOnTest(unittest.TestCase):
                 )
             with patch.object(bot_db, "DB_PATH", db_path):
                 bot_db.init_db()
-            with sqlite3.connect(db_path) as conn:
+            with bot_db.connect(db_path) as conn:
                 row = conn.execute(
                     "SELECT persistent_claude, persistent_codex FROM sessions "
                     "WHERE chat_id = 1 AND thread_id = 1"

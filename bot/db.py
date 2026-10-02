@@ -34,8 +34,13 @@ class _ClosingConnection(sqlite3.Connection):
             self.close()
 
 
+def connect(path: str, **kwargs) -> sqlite3.Connection:
+    """``sqlite3.connect``, соединение которого закрывается на выходе из ``with``."""
+    return sqlite3.connect(path, factory=_ClosingConnection, **kwargs)
+
+
 def _db() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH, factory=_ClosingConnection)
+    conn = connect(DB_PATH)
     conn.execute("PRAGMA journal_mode=WAL")
     return conn
 

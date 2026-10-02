@@ -93,7 +93,7 @@ class _DbCase(unittest.TestCase):
         self._tmp.cleanup()
 
     def triggers(self) -> list[tuple]:
-        with sqlite3.connect(self.db_path) as conn:
+        with bot_db.connect(self.db_path) as conn:
             return conn.execute(
                 "SELECT chat_id, thread_id, text, source, status, role "
                 "FROM agent_triggers ORDER BY id"
@@ -203,11 +203,11 @@ class PollTest(_DbCase):
     def test_failed_write_rolls_back_seen_mark(self) -> None:
         # Отметка и триггер — одна транзакция: упал INSERT триггера → отметки
         # нет, и повторная доставка поставит триггер.
-        with sqlite3.connect(self.db_path) as conn:
+        with bot_db.connect(self.db_path) as conn:
             conn.execute("ALTER TABLE agent_triggers RENAME TO agent_triggers_off")
         with self.assertRaises(sqlite3.OperationalError):
             qw.enqueue_notification(_item(1), TOPIC, INST)
-        with sqlite3.connect(self.db_path) as conn:
+        with bot_db.connect(self.db_path) as conn:
             conn.execute("ALTER TABLE agent_triggers_off RENAME TO agent_triggers")
             seen = conn.execute("SELECT COUNT(*) FROM integration_seen_items").fetchone()[0]
         self.assertEqual(seen, 0)

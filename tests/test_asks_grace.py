@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import sqlite3
 import tempfile
 import unittest
 from datetime import datetime, timedelta
@@ -26,7 +25,7 @@ class AsksGraceTest(unittest.TestCase):
         chat_id: int = -100, thread_id: int = 77, question: str = "Сносить таблицу?",
         answered_at: datetime | None = None,
     ) -> int:
-        with sqlite3.connect(db_path) as conn:
+        with bot_db.connect(db_path) as conn:
             cur = conn.execute(
                 "INSERT INTO ask_requests(chat_id, thread_id, question, status, "
                 "created_at, answered_at) VALUES (?, ?, ?, ?, ?, ?)",
@@ -92,7 +91,7 @@ class AsksGraceTest(unittest.TestCase):
             )
             with patch.object(bot_db, "DB_PATH", db_path):
                 self.assertTrue(mark_ask_late_answered(ask_id, "да, сносить"))
-            with sqlite3.connect(db_path) as conn:
+            with bot_db.connect(db_path) as conn:
                 row = conn.execute(
                     "SELECT status, answer, via FROM ask_requests WHERE id = ?",
                     (ask_id,),
@@ -113,7 +112,7 @@ class AsksGraceTest(unittest.TestCase):
 
     def _pending_with_pulse(self, db_path: str, polled_at: datetime | None) -> int:
         ask_id = self._add_ask(db_path, "pending", datetime.utcnow() - timedelta(minutes=40))
-        with sqlite3.connect(db_path) as conn:
+        with bot_db.connect(db_path) as conn:
             conn.execute(
                 "UPDATE ask_requests SET polled_at = ? WHERE id = ?",
                 (polled_at.isoformat() if polled_at else None, ask_id),
