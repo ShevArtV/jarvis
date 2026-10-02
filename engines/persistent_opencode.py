@@ -19,16 +19,15 @@ import re
 import time
 from collections import deque
 from collections.abc import Awaitable, Callable
-from pathlib import Path
 from typing import Any
 
 import httpx
 
+from engines.common import IntermediateBuffer, cleanup_tempfile, resolve_cwd
 from engines.opencode_engine import (
     FILE_MARKER_SYSTEM,
     OPENCODE_BIN,
     OpenCodeEngine,
-    _cleanup_tempfile,
     _error_message,
     _opencode_env,
     _opencode_mcp_config,
@@ -38,7 +37,6 @@ from engines.process_control import spawn, terminate_process_tree
 
 logger = logging.getLogger(__name__)
 
-INTERMEDIATE_MIN_INTERVAL = 2.0
 SERVER_START_TIMEOUT = 30.0
 _URL_RE = re.compile(r"https?://[\w.\-]+:\d+")
 
@@ -93,8 +91,9 @@ class PersistentOpenCodeWorker:
         self.client = httpx.AsyncClient(base_url=base_url, timeout=30.0)
         self._connected = asyncio.Event()
         self._config_path = config_path
-        self._buffer: list[str] = []
-        self._last_push = 0.0
+        self._journal = IntermediateBuffer(
+            "persistent opencode: on_intermediate failed key=%s", key,
+        )
         self._output_tail: deque[str] = deque(maxlen=80)
         self._reset_turn()
 
@@ -183,6 +182,7 @@ class PersistentOpenCodeWorker:
             try:
                 await self._prompt(text)
             except Exception as exc:
+                logger.warning("persistent opencode: prompt_async failed key=%s", self.key, exc_info=True)
                 if is_new:
                     self._resolve(False, f"Ошибка prompt_async: {exc}")
                 else:
@@ -208,21 +208,7 @@ class PersistentOpenCodeWorker:
             fut.set_result((ok, text))
 
     async def _flush(self, force: bool = False) -> None:
-        if not self._buffer:
-            return
-        now = time.monotonic()
-        if not force and (now - self._last_push) < INTERMEDIATE_MIN_INTERVAL:
-            return
-        text = "\n".join(self._buffer)
-        self._buffer.clear()
-        self._last_push = now
-        cb = self.on_intermediate
-        if cb is None:
-            return
-        try:
-            await cb(text)
-        except Exception:
-            logger.exception("persistent opencode: on_intermediate failed key=%s", self.key)
+        await self._journal.flush(self.on_intermediate, force)
 
     # --- Events ---
 
@@ -249,7 +235,7 @@ class PersistentOpenCodeWorker:
         finally:
             self.dead = True
             self._connected.set()
-            _cleanup_tempfile(self._config_path)
+            cleanup_tempfile(self._config_path)
             self._config_path = None
             await self._flush(force=True)
             if self.pending_future is not None and not self.pending_future.done():
@@ -291,7 +277,7 @@ class PersistentOpenCodeWorker:
             return
         if etype == "session.error":
             self._error = _error_message(props) or "opencode: ошибка сессии"
-            self._buffer.append(f"⚠️ {self._error[:800]}")
+            self._journal.append(f"⚠️ {self._error[:800]}")
             await self._flush()
             return
         if etype == "permission.asked":
@@ -328,19 +314,19 @@ class PersistentOpenCodeWorker:
             self._texts.setdefault(mid, {})[pid] = part.get("text") or ""
             if ended and self._roles.get(mid) == "assistant" and pid not in self._announced:
                 self._announced.add(pid)
-                self._buffer.append((part.get("text") or "")[-800:])
+                self._journal.append((part.get("text") or "")[-800:])
                 await self._flush()
         elif ptype == "reasoning" and ended and pid not in self._announced:
             self._announced.add(pid)
             txt = (part.get("text") or "").strip()
             if txt:
-                self._buffer.append(f"💭 {txt[:800]}")
+                self._journal.append(f"💭 {txt[:800]}")
                 await self._flush()
         elif ptype == "tool" and pid not in self._announced:
             status = (part.get("state") or {}).get("status")
             if status in ("running", "completed", "error"):
                 self._announced.add(pid)
-                self._buffer.append(f"🔧 {_tool_summary(part)}")
+                self._journal.append(f"🔧 {_tool_summary(part)}")
                 await self._flush()
 
     # --- Process output ---
@@ -386,7 +372,7 @@ async def start_persistent(
     mcp_topic_role: str | None = None,
 ) -> PersistentOpenCodeWorker:
     """Start ``opencode serve`` and open/resume the topic session."""
-    effective_cwd = cwd or os.environ.get("CLAUDE_CWD", str(Path.home()))
+    effective_cwd = resolve_cwd(cwd)
     if not os.path.isdir(effective_cwd):
         raise RuntimeError(f"Рабочая папка `{effective_cwd}` не существует.")
 
@@ -402,14 +388,14 @@ async def start_persistent(
     try:
         proc = await spawn(cmd, cwd=effective_cwd, stderr=asyncio.subprocess.STDOUT, env=env)
     except Exception:
-        _cleanup_tempfile(config_path)
+        cleanup_tempfile(config_path)
         raise
 
     tail: list[str] = []
     try:
         base_url = await asyncio.wait_for(_wait_for_url(proc, tail), SERVER_START_TIMEOUT)
     except BaseException:
-        _cleanup_tempfile(config_path)
+        cleanup_tempfile(config_path)
         await terminate_process_tree(proc)
         raise
 
@@ -429,7 +415,7 @@ async def start_persistent(
         worker.dead = True
         worker.reader_task.cancel()
         worker.stderr_task.cancel()
-        _cleanup_tempfile(config_path)
+        cleanup_tempfile(config_path)
         await terminate_process_tree(proc)
         raise
     return worker

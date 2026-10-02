@@ -23,15 +23,26 @@ import uuid
 from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
 from pathlib import Path
+from typing import Any
 
-from engines.model_cache import cached_models, prewarm, remember_labels, split_models
-from engines.process_control import feed_stdin, pid_alive, run_cli, spawn, terminate_process_tree
+from engines.base import BaseEngine
+from engines.common import (
+    IntermediateBuffer,
+    iter_json_events,
+    missing_cwd_result,
+    read_stderr,
+    register_proc,
+    resolve_cwd,
+    unregister_proc,
+    wait_stream,
+)
+from engines.model_cache import remember_labels, split_models
+from engines.process_control import feed_stdin, pid_alive, run_cli, spawn
 
 logger = logging.getLogger(__name__)
 
 CLAUDE_BIN = os.environ.get("CLAUDE_BIN", "claude")
 CLAUDE_TIMEOUT = int(os.environ.get("CLAUDE_TIMEOUT", "3600"))
-INTERMEDIATE_MIN_INTERVAL = 2.0
 # Claude Code implements its native Grep tool with bundled ugrep.  A pathological
 # regex against minified assets previously exhausted host memory, so Jarvis uses
 # Bash/rg for searches instead.
@@ -214,8 +225,9 @@ class PersistentClaudeWorker:
         self.reader_task: asyncio.Task | None = None
         # Модель, которой CLI ответил последний раз (system.init / assistant).
         self.actual_model: str | None = None
-        self._buffer: list[str] = []
-        self._last_push = 0.0
+        self._journal = IntermediateBuffer(
+            "persistent worker: on_intermediate failed key=%s", key,
+        )
 
     def _write_user_message(self, text: str) -> None:
         line = json.dumps({
@@ -257,21 +269,7 @@ class PersistentClaudeWorker:
         return is_new, fut
 
     async def _flush(self, force: bool = False) -> None:
-        if not self._buffer:
-            return
-        now = time.monotonic()
-        if not force and (now - self._last_push) < INTERMEDIATE_MIN_INTERVAL:
-            return
-        text = "\n".join(self._buffer)
-        self._buffer.clear()
-        self._last_push = now
-        cb = self.on_intermediate
-        if cb is None:
-            return
-        try:
-            await cb(text)
-        except Exception:
-            logger.exception("persistent worker: on_intermediate failed key=%s", self.key)
+        await self._journal.flush(self.on_intermediate, force)
 
     def _resolve(self, ok: bool, text: str) -> None:
         fut = self.pending_future
@@ -284,17 +282,7 @@ class PersistentClaudeWorker:
     async def _read_loop(self) -> None:
         assert self.proc.stdout is not None
         try:
-            while True:
-                line = await self.proc.stdout.readline()
-                if not line:
-                    break
-                raw = line.decode("utf-8", errors="replace").strip()
-                if not raw:
-                    continue
-                try:
-                    ev = json.loads(raw)
-                except json.JSONDecodeError:
-                    continue
+            async for ev in iter_json_events(self.proc.stdout, "persistent claude"):
                 etype = ev.get("type")
                 if etype == "system" and ev.get("subtype") == "init":
                     m = ev.get("model")
@@ -304,7 +292,7 @@ class PersistentClaudeWorker:
                     m = (ev.get("message") or {}).get("model")
                     if isinstance(m, str) and m:
                         self.actual_model = m
-                    _accumulate_assistant_event(ev, self._buffer, self.cwd)
+                    _accumulate_assistant_event(ev, self._journal.lines, self.cwd)
                     await self._flush()
                 elif etype == "result":
                     await self._flush(force=True)
@@ -327,6 +315,7 @@ class PersistentClaudeWorker:
             data = await self.proc.stderr.read(4096)
             return data.decode("utf-8", errors="replace")
         except Exception:
+            logger.debug("persistent worker: cannot read stderr key=%s", self.key, exc_info=True)
             return ""
 
 
@@ -343,31 +332,11 @@ async def start_persistent(
     как в разовом вызове (``--resume``/``--session-id``), но выставляются
     ОДИН раз при старте процесса: все следующие реплики уходят в его stdin,
     без пересоздания."""
-    resume_mode = ClaudeEngine().session_exists(session_id, cwd)
-    if resume_mode:
-        ClaudeEngine().clear_stale_session_pidfile(session_id)
-        session_flags = ["--resume", session_id]
-    else:
-        session_flags = ["--session-id", session_id]
-
-    model_flags = ["--model", model] if model else []
-    append_system = APPEND_SYSTEM_PROMPT
-    if system_prefix:
-        append_system = f"{system_prefix}\n\n{APPEND_SYSTEM_PROMPT}"
-    mcp_flags = _mcp_config_flags(mcp_playwright, mcp_topic_role)
-
-    cmd = [
-        CLAUDE_BIN, "--print",
-        "--permission-mode", "bypassPermissions",
-        "--disallowedTools", *CLAUDE_DISALLOWED_TOOLS,
-        "--input-format", "stream-json",
-        "--output-format", "stream-json",
-        "--verbose",
-        "--append-system-prompt-file", _system_prompt_file(append_system),
-        *mcp_flags,
-        *model_flags,
-        *session_flags,
-    ]
+    resume_mode, session_flags = ClaudeEngine()._session_flags(session_id, cwd, is_spawn=False)
+    cmd = _claude_command(
+        session_flags, model, system_prefix, mcp_playwright, mcp_topic_role,
+        input_format="stream-json",
+    )
     logger.info(
         "persistent claude start: key=%s session=%s mode=%s cwd=%s",
         key, session_id, "resume" if resume_mode else "new", cwd,
@@ -467,16 +436,90 @@ def _discover_claude_models() -> list[str]:
     )
 
 
-class ClaudeEngine:
+def _claude_command(
+    session_flags: list[str],
+    model: str | None,
+    system_prefix: str | None,
+    mcp_playwright: bool,
+    mcp_topic_role: str | None,
+    input_format: str = "text",
+) -> list[str]:
+    """argv claude. ``input_format`` — "text" для разового вызова (prompt в
+    stdin целиком), "stream-json" для живого процесса /persistent."""
+    model_flags = ["--model", model] if model else []
+
+    # Системный канал claude: FILE-маркер + (опц.) общий [SYSTEM:]-блок.
+    # Уходит как system-сообщение каждый ход — кешируется и НЕ копится в
+    # транскрипте (в отличие от старой схемы, где блок вшивался в prompt).
+    append_system = APPEND_SYSTEM_PROMPT
+    if system_prefix:
+        append_system = f"{system_prefix}\n\n{APPEND_SYSTEM_PROMPT}"
+
+    # Per-topic MCP injection via --mcp-config (аддитивно к глобальному
+    # Manager MCP, без --strict-mcp-config).
+    mcp_flags = _mcp_config_flags(mcp_playwright, mcp_topic_role)
+
+    return [
+        CLAUDE_BIN, "--print",
+        "--permission-mode", "bypassPermissions",
+        "--disallowedTools", *CLAUDE_DISALLOWED_TOOLS,
+        "--input-format", input_format,
+        "--output-format", "stream-json",
+        "--verbose",
+        "--append-system-prompt-file", _system_prompt_file(append_system),
+        *mcp_flags,
+        *model_flags,
+        *session_flags,
+    ]
+
+
+class _ClaudeStream:
+    """Состояние разбора stream-json одного `claude --print`."""
+
+    def __init__(self, cwd: str, on_intermediate: Callable[[str], Awaitable[None]]) -> None:
+        self.cwd = cwd
+        self.on_intermediate = on_intermediate
+        self.journal = IntermediateBuffer()
+        self.final_text = ""
+        self.actual_model: str | None = None
+
+    async def flush(self, force: bool = False) -> None:
+        await self.journal.flush(self.on_intermediate, force)
+
+    async def read(self, proc: asyncio.subprocess.Process) -> None:
+        assert proc.stdout is not None
+        async for ev in iter_json_events(proc.stdout, "claude"):
+            await self.handle_event(ev)
+
+    async def handle_event(self, ev: Any) -> None:
+        etype = ev.get("type")
+        # 'system' с subtype='init' — первый event, содержит model.
+        # Также fallback: message.model в каждом assistant event.
+        if etype == "system" and ev.get("subtype") == "init":
+            m = ev.get("model")
+            if isinstance(m, str) and m:
+                self.actual_model = m
+        if etype == "assistant":
+            msg = ev.get("message", {}) or {}
+            if not self.actual_model:
+                m = msg.get("model")
+                if isinstance(m, str) and m:
+                    self.actual_model = m
+            _accumulate_assistant_event(ev, self.journal.lines, self.cwd)
+            await self.flush()
+        elif etype == "result":
+            r = ev.get("result")
+            if isinstance(r, str):
+                self.final_text = r
+
+
+class ClaudeEngine(BaseEngine):
     name = "claude"
     bin_path = CLAUDE_BIN
+    default_models = DEFAULT_CLAUDE_MODELS
 
-    @property
-    def models(self) -> list[str]:
-        return cached_models("claude", _discover_claude_models, DEFAULT_CLAUDE_MODELS)
-
-    def prewarm_models(self) -> None:
-        prewarm("claude", _discover_claude_models, DEFAULT_CLAUDE_MODELS)
+    def _discover_models(self) -> list[str]:
+        return _discover_claude_models()
 
     # --- Session filesystem helpers ---
 
@@ -496,6 +539,8 @@ class ClaudeEngine:
             try:
                 data = json.loads(p.read_text(encoding="utf-8"))
             except Exception:
+                # Чужой/битый/удалённый на ходу файл — не наш лок, пропускаем.
+                logger.debug("cannot read session lock %s", p, exc_info=True)
                 continue
             if data.get("sessionId") != session_id:
                 continue
@@ -508,7 +553,17 @@ class ClaudeEngine:
                         p, pid, session_id,
                     )
                 except OSError:
-                    pass
+                    logger.warning("cannot remove stale session lock %s", p, exc_info=True)
+
+    def _session_flags(self, session_id: str, cwd: str, is_spawn: bool) -> tuple[bool, list[str]]:
+        """(resume_mode, флаги сессии). Spawn — всегда новая сессия; перед
+        --resume снимаем stale pidfile."""
+        if is_spawn:
+            return False, ["--session-id", session_id]
+        if self.session_exists(session_id, cwd):
+            self.clear_stale_session_pidfile(session_id)
+            return True, ["--resume", session_id]
+        return False, ["--session-id", session_id]
 
     # --- Stream ---
 
@@ -527,46 +582,13 @@ class ClaudeEngine:
         mcp_topic_role: str | None = None,
     ) -> tuple[bool, str, str | None, str | None]:
         # cwd берётся из аргумента (если None — caller должен подставить default).
-        effective_cwd = cwd or os.environ.get("CLAUDE_CWD", str(Path.home()))
+        effective_cwd = resolve_cwd(cwd)
 
-        is_spawn = spawn_id is not None
-        if is_spawn:
-            session_flags = ["--session-id", session_id]
-            resume_mode = False
-        else:
-            resume_mode = self.session_exists(session_id, effective_cwd)
-            if resume_mode:
-                self.clear_stale_session_pidfile(session_id)
-                session_flags = ["--resume", session_id]
-            else:
-                session_flags = ["--session-id", session_id]
-
+        resume_mode, session_flags = self._session_flags(
+            session_id, effective_cwd, spawn_id is not None,
+        )
         model = CURRENT_MODEL.get() or os.environ.get("CLAUDE_MODEL")
-        model_flags = ["--model", model] if model else []
-
-        # Системный канал claude: FILE-маркер + (опц.) общий [SYSTEM:]-блок.
-        # Уходит как system-сообщение каждый ход — кешируется и НЕ копится в
-        # транскрипте (в отличие от старой схемы, где блок вшивался в prompt).
-        append_system = APPEND_SYSTEM_PROMPT
-        if system_prefix:
-            append_system = f"{system_prefix}\n\n{APPEND_SYSTEM_PROMPT}"
-
-        # Per-topic MCP injection via --mcp-config (аддитивно к глобальному
-        # Manager MCP, без --strict-mcp-config).
-        mcp_flags = _mcp_config_flags(mcp_playwright, mcp_topic_role)
-
-        cmd = [
-            CLAUDE_BIN, "--print",
-            "--permission-mode", "bypassPermissions",
-            "--disallowedTools", *CLAUDE_DISALLOWED_TOOLS,
-            "--input-format", "text",
-            "--output-format", "stream-json",
-            "--verbose",
-            "--append-system-prompt-file", _system_prompt_file(append_system),
-            *mcp_flags,
-            *model_flags,
-            *session_flags,
-        ]
+        cmd = _claude_command(session_flags, model, system_prefix, mcp_playwright, mcp_topic_role)
 
         logger.info(
             "claude start: key=%s session=%s mode=%s cwd=%s prompt_len=%d spawn_id=%s",
@@ -575,12 +597,7 @@ class ClaudeEngine:
         )
 
         if effective_cwd and not os.path.isdir(effective_cwd):
-            return (
-                False,
-                f"⚠️ Рабочая папка `{effective_cwd}` не существует. "
-                "Создай её или переназначь через /bind.",
-                session_id, None,
-            )
+            return missing_cwd_result(effective_cwd, session_id)
 
         try:
             proc = await spawn(cmd, cwd=effective_cwd, stdin=asyncio.subprocess.PIPE)
@@ -588,93 +605,32 @@ class ClaudeEngine:
             return False, f"`{CLAUDE_BIN}` не найден в PATH.", session_id, None
 
         await feed_stdin(proc, prompt)
+        register_proc(proc, key, spawn_id, active_procs, spawn_procs)
 
-        if is_spawn:
-            spawn_procs[(key[0], key[1], spawn_id)] = proc
-        else:
-            active_procs[key] = proc
-
-        final_text = ""
-        actual_model: str | None = None
-        buffer_intermediate: list[str] = []
-        last_push = 0.0
-
-        async def flush_intermediate(force: bool = False) -> None:
-            nonlocal last_push
-            if not buffer_intermediate:
-                return
-            now = time.monotonic()
-            if not force and (now - last_push) < INTERMEDIATE_MIN_INTERVAL:
-                return
-            text = "\n".join(buffer_intermediate)
-            buffer_intermediate.clear()
-            last_push = now
-            try:
-                await on_intermediate(text)
-            except Exception:
-                logger.exception("on_intermediate failed")
-
-        async def read_stream():
-            nonlocal final_text, actual_model
-            assert proc.stdout is not None
-            while True:
-                line = await proc.stdout.readline()
-                if not line:
-                    break
-                raw = line.decode("utf-8", errors="replace").strip()
-                if not raw:
-                    continue
-                try:
-                    ev = json.loads(raw)
-                except json.JSONDecodeError:
-                    continue
-                etype = ev.get("type")
-                # 'system' с subtype='init' — первый event, содержит model.
-                # Также fallback: message.model в каждом assistant event.
-                if etype == "system" and ev.get("subtype") == "init":
-                    m = ev.get("model")
-                    if isinstance(m, str) and m:
-                        actual_model = m
-                if etype == "assistant":
-                    msg = ev.get("message", {}) or {}
-                    if not actual_model:
-                        m = msg.get("model")
-                        if isinstance(m, str) and m:
-                            actual_model = m
-                    _accumulate_assistant_event(ev, buffer_intermediate, effective_cwd)
-                    await flush_intermediate()
-                elif etype == "result":
-                    r = ev.get("result")
-                    if isinstance(r, str):
-                        final_text = r
-
+        stream = _ClaudeStream(effective_cwd, on_intermediate)
         try:
-            try:
-                await asyncio.wait_for(read_stream(), timeout=CLAUDE_TIMEOUT)
-            except TimeoutError:
-                await terminate_process_tree(proc)
-                return False, f"Timeout: claude не ответил за {CLAUDE_TIMEOUT}с.", session_id, actual_model
-            await proc.wait()
-        except asyncio.CancelledError:
-            await terminate_process_tree(proc)
-            raise
+            finished = await wait_stream(proc, stream.read(proc), CLAUDE_TIMEOUT)
         finally:
-            await flush_intermediate(force=True)
-            if is_spawn:
-                skey = (key[0], key[1], spawn_id)
-                if spawn_procs.get(skey) is proc:
-                    spawn_procs.pop(skey, None)
-            else:
-                if active_procs.get(key) is proc:
-                    active_procs.pop(key, None)
+            await stream.flush(force=True)
+            unregister_proc(proc, key, spawn_id, active_procs, spawn_procs)
+        if not finished:
+            return False, f"Timeout: claude не ответил за {CLAUDE_TIMEOUT}с.", session_id, stream.actual_model
 
-        stderr_text = ""
-        if proc.stderr is not None:
-            try:
-                stderr_b = await proc.stderr.read()
-                stderr_text = stderr_b.decode("utf-8", errors="replace")
-            except Exception:
-                pass
+        stderr_text = await read_stderr(proc)
+        return self._finish(proc, stream, stderr_text, key=key, session_id=session_id)
+
+    def _finish(
+        self,
+        proc: asyncio.subprocess.Process,
+        stream: _ClaudeStream,
+        stderr_text: str,
+        *,
+        key: tuple[int, int],
+        session_id: str,
+    ) -> tuple[bool, str, str | None, str | None]:
+        """Итог вызова по коду выхода и тексту из события result."""
+        final_text = stream.final_text
+        actual_model = stream.actual_model
 
         if proc.returncode != 0:
             logger.warning("claude rc=%s stderr=%s", proc.returncode, stderr_text[:500])

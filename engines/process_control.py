@@ -9,12 +9,16 @@ cmd.exe, который режет аргумент на переводе стр
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import logging
 import os
 import re
 import shutil
 import signal
 import subprocess
 import sys
+
+logger = logging.getLogger(__name__)
 
 IS_WINDOWS = sys.platform == "win32"
 
@@ -85,7 +89,8 @@ async def feed_stdin(proc: asyncio.subprocess.Process, text: str) -> None:
         proc.stdin.write(text.encode("utf-8"))
         await proc.stdin.drain()
     except (BrokenPipeError, ConnectionResetError):
-        pass  # CLI умер на старте — причину покажет его stderr и код выхода
+        # CLI умер на старте — причину покажет его stderr и код выхода
+        logger.debug("CLI closed stdin early pid=%s", proc.pid, exc_info=True)
     finally:
         proc.stdin.close()
 
@@ -138,6 +143,7 @@ def signal_process_group(proc: asyncio.subprocess.Process, sig: int) -> None:
     except ProcessLookupError:
         return
     except Exception:
+        logger.debug("getpgid failed pid=%s", proc.pid, exc_info=True)
         pgid = None
 
     if pgid:
@@ -147,7 +153,8 @@ def signal_process_group(proc: asyncio.subprocess.Process, sig: int) -> None:
         except ProcessLookupError:
             return
         except Exception:
-            pass
+            # группу не погасить — шлём сигнал самому процессу
+            logger.debug("killpg failed pgid=%s", pgid, exc_info=True)
 
     try:
         os.kill(proc.pid, sig)
@@ -163,10 +170,8 @@ async def _kill_tree_windows(proc: asyncio.subprocess.Process) -> None:
     )
     await killer.wait()
     if proc.returncode is None:
-        try:
+        with contextlib.suppress(ProcessLookupError):
             proc.kill()
-        except ProcessLookupError:
-            pass
 
 
 async def terminate_process_tree(
@@ -184,7 +189,7 @@ async def terminate_process_tree(
         try:
             await asyncio.wait_for(proc.wait(), timeout=kill_timeout)
         except TimeoutError:
-            pass
+            logger.warning("process %s survived taskkill", proc.pid)
         return
 
     signal_process_group(proc, signal.SIGTERM)
@@ -192,10 +197,10 @@ async def terminate_process_tree(
         await asyncio.wait_for(proc.wait(), timeout=terminate_timeout)
         return
     except TimeoutError:
-        pass
+        logger.debug("process %s ignored SIGTERM, sending SIGKILL", proc.pid)
 
     signal_process_group(proc, signal.SIGKILL)
     try:
         await asyncio.wait_for(proc.wait(), timeout=kill_timeout)
     except TimeoutError:
-        pass
+        logger.warning("process %s survived SIGKILL", proc.pid)

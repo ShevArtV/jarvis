@@ -16,7 +16,6 @@ from engines.codex_engine import (
     _split_codex_global_flags,
 )
 from engines.opencode_engine import _opencode_mcp_config
-from engines.persistent_codex import _mcp_config_overrides as persistent_codex_mcp_overrides
 
 CONFIG = {
     "servers": [
@@ -86,7 +85,7 @@ class MissingConfigTest(TopicMcpTestBase):
             flags, cleanup = codex_mcp_overrides(False, "agent")
             self.assertEqual((flags, cleanup), ([], []))
             self.assertIsNone(_opencode_mcp_config(False, "agent"))
-            self.assertEqual(persistent_codex_mcp_overrides(False, "agent"), ([], []))
+            self.assertEqual(codex_mcp_overrides(False, "agent", inline_topic=True), ([], []))
 
     def test_global_kill_switch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -348,7 +347,7 @@ class EngineRenderingTest(TopicMcpTestBase):
         with tempfile.TemporaryDirectory() as tmp:
             path = self._write(tmp, CONFIG)
             with self._env(path):
-                flags, cleanup_paths = persistent_codex_mcp_overrides(False, "manager")
+                flags, cleanup_paths = codex_mcp_overrides(False, "manager", inline_topic=True)
 
         joined = "\n".join(flags)
         self.assertNotIn("--profile", flags)
