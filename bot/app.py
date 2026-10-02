@@ -22,7 +22,6 @@ from telegram import (
 from telegram.ext import (
     AIORateLimiter,
     Application,
-    ApplicationHandlerStop,
     CallbackQueryHandler,
     CommandHandler,
     MessageHandler,
@@ -31,10 +30,8 @@ from telegram.ext import (
 )
 
 from bot.asks import on_ask_answer
-from bot.delivery import _send_manager_notice
 from bot.handlers.commands import (
     cmd_bind,
-    cmd_board,
     cmd_close,
     cmd_reset,
     cmd_session,
@@ -69,8 +66,8 @@ from bot.handlers.toggles import (
     on_done_confirm,
     on_persistent_toggle,
 )
+from bot.plugins import load_plugins
 from bot.rich_message import RICH_MESSAGE
-from bot.settings import SUPPORT_CHAT_ID, SUPPORT_THREAD_ID
 from bot.workers import (
     agent_triggers_worker,
     cleanup_worker,
@@ -78,13 +75,9 @@ from bot.workers import (
     health_worker,
     jobs_worker,
     persistent_reaper,
-    reminders_worker,
 )
 from config import ALLOWED_USER_IDS, TELEGRAM_TOKEN
 from engines import prewarm_models
-from plugins.imap.watcher import run_imap_watcher
-from plugins.queuewarden.notifications import queuewarden_notifications_worker
-from plugins.webhook.server import run_webhook_server
 
 logger = logging.getLogger(__name__)
 
@@ -102,16 +95,23 @@ BOT_COMMANDS: list[BotCommand] = [
     BotCommand("bind", "привязать топик к каталогу — /bind <abs path>"),
     BotCommand("unbind", "снять привязку cwd, вернуть дефолт"),
     BotCommand("where", "показать эффективный cwd"),
-    BotCommand("board", "открыть доску QueueWarden (миниапп)"),
     BotCommand("persistent", "живой процесс агента: сообщения на лету"),
     BotCommand("start", "приветствие и состояние топика"),
 ]
+
+
+def _bot_commands() -> list[BotCommand]:
+    """Меню бота: команды ядра и включённых плагинов."""
+    return BOT_COMMANDS + [
+        BotCommand(c.name, c.description) for p in load_plugins() for c in p.commands
+    ]
 
 async def _post_init(application: Application) -> None:
     """Регистрируем команды для всех контекстов (default + private + group)
     и явно ставим MenuButtonCommands — иначе в форум-группах нативная кнопка
     меню часто не появляется без явной настройки."""
     bot = application.bot
+    commands = _bot_commands()
     scopes = [
         ("default", None),
         ("all_private_chats", BotCommandScopeAllPrivateChats()),
@@ -120,11 +120,11 @@ async def _post_init(application: Application) -> None:
     for label, scope in scopes:
         try:
             if scope is None:
-                await bot.set_my_commands(BOT_COMMANDS)
+                await bot.set_my_commands(commands)
             else:
-                await bot.set_my_commands(BOT_COMMANDS, scope=scope)
+                await bot.set_my_commands(commands, scope=scope)
             logger.info("bot commands registered for scope=%s (%d entries)",
-                        label, len(BOT_COMMANDS))
+                        label, len(commands))
         except Exception:
             logger.exception("set_my_commands failed for scope=%s", label)
     try:
@@ -168,33 +168,12 @@ async def _post_init(application: Application) -> None:
     health_task = asyncio.create_task(health_worker(application))
     application.bot_data["health_worker_task"] = health_task
 
-    # Reminders: cron-light напоминания для Менеджера.
-    reminders_task = asyncio.create_task(reminders_worker(application))
-    application.bot_data["reminders_worker_task"] = reminders_task
-
-    # Канал QueueWarden «Бот»: long-poll уведомлений → триггеры Секретарю.
-    # Без QUEUEWARDEN_MCP_TOKEN или при JARVIS_QW_NOTIFICATIONS=0 сразу выходит.
-    queuewarden_task = asyncio.create_task(queuewarden_notifications_worker(application))
-    application.bot_data["queuewarden_notifications_task"] = queuewarden_task
-
-    # Общий callback для отправки нотисов в топик Менеджера.
-    async def _notice(text: str, kind: str = "job_notification") -> None:
-        await _send_manager_notice(application, text, kind)
-
-    # Webhook-сервер для входящих событий Битрикс24.
-    webhook_task = asyncio.create_task(run_webhook_server(_notice))
-    application.bot_data["webhook_task"] = webhook_task
-
-    # IMAP-поллер для новых писем.
-    imap_task = asyncio.create_task(run_imap_watcher(_notice))
-    application.bot_data["imap_task"] = imap_task
-
-
-async def _skip_support_topic(update: Update, context) -> None:
-    message = update.effective_message
-    if (message is not None and message.chat_id == SUPPORT_CHAT_ID
-            and message.message_thread_id == SUPPORT_THREAD_ID):
-        raise ApplicationHandlerStop
+    # Фоновые задачи включённых плагинов (JARVIS_PLUGINS).
+    for plugin in load_plugins():
+        for worker in plugin.workers:
+            application.bot_data[f"plugin_{plugin.name}_{worker.__name__}"] = (
+                asyncio.create_task(worker(application))
+            )
 
 
 def build_application(
@@ -227,8 +206,10 @@ def build_application(
         user_id=allowed_user_ids if allowed_user_ids is not None else ALLOWED_USER_IDS
     )
 
-    if SUPPORT_CHAT_ID and SUPPORT_THREAD_ID:
-        app.add_handler(TypeHandler(Update, _skip_support_topic), group=-2)
+    plugins = load_plugins()
+    for plugin in plugins:
+        if plugin.setup is not None:
+            plugin.setup(app)
 
     # Группа -1: журнал всех входящих до любых обработчиков (не блокирует их).
     app.add_handler(TypeHandler(Update, log_incoming_update), group=-1)
@@ -248,7 +229,9 @@ def build_application(
     app.add_handler(CommandHandler("bind", cmd_bind, filters=allowed))
     app.add_handler(CommandHandler("unbind", cmd_unbind, filters=allowed))
     app.add_handler(CommandHandler("where", cmd_where, filters=allowed))
-    app.add_handler(CommandHandler("board", cmd_board, filters=allowed))
+    for plugin in plugins:
+        for command in plugin.commands:
+            app.add_handler(CommandHandler(command.name, command.callback, filters=allowed))
 
     app.add_handler(MessageHandler(allowed & filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(allowed & filters.Document.ALL, handle_document))

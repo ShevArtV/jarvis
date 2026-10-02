@@ -24,6 +24,7 @@ from __future__ import annotations
 import importlib
 import pathlib
 import unittest
+from unittest.mock import patch
 
 import telegram_bot
 
@@ -47,7 +48,6 @@ EXPECTED_HANDLERS = [
     (0, 'CommandHandler', 'bind', 'cmd_bind'),
     (0, 'CommandHandler', 'unbind', 'cmd_unbind'),
     (0, 'CommandHandler', 'where', 'cmd_where'),
-    (0, 'CommandHandler', 'board', 'cmd_board'),
     (0, 'MessageHandler', '-', 'handle_photo'),
     (0, 'MessageHandler', '-', 'handle_document'),
     (0, 'MessageHandler', '-', 'handle_text'),
@@ -109,11 +109,16 @@ EXPECTED_LAYOUT = {
     "plugins.reminders.schedule": ["parse_reminder_schedule", "compute_next_fire"],
     "bot.jobs": ["_run_manager_job", "_run_spawn", "_process_agent_trigger"],
     "bot.workers": [
-        "cleanup_worker", "reminders_worker", "persistent_reaper",
+        "cleanup_worker", "persistent_reaper",
         "close_requests_worker", "health_worker", "jobs_worker",
         "agent_triggers_worker", "_apply_close_request",
     ],
     "plugins.queuewarden.notifications": ["queuewarden_notifications_worker"],
+    "plugins.reminders.worker": ["reminders_worker"],
+    # Интеграции подключаются через JARVIS_PLUGINS (bot/plugins.py).
+    **{f"plugins.{name}.plugin": ["PLUGIN"] for name in (
+        "queuewarden", "activecollab", "reminders", "imap", "webhook", "support_topic",
+    )},
     "bot.app": ["build_application", "_post_init", "BOT_COMMANDS"],
     "telegram_bot": ["main"],
 }
@@ -148,6 +153,17 @@ class HandlerWiringTest(unittest.TestCase):
         """Он ловит всё, что не прошло whitelist. Уехав вверх по списку, он
         начал бы перехватывать сообщения разрешённых пользователей."""
         self.assertEqual(_wiring()[-1][3], "unauthorized_handler")
+
+    def test_plugin_command_goes_before_message_handlers(self) -> None:
+        """Команда плагина регистрируется вслед за командами ядра: окажись она
+        после MessageHandler'ов, её перехватил бы handle_unhandled_message."""
+        from bot import app as bot_app
+        from plugins.queuewarden.plugin import PLUGIN
+
+        with patch.object(bot_app, "load_plugins", return_value=(PLUGIN,)):
+            rows = _wiring()
+        board = rows.index((0, "CommandHandler", "board", "cmd_board"))
+        self.assertEqual(rows[board - 1][2], "where")
 
     def test_application_builds_without_network(self) -> None:
         app = telegram_bot.build_application(token="123456:fake", allowed_user_ids={1})

@@ -62,38 +62,6 @@ FILE_MARKER_RE = re.compile(
     re.MULTILINE,
 )
 
-# Миниаппы досок QueueWarden: URL нужен для web_app-кнопки в личке (там разрешён
-# только https-адрес), а короткое имя (direct link из BotFather) — для ссылки t.me
-# в группах/форумах, где web_app-кнопки запрещены. Досок сколько угодно:
-# BOARD_MINIAPPS=alpha|https://…/miniapp|qwalpha,beta|https://…/miniapp|qwbeta.
-# Без списка — одна доска из BOARD_MINIAPP_URL/BOARD_MINIAPP_SHORT_NAME.
-BOARD_MINIAPP_URL = os.environ.get("BOARD_MINIAPP_URL", "")
-BOARD_MINIAPP_SHORT_NAME = os.environ.get("BOARD_MINIAPP_SHORT_NAME", "qwboard")
-
-
-def parse_board_miniapps(raw: str | None) -> list[tuple[str, str, str]]:
-    """``[(подпись, url, short_name)]`` из BOARD_MINIAPPS. Запись без https-адреса
-    пропускается; short_name может быть пустым — тогда доска только в личке."""
-    result: list[tuple[str, str, str]] = []
-    for entry in (raw or "").split(","):
-        parts = [p.strip() for p in entry.split("|")]
-        if len(parts) < 2 or not parts[0]:
-            continue
-        label, url = parts[0], parts[1]
-        short_name = parts[2] if len(parts) > 2 else ""
-        if not url.startswith("https://"):
-            logging.getLogger(__name__).warning(
-                "BOARD_MINIAPPS: %r has no https url — skipped", label,
-            )
-            continue
-        result.append((label, url, short_name))
-    return result
-
-
-BOARD_MINIAPPS = parse_board_miniapps(os.environ.get("BOARD_MINIAPPS")) or (
-    [("", BOARD_MINIAPP_URL, BOARD_MINIAPP_SHORT_NAME)] if BOARD_MINIAPP_URL else []
-)
-
 DB_PATH = os.path.join(BASE_DIR, "bot_state.db")
 MEDIA_DIR = os.path.join(BASE_DIR, "temp", "media")
 os.makedirs(MEDIA_DIR, exist_ok=True)

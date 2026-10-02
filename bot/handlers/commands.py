@@ -10,7 +10,7 @@ import asyncio
 import logging
 import os
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, WebAppInfo
+from telegram import Update
 from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 
@@ -30,7 +30,7 @@ from bot.sessions import (
     set_cwd,
     touch_session,
 )
-from bot.settings import BOARD_MINIAPPS, CLAUDE_CWD, DEFAULT_ENGINE_NAME, SESSION_IDLE_MINUTES
+from bot.settings import CLAUDE_CWD, DEFAULT_ENGINE_NAME, SESSION_IDLE_MINUTES
 from bot.topics import _key, _kill_persistent_worker, active_procs, persistent_workers, spawn_procs
 from engines import get_engine_by_name
 from engines.limits import all_limits, format_limits_block
@@ -293,40 +293,6 @@ async def cmd_where(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         f"cwd: {effective}" + (" (дефолт)" if not cwd else " (bound)")
     )
-
-
-def board_keyboard(
-    boards: list[tuple[str, str, str]], is_private: bool, bot_username: str,
-) -> InlineKeyboardMarkup | None:
-    """Кнопка на каждую доску. В личке — web_app-кнопка (миниапп прямо в
-    Telegram); в группах/форумах web_app-кнопки запрещены Telegram — там ссылка
-    на именованное приложение t.me/<bot>/<short_name>, доска без short_name
-    не показывается. ``None`` — показать нечего."""
-    rows = []
-    for label, url, short_name in boards:
-        text = f"Доска {label}" if label else "Открыть доску"
-        if is_private:
-            rows.append([InlineKeyboardButton(text, web_app=WebAppInfo(url=url))])
-        elif short_name:
-            rows.append([InlineKeyboardButton(
-                text, url=f"https://t.me/{bot_username}/{short_name}",
-            )])
-    return InlineKeyboardMarkup(rows) if rows else None
-
-
-async def cmd_board(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/board — открыть миниаппы досок QueueWarden (BOARD_MINIAPPS)."""
-    if not update.message:
-        return
-    is_private = update.effective_chat is not None and update.effective_chat.type == "private"
-    keyboard = board_keyboard(BOARD_MINIAPPS, is_private, context.bot.username)
-    if keyboard is None:
-        await update.message.reply_text(
-            "Миниапп доски не настроен: задайте BOARD_MINIAPPS в .env "
-            "(в группе нужен short_name доски)."
-        )
-        return
-    await update.message.reply_text("Доски QueueWarden", reply_markup=keyboard)
 
 
 async def cmd_spawn(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

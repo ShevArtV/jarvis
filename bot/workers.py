@@ -21,6 +21,7 @@ from telegram.ext import Application
 from bot.db import _db, log_message
 from bot.delivery import _send_manager_notice, send_to_topic
 from bot.jobs import _process_agent_trigger, _run_manager_job
+from bot.plugins import coalesce_map
 from bot.queues import (
     _log_ttl_days,
     claim_next_agent_trigger,
@@ -37,12 +38,8 @@ from bot.topics import (
     active_procs,
     persistent_workers,
     resolve_job_notice_target,
-    resolve_secretary_topic,
-    resolve_teamlead_topic,
 )
 from engines.process_control import terminate_process_tree
-from plugins.queuewarden.notifications import prune_attachments
-from plugins.reminders.schedule import compute_next_fire, parse_reminder_schedule
 
 logger = logging.getLogger(__name__)
 
@@ -81,9 +78,6 @@ async def cleanup_worker(app: Application) -> None:
                     "agent_triggers=%d (TTL=%dd)",
                     stats["messages_log"], stats["jobs"], stats["agent_triggers"], ttl,
                 )
-            dirs = prune_attachments(ttl)
-            if dirs:
-                logger.info("cleanup_worker: pruned %d QW attachment dirs", dirs)
             await asyncio.sleep(3600.0)
         except asyncio.CancelledError:
             logger.info("cleanup_worker cancelled")
@@ -91,105 +85,6 @@ async def cleanup_worker(app: Application) -> None:
         except Exception:
             logger.exception("cleanup_worker loop crashed; sleeping 5min")
             await asyncio.sleep(300.0)
-
-
-async def reminders_worker(app: Application) -> None:
-    """Раз в N секунд сканирует reminders и шлёт сработавшие в их топик."""
-    interval = _env_int("JARVIS_REMINDERS_INTERVAL", 60, 10)
-    logger.info("reminders_worker started (interval=%ds)", interval)
-    while True:
-        try:
-            now = datetime.utcnow()
-            now_iso = now.isoformat()
-            with _db() as conn:
-                due_rows = conn.execute(
-                    "SELECT id, chat_id, thread_id, text, schedule, next_fire_at "
-                    "FROM reminders WHERE enabled = 1 AND next_fire_at <= ? "
-                    "ORDER BY next_fire_at ASC",
-                    (now_iso,),
-                ).fetchall()
-            for r in due_rows:
-                rid, rchat, rthread, rtext, rschedule, _ = r
-                notice = f"🔔 Напоминание #{rid}: {rtext}"
-                service_targets = {
-                    t for t in (resolve_secretary_topic(), resolve_teamlead_topic())
-                    if t is not None
-                }
-                try:
-                    chat = await app.bot.get_chat(rchat)
-                    sent = await send_to_topic(chat, rthread, notice)
-                    msg_id = sent.message_id if sent is not None else None
-                    log_message(rchat, rthread, "out", "reminder", notice, msg_id)
-                except Exception:
-                    logger.exception("reminders_worker: send failed id=%s", rid)
-                    # Не пересчитываем next_fire_at — попробуем в следующем цикле.
-                    continue
-
-                # Auto-kick если напоминание в служебный топик. Существующие
-                # reminders старого Менеджера остаются в Секретаре, а если
-                # когда-нибудь появятся инженерные reminders в Тимлиде, они тоже
-                # будут будить свой топик.
-                if (rchat, rthread) in service_targets:
-                    try:
-                        with _db() as conn:
-                            existing = conn.execute(
-                                "SELECT COUNT(*) FROM jobs "
-                                "WHERE chat_id=? AND thread_id=? "
-                                "AND status IN ('pending','in_progress')",
-                                (rchat, rthread),
-                            ).fetchone()[0]
-                            if existing == 0:
-                                conn.execute(
-                                    "INSERT INTO jobs(chat_id, thread_id, text, "
-                                    "source, status, created_at) VALUES "
-                                    "(?, ?, ?, 'self_notice', 'pending', ?)",
-                                    (
-                                        rchat, rthread,
-                                        f"[REMINDER] 🔔 Сработало напоминание "
-                                        f"#{rid}: {rtext}",
-                                        now_iso,
-                                    ),
-                                )
-                    except Exception:
-                        logger.exception(
-                            "reminders_worker: auto-kick failed id=%s", rid,
-                        )
-
-                # Пересчитать next_fire_at.
-                try:
-                    parsed = parse_reminder_schedule(rschedule)
-                    next_fire = compute_next_fire(parsed, now)
-                except Exception:
-                    logger.exception(
-                        "reminders_worker: failed to recompute next_fire id=%s "
-                        "schedule=%r → disabling", rid, rschedule,
-                    )
-                    next_fire = None
-                with _db() as conn:
-                    if next_fire is None:
-                        # once отработал, либо schedule сломался → выключаем.
-                        conn.execute(
-                            "UPDATE reminders SET enabled=0, last_fired_at=? "
-                            "WHERE id=?",
-                            (now_iso, rid),
-                        )
-                    else:
-                        conn.execute(
-                            "UPDATE reminders SET next_fire_at=?, last_fired_at=? "
-                            "WHERE id=?",
-                            (next_fire.isoformat(), now_iso, rid),
-                        )
-                logger.info(
-                    "reminders_worker: fired id=%s next=%s",
-                    rid, next_fire.isoformat() if next_fire else "DISABLED",
-                )
-            await asyncio.sleep(interval)
-        except asyncio.CancelledError:
-            logger.info("reminders_worker cancelled")
-            raise
-        except Exception:
-            logger.exception("reminders_worker loop crashed; sleeping 60s")
-            await asyncio.sleep(60.0)
 
 
 def _env_int(name: str, default: int, min_val: int = 1) -> int:
@@ -515,9 +410,8 @@ async def agent_triggers_worker(app: Application) -> None:
     normal topic lock inside _process_prompt_locked/_handle_persistent_message.
     """
     concurrency = _env_int("JARVIS_AGENT_TRIGGERS_CONCURRENCY", 5, 1)
-    # Уведомления QueueWarden идут сериями: ждём затишья и отдаём серию
-    # Тимлиду одним ходом, а не разбираем устаревшие события по одному.
-    coalesce = {"queuewarden": _env_int("JARVIS_QW_COALESCE_SECONDS", 60, 0)}
+    # Источники плагинов, чьи триггеры склеиваются в серию (bot/plugins.py).
+    coalesce = coalesce_map()
     sem = asyncio.Semaphore(concurrency)
     tasks: set[asyncio.Task] = set()
     logger.info("agent_triggers_worker started (concurrency=%d, coalesce=%s)",

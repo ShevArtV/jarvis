@@ -30,6 +30,7 @@ from bot.delivery import (
 )
 from bot.formatting import _html_escape
 from bot.llm import call_llm_stream
+from bot.plugins import trigger_source
 from bot.sessions import (
     clear_pending_summary,
     ensure_active_session,
@@ -461,13 +462,12 @@ async def _process_agent_trigger(app: Application, trigger: dict) -> tuple[bool,
     key = (chat_id, thread_id)
     text = trigger["text"]
     source = trigger.get("source") or "external"
-    # QueueWarden: серия уведомлений — один ход советника, которому разрешено
+    # Источник из плагина сам собирает промпт серии и решает, можно ли агенту
     # промолчать, если оператору писать не о чем.
-    allow_silent = source == "queuewarden"
-    if allow_silent:
-        from plugins.queuewarden.notifications import build_batch_prompt
-
-        text = build_batch_prompt(trigger.get("texts") or [text])
+    spec = trigger_source(source)
+    allow_silent = bool(spec and spec.allow_silent)
+    if spec is not None:
+        text = spec.build_prompt(trigger.get("texts") or [text])
     try:
         chat = await app.bot.get_chat(chat_id)
     except Exception:

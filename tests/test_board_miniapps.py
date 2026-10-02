@@ -4,8 +4,7 @@ from __future__ import annotations
 
 import unittest
 
-from bot.handlers.commands import board_keyboard
-from bot.settings import parse_board_miniapps
+from plugins.queuewarden.board import board_keyboard, parse_board_miniapps
 
 BOARDS = [
     ("alpha", "https://alpha.test/miniapp", "qwalpha"),

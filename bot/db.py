@@ -18,6 +18,7 @@ import shutil
 import sqlite3
 from datetime import datetime
 
+from bot.plugins import load_plugins
 from bot.settings import DB_PATH
 
 logger = logging.getLogger(__name__)
@@ -444,30 +445,6 @@ def init_db() -> None:
             "CREATE INDEX IF NOT EXISTS idx_agent_triggers_pending "
             "ON agent_triggers(status, created_at)"
         )
-        # Напоминания Менеджеру (cron-light). schedule — простой текст,
-        # парсится в _parse_schedule(): daily HH:MM, weekday HH:MM,
-        # weekend HH:MM, weekly DAY[,DAY] HH:MM, monthly D HH:MM,
-        # once YYYY-MM-DD HH:MM (все времена в JARVIS_REMINDERS_TZ).
-        # next_fire_at хранится в UTC ISO.
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS reminders (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                chat_id INTEGER NOT NULL,
-                thread_id INTEGER NOT NULL,
-                text TEXT NOT NULL,
-                schedule TEXT NOT NULL,
-                next_fire_at TEXT NOT NULL,
-                last_fired_at TEXT,
-                enabled INTEGER NOT NULL DEFAULT 1,
-                created_at TEXT NOT NULL
-            )
-            """
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_reminders_due "
-            "ON reminders(enabled, next_fire_at)"
-        )
         # Состояние polling-интеграций. Сейчас его использует ActiveCollab MCP,
         # чтобы не повторять уже доложенные Секретарю задачи и уведомления.
         conn.execute(
@@ -496,38 +473,10 @@ def init_db() -> None:
             )
             """
         )
-        # imap_state: UIDs уже отправленных нотисов, чтобы не дублировать.
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS imap_state (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                account TEXT NOT NULL,
-                uid INTEGER NOT NULL,
-                seen_at TEXT NOT NULL,
-                UNIQUE(account, uid)
-            )
-            """
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_imap_state_account "
-            "ON imap_state(account, uid)"
-        )
-        # webhook_log: входящие события от Битрикс24 и других вебхуков.
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS webhook_log (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                source TEXT NOT NULL,
-                event TEXT NOT NULL,
-                payload TEXT NOT NULL,
-                received_at TEXT NOT NULL
-            )
-            """
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_webhook_log_received "
-            "ON webhook_log(source, received_at)"
-        )
+        # Таблицы включённых плагинов (JARVIS_PLUGINS).
+        for plugin in load_plugins():
+            for ddl in plugin.schema:
+                conn.execute(ddl)
 
 
 def log_message(
