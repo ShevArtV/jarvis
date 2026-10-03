@@ -106,7 +106,9 @@ The Russian section «Плагины» below has a full example.
 - `/session` — session-id, cwd, движок, браузер и состояние сеанса.
 - `/tokens` — показать оценку размера текущей LLM-сессии.
 - `/usage` — остаток лимитов подписки: claude (из кэша CLI `~/.claude.json`),
-  codex (из последнего `rollout-*.jsonl`), opencode и cursor — не отслеживаются.
+  codex (из последнего `rollout-*.jsonl`), cursor (тот же запрос, что его `/usage`:
+  `DashboardService/GetCurrentPeriodUsage` с токеном из `~/.config/cursor/auth.json`),
+  opencode — не отслеживается.
 - `/browser [on|off]` — включить/выключить браузер (Playwright MCP) для топика.
   По умолчанию **выключен** (on-demand): браузерные tools грузятся в контекст
   только там, где реально нужны — иначе ~30 `browser_*` тулов висят в каждом
@@ -948,8 +950,8 @@ opencode mcp list
    systemd-сервису, задать `CURSOR_BIN=/полный/путь/к/cursor-agent`.
 3. `systemctl --user restart jarvis-bot.service`.
 
-Ограничения cursor: нет `/persistent`, Playwright (`/browser`) и topic-MCP; лимиты
-подписки (`/usage`) и расход контекста сессии не отслеживаются.
+Ограничения cursor: нет `/persistent`, Playwright (`/browser`) и topic-MCP; расход
+контекста сессии (`/tokens`) не отслеживается.
 
 ## Запуск вручную
 
