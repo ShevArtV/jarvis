@@ -2,17 +2,17 @@
 
 [![tests](https://github.com/ShevArtV/jarvis/actions/workflows/tests.yml/badge.svg)](https://github.com/ShevArtV/jarvis/actions/workflows/tests.yml)
 
-Тонкая обёртка Telegram-бота над LLM CLI (`claude`, `codex` или `opencode`). Один топик = одна непрерывная сессия.
+Тонкая обёртка Telegram-бота над LLM CLI (`claude`, `codex`, `opencode` или `cursor`). Один топик = одна непрерывная сессия.
 Пишешь в Telegram — получаешь ответ, как если бы запускал CLI в терминале.
 
 ## Quick start (English)
 
 Jarvis is a Telegram bot that drives the LLM CLIs you already use — `claude`,
-`codex` or `opencode`. Each forum topic is one long-running CLI session with its
+`codex`, `opencode` or `cursor` (Cursor CLI, `cursor-agent`). Each forum topic is one long-running CLI session with its
 own working directory, engine and model. The rest of this README is in Russian;
 this section is enough to get the bot running.
 
-**Requirements:** Python 3.11+, at least one of `claude` / `codex` / `opencode`
+**Requirements:** Python 3.11+, at least one of `claude` / `codex` / `opencode` / `cursor-agent`
 installed and logged in under the same OS user, a bot token from
 [@BotFather](https://t.me/BotFather) and your Telegram user id (e.g. from
 `@userinfobot`). Add the bot to a forum group with topics enabled, or just talk
@@ -56,7 +56,7 @@ Scheduler or NSSM and the Windows-specific notes are in
 - In a topic: `/engine` shows and switches the engine and model, `/bind <path>`
   sets the topic's working directory; `/session`, `/stop`, `/close` do what
   they say.
-- Default engine for new topics: `JARVIS_ENGINE=claude|codex|opencode` in `.env`.
+- Default engine for new topics: `JARVIS_ENGINE=claude|codex|opencode|cursor` in `.env`.
 - Every other setting is documented in `.env.example`.
 
 ### Plugins
@@ -91,9 +91,9 @@ The Russian section «Плагины» below has a full example.
 
 ## Что умеет
 
-- Передаёт любые текстовые запросы в выбранный движок (`claude`, OpenAI `codex` или `opencode`).
+- Передаёт любые текстовые запросы в выбранный движок (`claude`, OpenAI `codex`, `opencode` или `cursor`).
 - Запоминает session-id на каждый топик — контекст диалога сохраняется.
-- Движок и модель per-topic: `JARVIS_ENGINE=claude|codex|opencode` задаёт
+- Движок и модель per-topic: `JARVIS_ENGINE=claude|codex|opencode|cursor` задаёт
   дефолтный движок для новых топиков; в любом топике можно переключиться
   командой `/engine <name> [model-substring]`.
 - `/engine` — показать текущий движок и список доступных; `/engine <name>` —
@@ -106,7 +106,7 @@ The Russian section «Плагины» below has a full example.
 - `/session` — session-id, cwd, движок, браузер и состояние сеанса.
 - `/tokens` — показать оценку размера текущей LLM-сессии.
 - `/usage` — остаток лимитов подписки: claude (из кэша CLI `~/.claude.json`),
-  codex (из последнего `rollout-*.jsonl`), opencode — заглушка.
+  codex (из последнего `rollout-*.jsonl`), opencode и cursor — не отслеживаются.
 - `/browser [on|off]` — включить/выключить браузер (Playwright MCP) для топика.
   По умолчанию **выключен** (on-demand): браузерные tools грузятся в контекст
   только там, где реально нужны — иначе ~30 `browser_*` тулов висят в каждом
@@ -114,7 +114,7 @@ The Russian section «Плагины» below has a full example.
 - `/persistent [on|off]` — живой процесс для `claude`, `codex` и `opencode`:
   новое сообщение во время активного хода не ждёт topic-lock, а дописывается в
   текущую работу (`claude` через stream-json stdin, `codex` через app-server
-  `turn/steer`, `opencode` через `opencode serve` и `prompt_async`).
+  `turn/steer`, `opencode` через `opencode serve` и `prompt_async`); `cursor` — не поддержан.
 - **Журнал хода** — шаги агента (инструменты, рассуждения, промежуточный текст)
   копятся в одном сообщении и **остаются** в топике после ответа. Раньше они
   писались в индикатор, где каждый апдейт затирал предыдущий, а в конце
@@ -123,9 +123,10 @@ The Russian section «Плагины» below has a full example.
 - Длинные ответы (> 3500 символов) присылаются как `.md`-файл с коротким превью.
 - Reply-to на сообщение бота → в запрос подмешивается скрытый контекст о том, на что ты отвечаешь.
 - Фото/документы скачиваются локально, путь прокидывается в prompt (`[Прикреплён файл: ...]`).
-- Playwright MCP — **on-demand** для любого движка (`claude`/`codex`/`opencode`):
+- Playwright MCP — **on-demand** для `claude`/`codex`/`opencode`:
   включается per-topic командой `/browser on` и инъектируется в CLI на каждый
-  запрос, без постоянной глобальной регистрации.
+  запрос, без постоянной глобальной регистрации. `cursor` — не поддержан: у
+  `cursor-agent` нет per-invocation подключения MCP.
 - Внешние MCP-серверы — **по роли топика**: топик-оркестратор («Менеджер») и
   рабочие топики ходят во внешний сервис разными кредами, не перемешивая
   личности. Объявляются одним JSON-файлом; движок на роль не влияет.
@@ -135,8 +136,8 @@ The Russian section «Плагины» below has a full example.
 ## Требования
 
 - **Python 3.11+** (проверяется в CI на 3.11 и 3.12).
-- Хотя бы один LLM CLI, установленный и авторизованный: `claude`, `codex` или
-  `opencode`. Jarvis их не устанавливает и ключей не хранит — он вызывает то, что
+- Хотя бы один LLM CLI, установленный и авторизованный: `claude`, `codex`,
+  `opencode` или `cursor-agent`. Jarvis их не устанавливает и ключей не хранит — он вызывает то, что
   уже работает у вас в терминале.
 - Для role-based topic MCP через Codex нужен `codex-cli >= 0.134.0`: начиная с
   этой версии `--profile` загружает отдельный
@@ -275,20 +276,22 @@ PLUGIN = Plugin(
 
 ### Переменные окружения (опционально)
 
-- `JARVIS_ENGINE` — `claude` (дефолт), `codex` или `opencode`. Задаёт **дефолтный
+- `JARVIS_ENGINE` — `claude` (дефолт), `codex`, `opencode` или `cursor`. Задаёт **дефолтный
   движок для новых топиков**. Существующие топики хранят свой движок в БД и
   не пересоздаются при смене env — для переключения активного топика используй
   команду `/engine <name>` прямо в Telegram.
 - `CLAUDE_BIN` — путь к бинарю claude (по умолчанию `claude`).
 - `CODEX_BIN` — путь к бинарю codex (по умолчанию `codex`).
 - `OPENCODE_BIN` — путь к бинарю opencode (по умолчанию `opencode`).
+- `CURSOR_BIN` — путь к бинарю Cursor CLI (по умолчанию `cursor-agent`).
 - `CLAUDE_CWD` — дефолтный рабочий каталог (общий для всех движков).
 - `CLAUDE_TIMEOUT` — таймаут claude, секунд (по умолчанию `3600`).
 - `CODEX_TIMEOUT` — таймаут codex, секунд (по умолчанию `3600`).
 - `OPENCODE_TIMEOUT` — таймаут opencode, секунд (по умолчанию `3600`).
+- `CURSOR_TIMEOUT` — таймаут cursor, секунд (по умолчанию `3600`).
 - `CODEX_MODEL` — дефолтная модель для Codex CLI, если в топике модель не
   выбрана явно через `/engine`.
-- `CLAUDE_MODELS`, `CODEX_MODELS`, `OPENCODE_MODELS` — запятая-разделённые
+- `CLAUDE_MODELS`, `CODEX_MODELS`, `OPENCODE_MODELS`, `CURSOR_MODELS` — запятая-разделённые
   списки моделей для UI `/engine`. Задавать не нужно: без них Jarvis
   спрашивает списки у самих CLI (см. «Списки моделей» ниже), env — это
   override, когда нужно показать только часть моделей или свою.
@@ -296,6 +299,14 @@ PLUGIN = Plugin(
   (по умолчанию `600`).
 - `OPENCODE_MODEL`, `OPENCODE_AGENT`, `OPENCODE_VARIANT` — опциональные параметры
   для `opencode run`; если не заданы, используются настройки самого opencode.
+- `CURSOR_MODEL` — дефолтная модель для `cursor-agent` (`--model`), если в топике
+  модель не выбрана через `/engine`; без неё CLI берёт свою.
+- `CURSOR_MODELS_LIMIT` — сколько первых моделей из `cursor-agent --list-models`
+  показывать в `/engine` (по умолчанию `30`): CLI отдаёт ~250 моделей, а у
+  inline-клавиатуры Telegram потолок 100 кнопок.
+- `CURSOR_MCP_CONFIG` — путь к `mcp.json` cursor, куда регистрируется Manager MCP
+  (по умолчанию `~/.cursor/mcp.json`).
+- `CURSOR_API_KEY` — ключ API вместо `cursor-agent login` (читает сам CLI).
 - `PLAYWRIGHT_MCP_NPX` — абсолютный путь к `npx` для Playwright MCP. Если не
   задан, runtime-хелпер ищет `npx` в `PATH` и `~/.nvm/versions/node/*/bin/npx`.
 - `PLAYWRIGHT_MCP_PACKAGE` — npm-пакет MCP-сервера (по умолчанию
@@ -378,6 +389,10 @@ Playwright **не** регистрируется глобально, а инъе
   Manager MCP, без `--strict-mcp-config`).
 - **codex**: оверрайды `-c mcp_servers.playwright.command=… -c …args=[…] -c
   …enabled=true` поверх `~/.codex/config.toml`.
+- **cursor**: не поддержан. `cursor-agent` читает MCP только из `~/.cursor/mcp.json`
+  и `<cwd>/.cursor/mcp.json`, per-invocation подключения нет. `/browser on` в
+  cursor-топике ставит флаг, но бот предупреждает: браузер заработает только
+  после смены движка.
 - **opencode**: у `opencode run` нет per-invocation MCP-флага, поэтому Jarvis
   клонирует глобальный `opencode.json` (Manager MCP и provider-настройки
   сохраняются), добавляет `mcp.playwright` во временный файл и подсовывает его
@@ -477,6 +492,8 @@ Jarvis решает это ролью топика. `resolve_topic_role()` от�
 - **opencode**: временный `OPENCODE_CONFIG` — клон глобального `opencode.json`
   плюс `mcp.<name>`; удаляется после ответа. Если подключать нечего, temp-файл
   НЕ создаётся и opencode идёт со своим штатным конфигом.
+- **cursor**: не поддержан (topic-MCP `JARVIS_TOPIC_MCP_CONFIG` до cursor не доходит —
+  нет per-invocation MCP).
 
 Глобальные user-scope регистрации этих серверов в `~/.codex/config.toml` и
 `~/.claude.json` должны отсутствовать, иначе identity снова станет зависеть от
@@ -565,7 +582,8 @@ options=[...])` публикует вопрос в топик и **блокир�
 
 Обычный путь Jarvis сериализует сообщения в топике через topic-lock: если агент
 уже работает, следующее сообщение ждёт очереди. `/persistent on` включает
-исключение для текущего движка (`claude`, `codex` или `opencode`): живой subprocess держится
+исключение для текущего движка (`claude`, `codex` или `opencode`; `cursor` не
+поддержан): живой subprocess держится
 между ходами, а сообщение, пришедшее во время активного хода, отправляется в
 него сразу и подтверждается фразой «добавил к текущей работе».
 
@@ -642,6 +660,7 @@ mcp_servers.playwright.*` overrides при старте app-server; topic-MCP �
 | `codex` | ✅ `🔧 exec …` | ✅ **текстом** (событие `reasoning`) |
 | `claude` | ✅ `🔧 <tool> …` | ⚠️ только факт: `💭 размышляет…` |
 | `opencode` | ✅ `🔧 …` | ❌ отдельных событий нет |
+| `cursor` | ✅ `💻/📖/✏️/🔌 …` | ❌ отдельных событий нет |
 
 **У claude текст рассуждений получить нельзя.** CLI отдаёт блок `thinking` с
 пустым полем и одной лишь `signature`; с `--include-partial-messages` приходят
@@ -717,6 +736,7 @@ mcp_servers.playwright.*` overrides при старте app-server; topic-MCP �
   cache_creation`).
 - `opencode` — точные токены последнего assistant-message из
   `~/.local/share/opencode/opencode.db`.
+- `cursor` — не отслеживается.
 - `codex` — best-effort estimate по размеру локального JSONL, потому что
   локальный session-log Codex CLI пока не даёт стабильного usage-поля.
 
@@ -730,8 +750,9 @@ mcp_servers.playwright.*` overrides при старте app-server; topic-MCP �
 | claude | алиасы `opus`/`sonnet`/`haiku` (CLI принимает их всегда) + `additionalModelOptionsCache` из `~/.claude.json` — то, что доступно аккаунту сверх алиасов, вроде `claude-fable-5[1m]` |
 | codex | `~/.codex/models_cache.json` (только модели с `visibility: list`) |
 | opencode | вывод `opencode models` — все сконфигурированные провайдеры |
+| cursor | вывод `cursor-agent --list-models` (строки «id - Название», названия идут в подписи кнопок), первые `CURSOR_MODELS_LIMIT`; фолбэк — `auto` |
 
-Env `CLAUDE_MODELS` / `CODEX_MODELS` / `OPENCODE_MODELS` перекрывают источник.
+Env `CLAUDE_MODELS` / `CODEX_MODELS` / `OPENCODE_MODELS` / `CURSOR_MODELS` перекрывают источник.
 Если источник молчит (CLI не установлен, конфиг битый), адаптер отдаёт свой
 фолбэк-список — меню не пустеет никогда.
 
@@ -751,7 +772,7 @@ Per-topic MCP — часть контракта `Engine.call_stream` (см.
 - `system_prefix: str | None` — постоянный `[SYSTEM:]`-блок. Положи его в
   системный канал своего CLI (как `--append-system-prompt` у claude). Если
   канала нет — префиксуй prompt **только на новой сессии** (на resume он уже
-  в транскрипте), как сделано в codex/opencode.
+  в транскрипте), как сделано в codex/opencode/cursor.
 - `mcp_playwright: bool` — если `True`, инъектируй Playwright per-invocation:
   возьми спеку из `playwright_command_args()` и переведи в механизм своего CLI
   (флаг конфига / оверрайд / временный конфиг через env). Если CLI вообще не
@@ -893,6 +914,8 @@ codex mcp list
 opencode mcp list
 ```
 
+У cursor Manager MCP лежит в `~/.cursor/mcp.json` (ключ `mcpServers.jarvis`).
+
 ### Переход на Codex CLI
 
 1. `npm i -g @openai/codex`, затем `codex login` (ChatGPT) или `export OPENAI_API_KEY=...`.
@@ -912,6 +935,21 @@ opencode mcp list
 3. Добавить в `.env`: `JARVIS_ENGINE=opencode`. Если `opencode` установлен через nvm
    и не виден systemd-сервису, также задать `OPENCODE_BIN=/полный/путь/к/opencode`.
 4. `systemctl --user restart jarvis-bot.service`.
+
+### Переход на cursor
+
+1. Установить Cursor CLI и авторизоваться:
+   ```bash
+   curl https://cursor.com/install -fsS | bash
+   cursor-agent login      # либо env CURSOR_API_KEY
+   cursor-agent status
+   ```
+2. Добавить в `.env`: `JARVIS_ENGINE=cursor`. Если `cursor-agent` не виден
+   systemd-сервису, задать `CURSOR_BIN=/полный/путь/к/cursor-agent`.
+3. `systemctl --user restart jarvis-bot.service`.
+
+Ограничения cursor: нет `/persistent`, Playwright (`/browser`) и topic-MCP; лимиты
+подписки (`/usage`) и расход контекста сессии не отслеживаются.
 
 ## Запуск вручную
 
@@ -1023,6 +1061,9 @@ JARVIS_DOTENV=0 ./venv/bin/python -m unittest discover -s tests -t .
 
 - Session-id у `claude` генерируется ботом и передаётся через `--session-id`; если удалить каталог
   `~/.claude/projects/...` или история будет повреждена, сессия «забудет» контекст.
+- У `cursor` id, как у `claude`, назначает бот (uuid4): `--resume` на несуществующий
+  чат создаёт чат с этим id; наличие сессии проверяется по
+  `<CURSOR_CONFIG_DIR | $XDG_CONFIG_HOME/cursor | ~/.cursor>/chats/<md5(cwd)>/<id>/store.db`.
 - У `codex` и `opencode` настоящий id создаёт сам CLI; до первого ответа в БД лежит
   временный placeholder, затем бот заменяет его на реальный id.
 - `claude` запускается с `--permission-mode bypassPermissions`, чтобы не зависать

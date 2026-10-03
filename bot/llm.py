@@ -135,7 +135,7 @@ async def call_llm_stream(
     if (
         spawn_id is None
         and (not ok)
-        and engine.name in {"opencode", "codex"}
+        and engine.name in {"opencode", "codex", "cursor"}
         and "вернул пустой ответ" in (final_text or "")
     ):
         try:

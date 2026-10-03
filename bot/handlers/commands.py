@@ -53,7 +53,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"session-id: `{session_id}`\n"
         f"Рабочая директория: `{effective}`" + (" (дефолт)" if not cwd else "") + "\n\n"
         "Команды:\n"
-        "/engine [name] — показать/переключить движок (claude|codex|opencode)\n"
+        "/engine [name] — показать/переключить движок (claude|codex|opencode|cursor)\n"
         "/browser [on|off] — браузер (Playwright MCP) для топика, on-demand\n"
         "/persistent [on|off] — живой процесс claude/codex/opencode: сообщения на лету, без очереди\n"
         "/tokens — оценка размера текущей сессии\n"

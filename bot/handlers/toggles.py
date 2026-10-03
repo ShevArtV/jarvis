@@ -83,6 +83,12 @@ async def _apply_browser(key: tuple[int, int], enable: bool) -> str:
     set_mcp_playwright(key[0], key[1], enable)
     logger.info("browser toggled for key=%s: %s", key, "on" if enable else "off")
     if enable:
+        if get_session(*key)[2] == "cursor":
+            return (
+                "🌐 Флаг браузера включён, но движок cursor не умеет подключать "
+                "MCP на отдельный вызов — Playwright заработает после /engine "
+                "на claude, codex или opencode."
+            )
         return (
             "🌐 Браузер включён для топика. Playwright MCP подключится со "
             "СЛЕДУЮЩЕГО сообщения (≈30 browser_* тулов в контексте). Контекст "

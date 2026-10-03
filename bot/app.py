@@ -84,7 +84,7 @@ logger = logging.getLogger(__name__)
 # Команды, выводимые в нативное меню Telegram (синяя кнопка слева от поля ввода).
 # Описания короткие — Telegram обрезает длинные.
 BOT_COMMANDS: list[BotCommand] = [
-    BotCommand("engine", "движок: показать/переключить (claude|codex|opencode)"),
+    BotCommand("engine", "движок: показать/переключить (claude|codex|opencode|cursor)"),
     BotCommand("close", "закрыть сеанс (контекст сбрасывается)"),
     BotCommand("new", "закрыть сеанс и сразу открыть новый"),
     BotCommand("session", "session-id, cwd, движок и состояние сеанса"),

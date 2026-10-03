@@ -1,4 +1,4 @@
-"""Поведение call_stream трёх движков на подставном процессе.
+"""Поведение call_stream движков на подставном процессе.
 
 CLI не запускается: spawn/feed_stdin/terminate_process_tree подменены, stdout —
 заранее заданные JSONL-строки. Проверяются исходы (успех, ошибка, пустой ответ,
@@ -17,7 +17,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from engines import claude_engine, codex_engine, common, opencode_engine
+from engines import claude_engine, codex_engine, common, cursor_engine, opencode_engine
 
 
 class _FakeStdout:
@@ -122,7 +122,7 @@ class _Base(unittest.TestCase):
         logging.disable(logging.WARNING)
         self.addCleanup(logging.disable, logging.NOTSET)
         for name in ("CLAUDE_MODEL", "CODEX_MODEL", "OPENCODE_MODEL",
-                     "OPENCODE_AGENT", "OPENCODE_VARIANT"):
+                     "OPENCODE_AGENT", "OPENCODE_VARIANT", "CURSOR_MODEL"):
             os.environ.pop(name, None)
 
     def tearDown(self) -> None:
@@ -449,6 +449,98 @@ class OpenCodeCallStreamTest(_Base):
             h.run(self.engine(), "p", self.cwd, mcp_playwright=True)
         self.assertEqual(h.spawn_kwargs["env"]["OPENCODE_CONFIG"], path)
         self.assertFalse(os.path.exists(path))
+
+
+class CursorCallStreamTest(_Base):
+    def engine(self):
+        return cursor_engine.CursorEngine()
+
+    def _init(self, sid="s1"):
+        return {"type": "system", "subtype": "init", "session_id": sid, "model": "Auto"}
+
+    def test_success_new_session_answer_after_last_tool(self) -> None:
+        h = _Harness(cursor_engine, [
+            self._init(),
+            {"type": "thinking", "subtype": "delta", "text": "думаю"},
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "привет"}]}},
+            {"type": "tool_call", "subtype": "started", "tool_call": {"shellToolCall": {
+                "args": {"command": "ls"}, "description": "Список файлов"}}},
+            {"type": "tool_call", "subtype": "completed", "tool_call": {"shellToolCall": {}}},
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "Каталог пуст."}]}},
+            {"type": "result", "subtype": "success", "is_error": False,
+             "result": "приветКаталог пуст."},
+        ])
+        res = h.run(self.engine(), "s1", self.cwd, system_prefix="[SYSTEM: x]")
+        self.assertEqual(res, (True, "Каталог пуст.", "s1", "Auto"))
+        self.assertEqual(h.cmd[:2], [cursor_engine.CURSOR_BIN, "--print"])
+        self.assertEqual(h.cmd[-2:], ["--resume", "s1"])
+        self.assertIn("--force", h.cmd)
+        self.assertNotIn("--model", h.cmd)
+        self.assertTrue(h.stdin.startswith("[SYSTEM: x]\n\n[SYSTEM NOTE FOR CURSOR]"))
+        self.assertEqual("\n".join(h.published), "привет\n💻 Список файлов\nКаталог пуст.")
+        self.assert_unregistered(h)
+
+    def test_resume_with_model(self) -> None:
+        h = _Harness(cursor_engine, [{"type": "result", "result": "ок"}])
+        with patch.object(cursor_engine.CursorEngine, "session_exists", lambda *a: True), \
+                patch.dict("os.environ", {"CURSOR_MODEL": "gpt-5.2"}):
+            res = h.run(self.engine(), "s1", self.cwd, system_prefix="[SYSTEM: x]")
+        self.assertEqual(res, (True, "ок", "s1", "gpt-5.2"))
+        self.assertEqual(h.cmd[-4:], ["--resume", "s1", "--model", "gpt-5.2"])
+        self.assertTrue(h.stdin.startswith("[SYSTEM NOTE FOR CURSOR]"))
+
+    def test_spawn_is_always_new(self) -> None:
+        h = _Harness(cursor_engine, [{"type": "result", "result": "ок"}])
+        with patch.object(cursor_engine.CursorEngine, "session_exists", lambda *a: True):
+            h.run(self.engine(), "s2", self.cwd, spawn_id="sp", system_prefix="[SYSTEM: x]")
+        self.assertTrue(h.stdin.startswith("[SYSTEM: x]"))
+        self.assert_unregistered(h)
+
+    def test_errors(self) -> None:
+        h = _Harness(cursor_engine, [], rc=1, stderr="Cannot use this model: x")
+        self.assertEqual(h.run(self.engine(), "s1", self.cwd),
+                         (False, "Ошибка cursor (rc=1): Cannot use this model: x", "s1", None))
+        h = _Harness(cursor_engine, [{"type": "result", "is_error": True, "result": "квота"}])
+        self.assertEqual(h.run(self.engine(), "s1", self.cwd)[1], "Ошибка cursor (rc=0): квота")
+        h = _Harness(cursor_engine, [self._init()], rc=-9)
+        self.assertEqual(h.run(self.engine(), "s1", self.cwd), (False, "", "s1", "Auto"))
+        h = _Harness(cursor_engine, [self._init()], stderr="e")
+        self.assertEqual(h.run(self.engine(), "s1", self.cwd),
+                         (False, "cursor вернул пустой ответ.\ne", "s1", "Auto"))
+
+    def test_timeout_cancel_missing(self) -> None:
+        h = _Harness(cursor_engine, [self._init()], hang=True)
+        with patch.object(cursor_engine, "CURSOR_TIMEOUT", 0.05):
+            res = h.run(self.engine(), "s1", self.cwd)
+        self.assertEqual(res, (False, "Timeout: cursor не ответил за 0.05с.", "s1", "Auto"))
+        self.assertEqual(h.terminated, 1)
+        self.assert_unregistered(h)
+        _cancel_case(self, _Harness(cursor_engine, [], hang=True), self.engine(), "s1", self.cwd)
+        h = _Harness(cursor_engine)
+        self.assertIn("не существует", h.run(self.engine(), "s1", self.cwd + "/nope")[1])
+        h = _Harness(cursor_engine, spawn_error=FileNotFoundError())
+        self.assertEqual(h.run(self.engine(), "s1", self.cwd),
+                         (False, f"`{cursor_engine.CURSOR_BIN}` не найден в PATH.", "s1", None))
+
+    def test_session_exists_by_chat_dir(self) -> None:
+        import hashlib
+        from pathlib import Path
+
+        with patch.dict("os.environ", {"CURSOR_CONFIG_DIR": self.cwd}):
+            self.assertFalse(self.engine().session_exists("s1", "/proj"))
+            chat = Path(self.cwd, "chats", hashlib.md5(b"/proj").hexdigest(), "s1")
+            chat.mkdir(parents=True)
+            (chat / "store.db").write_bytes(b"")
+            self.assertTrue(self.engine().session_exists("s1", "/proj"))
+
+    def test_mcp_tool_step(self) -> None:
+        step = cursor_engine._cursor_tool_step({"mcpToolCall": {"args": {
+            "providerIdentifier": "jarvis", "toolName": "manager_inbox",
+            "args": {"thread_id": 5}}}}, self.cwd)
+        self.assertEqual(step, "📨 jarvis · manager_inbox (thread 5)")
+        step = cursor_engine._cursor_tool_step(
+            {"readToolCall": {"args": {"path": self.cwd + "/a.py"}}}, self.cwd)
+        self.assertEqual(step, "📖 a.py")
 
 
 if __name__ == "__main__":

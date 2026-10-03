@@ -124,8 +124,8 @@ def manager_set_engine(
 ) -> dict[str, Any]:
     """Persistently switch the topic to a different engine/model."""
     engine = engine.strip().lower()
-    if engine not in {"claude", "codex", "opencode"}:
-        raise ValueError(f"engine must be claude|codex|opencode, got {engine!r}")
+    if engine not in {"claude", "codex", "opencode", "cursor"}:
+        raise ValueError(f"engine must be claude|codex|opencode|cursor, got {engine!r}")
     target_chat_id = chat_id if chat_id is not None else common._default_chat_id()
 
     # Lazy import — same reason as manager_engines.
@@ -308,7 +308,7 @@ def manager_set_browser(
         "free icon color from Telegram's 6-color palette automatically. If a "
         "topic already exists for the same cwd, returns it (existed=true) "
         "instead of duplicating — pass force=true to override and create "
-        "anyway. Engine must be one of: claude, codex, opencode. The bot "
+        "anyway. Engine must be one of: claude, codex, opencode, cursor. The bot "
         "ignores topics that don't appear in the sessions table until the "
         "first user message — this tool seeds the row so subsequent "
         "manager_send and on-topic messages bind to the right cwd/engine "
@@ -332,8 +332,8 @@ def manager_create_topic(
     if not cwd or not os.path.isabs(cwd):
         raise ValueError("cwd must be an absolute path")
     engine = engine.strip().lower()
-    if engine not in {"claude", "codex", "opencode"}:
-        raise ValueError(f"engine must be claude|codex|opencode, got {engine!r}")
+    if engine not in {"claude", "codex", "opencode", "cursor"}:
+        raise ValueError(f"engine must be claude|codex|opencode|cursor, got {engine!r}")
     if icon_color is not None and icon_color not in common._ICON_COLORS:
         raise ValueError(
             f"icon_color must be one of {common._ICON_COLORS} (Telegram palette)"
