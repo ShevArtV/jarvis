@@ -26,6 +26,7 @@ HTTP_TIMEOUT = 15.0
 
 CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 CODEX_USAGE_URL = "https://chatgpt.com/backend-api/codex/usage"
+CURSOR_USAGE_URL = "https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage"
 
 
 @dataclass
@@ -46,10 +47,14 @@ class EngineLimits:
     live: bool = False  # True — свежий ответ API, False — локальный фолбэк
 
 
-def _fetch_json(url: str, headers: dict[str, str]) -> tuple[Any, str | None]:
-    """GET с готовыми заголовками. Возвращает ``(payload, error)`` — ровно одно
-    из двух непусто. Наружу не бросает ничего."""
-    req = urllib.request.Request(url, headers=headers, method="GET")
+def _fetch_json(
+    url: str, headers: dict[str, str], body: bytes | None = None
+) -> tuple[Any, str | None]:
+    """GET (или POST, если передан ``body``) с готовыми заголовками. Возвращает
+    ``(payload, error)`` — ровно одно из двух непусто. Наружу не бросает ничего."""
+    req = urllib.request.Request(
+        url, data=body, headers=headers, method="GET" if body is None else "POST"
+    )
     try:
         with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
             return json.loads(resp.read().decode("utf-8")), None
@@ -439,8 +444,81 @@ def opencode_limits() -> EngineLimits:
     return EngineLimits(engine="opencode", note="лимиты подписки opencode не отслеживаются")
 
 
+def _cursor_auth_path() -> Path:
+    if "CURSOR_AUTH_JSON" in os.environ:
+        return Path(os.environ["CURSOR_AUTH_JSON"])
+    config_home = os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config"
+    return Path(config_home) / "cursor" / "auth.json"
+
+
+def _cursor_token() -> tuple[str | None, str | None]:
+    path = _cursor_auth_path()
+    if not path.is_file():
+        return None, f"{path} не найден (cursor-agent login)"
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, json.JSONDecodeError) as exc:
+        return None, f"не удалось прочитать {path}: {exc}"
+    token = data.get("accessToken") if isinstance(data, dict) else None
+    if not isinstance(token, str) or not token:
+        return None, "в auth.json нет accessToken"
+    return token, None
+
+
+def _cursor_windows(payload: dict[str, Any]) -> list[LimitWindow]:
+    """Окна из ответа GetCurrentPeriodUsage. Лимит один — на расчётный период,
+    в долларах (поля в центах); auto- и API-модели CLI показывает отдельными
+    процентами от него же."""
+    plan = payload.get("planUsage")
+    if not isinstance(plan, dict):
+        return []
+    end_ms = _as_float(payload.get("billingCycleEnd"))
+    resets_at = datetime.fromtimestamp(end_ms / 1000, tz=UTC) if end_ms else None
+    spend = _as_float(plan.get("totalSpend"))
+    limit = _as_float(plan.get("limit"))
+    windows = [
+        LimitWindow(
+            name="месяц",
+            used_percent=spend / limit * 100 if spend is not None and limit else None,
+            resets_at=resets_at,
+            note=f"${spend / 100:.2f} из ${limit / 100:.2f}" if spend is not None and limit else None,
+        )
+    ]
+    for key, name in (("autoPercentUsed", "месяц · auto"), ("apiPercentUsed", "месяц · API-модели")):
+        percent = _as_float(plan.get(key))
+        if percent is not None:
+            windows.append(LimitWindow(name=name, used_percent=percent, resets_at=resets_at))
+    return windows
+
+
 def cursor_limits() -> EngineLimits:
-    return EngineLimits(engine="cursor", note="лимиты подписки cursor не отслеживаются")
+    """Остаток лимитов cursor — тем же запросом, что TUI-команда ``/usage``:
+    Connect-RPC DashboardService/GetCurrentPeriodUsage с токеном из
+    ``~/.config/cursor/auth.json``. Локального кэша у cursor-agent нет, поэтому
+    и фолбэка нет."""
+    result = EngineLimits(engine="cursor")
+    token, error = _cursor_token()
+    if token:
+        payload, error = _fetch_json(
+            CURSOR_USAGE_URL,
+            {
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+                "Connect-Protocol-Version": "1",
+            },
+            body=b"{}",
+        )
+        if isinstance(payload, dict):
+            result.windows = _cursor_windows(payload)
+            result.live = True
+            result.source = CURSOR_USAGE_URL
+            result.fetched_at = datetime.now(UTC)
+            if not result.windows:
+                result.note = "API ответил, но planUsage в ответе нет"
+            return result
+    result.note = error
+    return result
 
 
 def all_limits() -> list[EngineLimits]:

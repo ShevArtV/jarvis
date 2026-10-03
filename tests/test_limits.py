@@ -15,6 +15,7 @@ from engines.limits import (
     _codex_limits_from_rollouts,
     claude_limits,
     codex_limits,
+    cursor_limits,
     format_limits_block,
 )
 
@@ -251,6 +252,63 @@ class CodexLimitsLiveTest(unittest.TestCase):
         fetch.assert_called_once()
         self.assertFalse(result.live)
         self.assertIn("API отклонил токен (HTTP 401)", result.note)
+
+
+class CursorLimitsLiveTest(unittest.TestCase):
+    def test_live_success_returns_period_and_buckets(self) -> None:
+        payload = {
+            "billingCycleStart": "1791039345000",
+            "billingCycleEnd": "1793717745000",
+            "planUsage": {
+                "totalSpend": 313,
+                "limit": 2000,
+                "autoPercentUsed": 0.12,
+                "apiPercentUsed": 22.8,
+            },
+        }
+        with (
+            patch("engines.limits._cursor_token", return_value=("t", None)),
+            patch("engines.limits._fetch_json", return_value=(payload, None)) as fetch,
+        ):
+            result = cursor_limits()
+
+        self.assertEqual(fetch.call_args.kwargs["body"], b"{}")
+        self.assertTrue(result.live)
+        self.assertEqual(
+            [w.name for w in result.windows],
+            ["месяц", "месяц · auto", "месяц · API-модели"],
+        )
+        period = result.windows[0]
+        self.assertAlmostEqual(period.used_percent, 15.65)
+        self.assertEqual(period.note, "$3.13 из $20.00")
+        self.assertEqual(period.resets_at, datetime.fromtimestamp(1793717745, tz=UTC))
+        self.assertEqual(result.windows[2].used_percent, 22.8)
+
+    def test_missing_auth_file_gives_note(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "auth.json"
+            with (
+                patch.dict(os.environ, {"CURSOR_AUTH_JSON": str(path)}),
+                patch("engines.limits._fetch_json") as fetch,
+            ):
+                result = cursor_limits()
+
+        fetch.assert_not_called()
+        self.assertFalse(result.windows)
+        self.assertIn("не найден", result.note)
+
+    def test_api_error_goes_to_note(self) -> None:
+        with (
+            patch("engines.limits._cursor_token", return_value=("t", None)),
+            patch(
+                "engines.limits._fetch_json",
+                return_value=(None, "API отклонил токен (HTTP 401)"),
+            ),
+        ):
+            result = cursor_limits()
+
+        self.assertFalse(result.live)
+        self.assertEqual(result.note, "API отклонил токен (HTTP 401)")
 
 
 class FormatLimitsBlockTest(unittest.TestCase):
