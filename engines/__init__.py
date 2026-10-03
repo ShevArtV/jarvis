@@ -30,7 +30,8 @@ logger = logging.getLogger(__name__)
 ENGINE_CLAUDE = "claude"
 ENGINE_CODEX = "codex"
 ENGINE_OPENCODE = "opencode"
-SUPPORTED_ENGINES = (ENGINE_CLAUDE, ENGINE_CODEX, ENGINE_OPENCODE)
+ENGINE_CURSOR = "cursor"
+SUPPORTED_ENGINES = (ENGINE_CLAUDE, ENGINE_CODEX, ENGINE_OPENCODE, ENGINE_CURSOR)
 
 
 _CACHE: dict[str, Engine] = {}
@@ -63,9 +64,12 @@ def get_engine_by_name(name: str) -> Engine:
     elif name == ENGINE_CODEX:
         from engines.codex_engine import CodexEngine
         eng = CodexEngine()
-    else:
+    elif name == ENGINE_OPENCODE:
         from engines.opencode_engine import OpenCodeEngine
         eng = OpenCodeEngine()
+    else:
+        from engines.cursor_engine import CursorEngine
+        eng = CursorEngine()
     _CACHE[name] = eng
     return eng
 
@@ -115,7 +119,7 @@ def prewarm_models() -> None:
 def engine_model_scope(engine_name: str, model: str | None) -> Iterator[None]:
     """Выставляет текущую модель для движка через ContextVar на время блока.
 
-    Поддерживаются claude, codex и opencode.
+    Поддерживаются claude, codex, opencode и cursor.
     Для движков без поддержки или при model=None — no-op.
     ContextVar.set/reset синхронны, но значение видно через `await` внутри
     той же таски — этого достаточно для call_stream.
@@ -147,5 +151,13 @@ def engine_model_scope(engine_name: str, model: str | None) -> Iterator[None]:
             yield
         finally:
             CX_MODEL.reset(token)
+    elif engine_name == ENGINE_CURSOR:
+        from engines.cursor_engine import CURRENT_MODEL as CU_MODEL
+
+        token = CU_MODEL.set(model)
+        try:
+            yield
+        finally:
+            CU_MODEL.reset(token)
     else:
         yield

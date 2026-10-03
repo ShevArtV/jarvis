@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from bot import db as bot_db
 from bot import sessions as bot_sessions
-from engines import claude_engine
+from engines import claude_engine, cursor_engine
 
 
 def _init_response(values: list[str]) -> str:
@@ -94,6 +94,39 @@ class SetEngineResetsActualModelTest(unittest.TestCase):
                 bot_sessions.set_engine(1, 2, "codex", model="gpt-6.1-sol")
                 self.assertIsNone(bot_sessions.get_actual_model(1, 2))
                 self.assertEqual(bot_sessions.get_model(1, 2), "gpt-6.1-sol")
+
+
+
+class CursorModelDiscoveryTest(unittest.TestCase):
+    """`cursor-agent --list-models`: строки «id - название», список урезан."""
+
+    OUT = (
+        "Available models\n\n"
+        "auto - Auto (default)\n"
+        "gpt-5.2 - GPT-5.2\n"
+        "grok-4.7-low-fast - Grok 4.7  Low Fast\u200b\u200b\n"
+        "glm-5.2-max - GLM 5.2 Max\n\n"
+        "Tip: use --model <id> to switch.\n"
+    )
+
+    def test_parse_labels_and_limit(self) -> None:
+        from bot.handlers.engine import _model_label
+
+        run = subprocess.CompletedProcess([], 0, stdout=self.OUT, stderr="")
+        with patch("engines.model_cache.run_cli", return_value=run), \
+                patch.object(cursor_engine, "CURSOR_MODELS_LIMIT", 3), \
+                patch.dict("os.environ", {}, clear=False) as env:
+            env.pop("CURSOR_MODELS", None)
+            self.assertEqual(cursor_engine._discover_cursor_models(),
+                             ["auto", "gpt-5.2", "grok-4.7-low-fast"])
+        self.assertEqual(_model_label("gpt-5.2"), "GPT-5.2")
+        self.assertEqual(_model_label("grok-4.7-low-fast"), "Grok 4.7  Low Fast")
+
+    def test_env_override_wins(self) -> None:
+        with patch("engines.model_cache.run_cli") as run, \
+                patch.dict("os.environ", {"CURSOR_MODELS": "auto,gpt-5.2"}):
+            self.assertEqual(cursor_engine._discover_cursor_models(), ["auto", "gpt-5.2"])
+            run.assert_not_called()
 
 
 if __name__ == "__main__":

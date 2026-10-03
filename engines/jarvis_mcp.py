@@ -1,7 +1,7 @@
 """Runtime registration of the Jarvis Manager MCP server for engines.
 
 Like ``playwright_mcp``, this module idempotently writes the MCP config for
-claude/codex/opencode so the Manager agent gets ``manager_topics`` /
+claude/codex/opencode/cursor so the Manager agent gets ``manager_topics`` /
 ``manager_inbox`` tools natively. The actual server lives in
 ``scripts/jarvis_mcp_server.py`` and is launched via the bot's venv Python.
 """
@@ -36,6 +36,10 @@ CODEX_CONFIG = Path(
 ).expanduser()
 OPENCODE_CONFIG = Path(
     os.environ.get("OPENCODE_CONFIG", HOME / ".config" / "opencode" / "opencode.json")
+).expanduser()
+
+CURSOR_MCP_CONFIG = Path(
+    os.environ.get("CURSOR_MCP_CONFIG", HOME / ".cursor" / "mcp.json")
 ).expanduser()
 
 BEGIN_MARKER = "# BEGIN JARVIS MANAGER MCP"
@@ -162,6 +166,29 @@ def _configure_opencode(python: str, args: list[str]) -> None:
         OPENCODE_CONFIG.write_text(new, encoding="utf-8")
 
 
+def _configure_cursor(python: str, args: list[str]) -> None:
+    """cursor-agent читает MCP только из ~/.cursor/mcp.json (и проектного
+    .cursor/mcp.json) — других способов подключить сервер у него нет."""
+    if CURSOR_MCP_CONFIG.exists():
+        try:
+            data = json.loads(CURSOR_MCP_CONFIG.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"Cannot parse {CURSOR_MCP_CONFIG}: {exc}") from exc
+    else:
+        data = {}
+    if not isinstance(data, dict):
+        raise RuntimeError(f"{CURSOR_MCP_CONFIG} must contain a JSON object")
+    servers = data.setdefault("mcpServers", {})
+    if not isinstance(servers, dict):
+        raise RuntimeError(f"{CURSOR_MCP_CONFIG}: `mcpServers` must be an object")
+    servers[SERVER_NAME] = {"command": python, "args": args}
+    new = json.dumps(data, ensure_ascii=False, indent=2) + "\n"
+    old = CURSOR_MCP_CONFIG.read_text(encoding="utf-8") if CURSOR_MCP_CONFIG.exists() else ""
+    if new != old:
+        CURSOR_MCP_CONFIG.parent.mkdir(parents=True, exist_ok=True)
+        CURSOR_MCP_CONFIG.write_text(new, encoding="utf-8")
+
+
 def _configure_claude(claude_bin: str, python: str, args: list[str]) -> None:
     claude = shutil.which(claude_bin) or claude_bin
     if shutil.which(claude) is None and not Path(claude).exists():
@@ -212,6 +239,8 @@ def ensure_jarvis_mcp(engine_name: str, engine_bin: str) -> tuple[bool, str]:
             _configure_codex(python, args)
         elif engine_name == "opencode":
             _configure_opencode(python, args)
+        elif engine_name == "cursor":
+            _configure_cursor(python, args)
         else:
             raise RuntimeError(f"unknown engine: {engine_name}")
     except Exception as exc:

@@ -1,4 +1,4 @@
-"""Остаток лимитов подписки claude/codex/opencode.
+"""Остаток лимитов подписки claude/codex/opencode/cursor.
 
 Цифры берутся там же, где их берут сами CLI для своих ``/usage`` и ``/status``:
 живым запросом в API с уже сохранённым на диске OAuth-токеном. Локальные файлы
@@ -439,8 +439,12 @@ def opencode_limits() -> EngineLimits:
     return EngineLimits(engine="opencode", note="лимиты подписки opencode не отслеживаются")
 
 
+def cursor_limits() -> EngineLimits:
+    return EngineLimits(engine="cursor", note="лимиты подписки cursor не отслеживаются")
+
+
 def all_limits() -> list[EngineLimits]:
-    return [claude_limits(), codex_limits(), opencode_limits()]
+    return [claude_limits(), codex_limits(), opencode_limits(), cursor_limits()]
 
 
 def _as_float(value: Any) -> float | None:

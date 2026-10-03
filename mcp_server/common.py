@@ -198,7 +198,7 @@ def _ensure_close_requested_column(conn: sqlite3.Connection) -> None:
 
 
 def _new_session_id(engine: str) -> str:
-    """Match engine adapters: claude uses raw UUID, codex/opencode placeholders."""
+    """Match engine adapters: claude/cursor use raw UUID, codex/opencode placeholders."""
     if engine in _PLACEHOLDER_ENGINES:
         return f"placeholder-{uuid.uuid4()}"
     return str(uuid.uuid4())
