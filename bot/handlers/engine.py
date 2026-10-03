@@ -29,12 +29,13 @@ from engines.process_control import terminate_process_tree
 logger = logging.getLogger(__name__)
 
 def _engine_keyboard(current_engine: str) -> InlineKeyboardMarkup:
-    """Inline-клавиатура с кнопками выбора движка. Текущий помечается ✓."""
-    row = []
-    for name in SUPPORTED_ENGINES:
-        label = f"✓ {name}" if name == current_engine else name
-        row.append(InlineKeyboardButton(label, callback_data=f"engine_select:{name}"))
-    return InlineKeyboardMarkup([row])
+    """Inline-клавиатура с кнопками выбора движка, по два в ряд. Текущий помечается ✓."""
+    buttons = [
+        InlineKeyboardButton(f"✓ {name}" if name == current_engine else name,
+                             callback_data=f"engine_select:{name}")
+        for name in SUPPORTED_ENGINES
+    ]
+    return InlineKeyboardMarkup([buttons[i:i + 2] for i in range(0, len(buttons), 2)])
 
 
 def _model_label(model: str) -> str:
