@@ -8,6 +8,7 @@ requests would only enlarge the runtime surface.
 from __future__ import annotations
 
 import json
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -34,12 +35,29 @@ def _api_base(url: str) -> str:
 class ActiveCollabClient:
     """Small typed-by-convention wrapper around the ActiveCollab JSON API."""
 
-    def __init__(self, url: str, token: str, timeout: float = 20.0) -> None:
+    def __init__(
+        self,
+        url: str,
+        token: str,
+        timeout: float = 20.0,
+        deadline: float | None = None,
+    ) -> None:
         if not token.strip():
             raise ActiveCollabError("ACTIVE_COLLAB_TOKEN is not configured")
         self.api_base = _api_base(url)
         self._token = token.strip()
         self.timeout = timeout
+        # monotonic clock absolute; None = no overall budget
+        self.deadline = deadline
+
+    def _request_timeout(self) -> float:
+        """Per-request timeout, capped by remaining overall deadline if set."""
+        if self.deadline is None:
+            return self.timeout
+        remaining = self.deadline - time.monotonic()
+        if remaining <= 0:
+            raise ActiveCollabError("ActiveCollab request exceeded time budget")
+        return min(self.timeout, remaining)
 
     def _request(
         self,
@@ -62,7 +80,7 @@ class ActiveCollabClient:
             method=method,
         )
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            with urllib.request.urlopen(request, timeout=self._request_timeout()) as response:
                 raw = response.read()
         except urllib.error.HTTPError as exc:
             raise ActiveCollabError(f"ActiveCollab API returned HTTP {exc.code}") from exc

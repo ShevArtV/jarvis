@@ -1,16 +1,21 @@
 from __future__ import annotations
 
+import asyncio
+import inspect
 import json
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from mcp.server.fastmcp import FastMCP
+
 from bot import db as bot_db
 from mcp_server import common
 from plugins.activecollab import mcp_tools as activecollab_tools
-from plugins.activecollab.client import ActiveCollabClient
+from plugins.activecollab.client import ActiveCollabClient, ActiveCollabError
 
 
 class _Response:
@@ -88,6 +93,30 @@ class ActiveCollabClientTest(unittest.TestCase):
 
         self.assertEqual(notifications[0]["task_id"], 99)
 
+    def test_deadline_caps_request_timeout_and_fails_when_exhausted(self) -> None:
+        seen_timeouts: list[float] = []
+        now = 1000.0
+
+        def urlopen(request, timeout):
+            seen_timeouts.append(timeout)
+            return _Response({"logged_user_id": 1})
+
+        client = ActiveCollabClient(
+            "https://ac.example",
+            "secret",
+            timeout=20.0,
+            deadline=1000.25,
+        )
+        with patch("plugins.activecollab.client.time.monotonic", side_effect=lambda: now):
+            with patch("urllib.request.urlopen", side_effect=urlopen):
+                client.logged_user_id()
+                now = 1000.25
+                with self.assertRaises(ActiveCollabError) as ctx:
+                    client.logged_user_id()
+
+        self.assertEqual(seen_timeouts, [0.25])
+        self.assertIn("time budget", str(ctx.exception))
+
 
 class ActiveCollabDeltaTest(unittest.TestCase):
     def setUp(self) -> None:
@@ -130,6 +159,69 @@ class ActiveCollabDeltaTest(unittest.TestCase):
         self.assertFalse(second["initial_check"])
         self.assertEqual([task["id"] for task in second["new_tasks"]], [11])
         self.assertEqual([item["id"] for item in second["new_comment_notifications"]], [21])
+
+    def test_check_updates_uses_budgeted_client(self) -> None:
+        captured: dict[str, object] = {}
+
+        def fake_client(*, timeout=None, deadline=None):
+            captured["timeout"] = timeout
+            captured["deadline"] = deadline
+            return self._client(
+                [{"id": 1, "is_completed": False}],
+                [],
+            )
+
+        with patch.object(activecollab_tools, "_activecollab_client", side_effect=fake_client):
+            before = time.monotonic()
+            activecollab_tools._activecollab_check_updates()
+
+        self.assertEqual(captured["timeout"], activecollab_tools.CHECK_UPDATES_REQUEST_TIMEOUT)
+        deadline = captured["deadline"]
+        self.assertIsInstance(deadline, float)
+        self.assertGreater(deadline, before)
+        self.assertLessEqual(
+            deadline - before,
+            activecollab_tools.CHECK_UPDATES_BUDGET_SECONDS + 0.5,
+        )
+
+
+class ActiveCollabMcpToolsTest(unittest.TestCase):
+    def test_registered_tools_are_async(self) -> None:
+        mcp = FastMCP("test-activecollab")
+        activecollab_tools.register(mcp)
+        for name in (
+            "manager_activecollab_my_tasks",
+            "manager_activecollab_check_updates",
+            "manager_activecollab_task",
+            "manager_activecollab_add_comment",
+        ):
+            tool = mcp._tool_manager.get_tool(name)
+            self.assertIsNotNone(tool, name)
+            self.assertTrue(tool.is_async, name)
+            self.assertTrue(inspect.iscoroutinefunction(tool.fn), name)
+
+    def test_check_updates_tool_runs_via_to_thread(self) -> None:
+        mcp = FastMCP("test-activecollab")
+        activecollab_tools.register(mcp)
+        tool = mcp._tool_manager.get_tool("manager_activecollab_check_updates")
+        self.assertIsNotNone(tool)
+
+        async def run() -> dict:
+            with patch.object(
+                activecollab_tools,
+                "_activecollab_check_updates",
+                return_value={"ok": True},
+            ) as mock_check:
+                result = await tool.run({})
+            mock_check.assert_called_once_with()
+            return result
+
+        result = asyncio.run(run())
+        # FastMCP may wrap the dict; accept either raw or structured content.
+        if isinstance(result, dict):
+            self.assertEqual(result.get("ok"), True)
+        else:
+            self.assertTrue(result)
 
 
 if __name__ == "__main__":
