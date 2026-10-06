@@ -105,16 +105,16 @@ class ActiveCollabClientTest(unittest.TestCase):
             "https://ac.example",
             "secret",
             timeout=20.0,
-            deadline=1000.05,
+            deadline=1000.25,
         )
         with patch("plugins.activecollab.client.time.monotonic", side_effect=lambda: now):
             with patch("urllib.request.urlopen", side_effect=urlopen):
                 client.logged_user_id()
-                now = 1000.06
+                now = 1000.25
                 with self.assertRaises(ActiveCollabError) as ctx:
                     client.logged_user_id()
 
-        self.assertEqual(seen_timeouts, [0.05])
+        self.assertEqual(seen_timeouts, [0.25])
         self.assertIn("time budget", str(ctx.exception))
 
 
