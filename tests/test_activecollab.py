@@ -10,8 +10,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from bot import db as bot_db
 from mcp.server.fastmcp import FastMCP
+
+from bot import db as bot_db
 from mcp_server import common
 from plugins.activecollab import mcp_tools as activecollab_tools
 from plugins.activecollab.client import ActiveCollabClient, ActiveCollabError
@@ -94,6 +95,7 @@ class ActiveCollabClientTest(unittest.TestCase):
 
     def test_deadline_caps_request_timeout_and_fails_when_exhausted(self) -> None:
         seen_timeouts: list[float] = []
+        now = 1000.0
 
         def urlopen(request, timeout):
             seen_timeouts.append(timeout)
@@ -103,15 +105,16 @@ class ActiveCollabClientTest(unittest.TestCase):
             "https://ac.example",
             "secret",
             timeout=20.0,
-            deadline=time.monotonic() + 0.05,
+            deadline=1000.05,
         )
-        with patch("urllib.request.urlopen", side_effect=urlopen):
-            client.logged_user_id()
-            time.sleep(0.06)
-            with self.assertRaises(ActiveCollabError) as ctx:
+        with patch("plugins.activecollab.client.time.monotonic", side_effect=lambda: now):
+            with patch("urllib.request.urlopen", side_effect=urlopen):
                 client.logged_user_id()
+                now = 1000.06
+                with self.assertRaises(ActiveCollabError) as ctx:
+                    client.logged_user_id()
 
-        self.assertLessEqual(seen_timeouts[0], 0.05)
+        self.assertEqual(seen_timeouts, [0.05])
         self.assertIn("time budget", str(ctx.exception))
 
 
