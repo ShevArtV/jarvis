@@ -1,15 +1,31 @@
 """MCP-тулы ActiveCollab. Регистрируются через register(mcp), если плагин
-включён в JARVIS_PLUGINS."""
+включён в JARVIS_PLUGINS.
+
+Тулы — async и гоняют sync urllib-клиент через asyncio.to_thread: FastMCP
+вызывает sync-функции прямо в event loop, а один медленный check_updates иначе
+глушит весь stdio-MCP (включая manager_topics / manager_inbox).
+"""
 
 from __future__ import annotations
 
+import asyncio
+import time
 from typing import Any
 
 from bot.timeutil import utcnow
 from mcp_server import common
 
+# Жёсткий бюджет на весь check_updates: при деградации API не держать агента
+# N×per-request секунд. Per-request короче обычного 20с — fail-fast внутри бюджета.
+CHECK_UPDATES_BUDGET_SECONDS = 45.0
+CHECK_UPDATES_REQUEST_TIMEOUT = 10.0
 
-def _activecollab_client():
+
+def _activecollab_client(
+    *,
+    timeout: float | None = None,
+    deadline: float | None = None,
+):
     """Build an ActiveCollab client from the bot environment without logging secrets."""
     url = common._env_or_dotenv("ACTIVE_COLLAB_URL")
     token = common._env_or_dotenv("ACTIVE_COLLAB_TOKEN")
@@ -19,12 +35,21 @@ def _activecollab_client():
             "ACTIVE_COLLAB_TOKEN in Jarvis .env"
         )
     from plugins.activecollab.client import ActiveCollabClient  # type: ignore
-    return ActiveCollabClient(url, token)
+
+    kwargs: dict[str, Any] = {}
+    if timeout is not None:
+        kwargs["timeout"] = timeout
+    if deadline is not None:
+        kwargs["deadline"] = deadline
+    return ActiveCollabClient(url, token, **kwargs)
 
 
 def _activecollab_check_updates() -> dict[str, Any]:
     """Fetch the user's ActiveCollab delta and persist the observed IDs."""
-    client = _activecollab_client()
+    client = _activecollab_client(
+        timeout=CHECK_UPDATES_REQUEST_TIMEOUT,
+        deadline=time.monotonic() + CHECK_UPDATES_BUDGET_SECONDS,
+    )
     all_tasks = client.my_tasks(include_completed=True)
     open_tasks = [task for task in all_tasks if not task.get("is_completed")]
     task_ids = {
@@ -104,11 +129,13 @@ def register(mcp) -> None:
             "текущую стадию (task list). Только чтение."
         ),
     )
-    def manager_activecollab_my_tasks(include_completed: bool = False) -> dict[str, Any]:
+    async def manager_activecollab_my_tasks(include_completed: bool = False) -> dict[str, Any]:
         """List tasks assigned to the authenticated ActiveCollab user."""
-        tasks = _activecollab_client().my_tasks(include_completed=include_completed)
-        return {"count": len(tasks), "tasks": tasks}
+        def work() -> dict[str, Any]:
+            tasks = _activecollab_client().my_tasks(include_completed=include_completed)
+            return {"count": len(tasks), "tasks": tasks}
 
+        return await asyncio.to_thread(work)
 
     @mcp.tool(
         name="manager_activecollab_task",
@@ -117,10 +144,11 @@ def register(mcp) -> None:
             "бери их из manager_activecollab_my_tasks или ссылки на задачу. Только чтение."
         ),
     )
-    def manager_activecollab_task(project_id: int, task_id: int) -> dict[str, Any]:
+    async def manager_activecollab_task(project_id: int, task_id: int) -> dict[str, Any]:
         """Return one task, including its comments and subscribers."""
-        return _activecollab_client().task(project_id, task_id)
-
+        return await asyncio.to_thread(
+            lambda: _activecollab_client().task(project_id, task_id),
+        )
 
     @mcp.tool(
         name="manager_activecollab_stages",
@@ -129,11 +157,13 @@ def register(mcp) -> None:
             "Используй перед переносом, если целевая стадия не названа точно. Только чтение."
         ),
     )
-    def manager_activecollab_stages(project_id: int) -> dict[str, Any]:
+    async def manager_activecollab_stages(project_id: int) -> dict[str, Any]:
         """List the project task lists used as workflow stages."""
-        stages = _activecollab_client().stages(project_id)
-        return {"count": len(stages), "stages": stages}
+        def work() -> dict[str, Any]:
+            stages = _activecollab_client().stages(project_id)
+            return {"count": len(stages), "stages": stages}
 
+        return await asyncio.to_thread(work)
 
     @mcp.tool(
         name="manager_activecollab_job_types",
@@ -142,11 +172,13 @@ def register(mcp) -> None:
             "Только чтение."
         ),
     )
-    def manager_activecollab_job_types() -> dict[str, Any]:
+    async def manager_activecollab_job_types() -> dict[str, Any]:
         """List ActiveCollab job types available to the current user."""
-        job_types = _activecollab_client().job_types()
-        return {"count": len(job_types), "job_types": job_types}
+        def work() -> dict[str, Any]:
+            job_types = _activecollab_client().job_types()
+            return {"count": len(job_types), "job_types": job_types}
 
+        return await asyncio.to_thread(work)
 
     @mcp.tool(
         name="manager_activecollab_check_updates",
@@ -157,10 +189,9 @@ def register(mcp) -> None:
             "дельту. Этот tool предназначен для reminder-чеклиста Секретаря."
         ),
     )
-    def manager_activecollab_check_updates() -> dict[str, Any]:
+    async def manager_activecollab_check_updates() -> dict[str, Any]:
         """Return new ActiveCollab tasks/comment notifications since the last check."""
-        return _activecollab_check_updates()
-
+        return await asyncio.to_thread(_activecollab_check_updates)
 
     @mcp.tool(
         name="manager_activecollab_add_comment",
@@ -170,10 +201,11 @@ def register(mcp) -> None:
             "и текстом комментария."
         ),
     )
-    def manager_activecollab_add_comment(task_id: int, body: str) -> dict[str, Any]:
+    async def manager_activecollab_add_comment(task_id: int, body: str) -> dict[str, Any]:
         """Post an explicitly approved comment to an ActiveCollab task."""
-        return _activecollab_client().add_comment(task_id, body)
-
+        return await asyncio.to_thread(
+            lambda: _activecollab_client().add_comment(task_id, body),
+        )
 
     @mcp.tool(
         name="manager_activecollab_track_time",
@@ -183,7 +215,7 @@ def register(mcp) -> None:
             "датой и типом работы. value: например '1:30' или '1.5'; record_date: YYYY-MM-DD."
         ),
     )
-    def manager_activecollab_track_time(
+    async def manager_activecollab_track_time(
         project_id: int,
         task_id: int,
         value: str,
@@ -193,10 +225,12 @@ def register(mcp) -> None:
         billable_status: int | None = None,
     ) -> dict[str, Any]:
         """Create an explicitly approved ActiveCollab time record."""
-        return _activecollab_client().track_time(
-            project_id, task_id, value, record_date, job_type_id, summary, billable_status,
-        )
+        def work() -> dict[str, Any]:
+            return _activecollab_client().track_time(
+                project_id, task_id, value, record_date, job_type_id, summary, billable_status,
+            )
 
+        return await asyncio.to_thread(work)
 
     @mcp.tool(
         name="manager_activecollab_move_task",
@@ -206,10 +240,12 @@ def register(mcp) -> None:
             "только после явного одобрения оператора с конкретной задачей и стадией."
         ),
     )
-    def manager_activecollab_move_task(
+    async def manager_activecollab_move_task(
         project_id: int,
         task_id: int,
         stage_name: str,
     ) -> dict[str, Any]:
         """Move a task to an explicitly approved workflow stage."""
-        return _activecollab_client().move_to_stage_name(project_id, task_id, stage_name)
+        return await asyncio.to_thread(
+            lambda: _activecollab_client().move_to_stage_name(project_id, task_id, stage_name),
+        )
