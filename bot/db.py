@@ -99,6 +99,7 @@ _ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("sessions", "persistent_claude", "INTEGER NOT NULL DEFAULT 1"),
     ("sessions", "persistent_codex", "INTEGER NOT NULL DEFAULT 1"),
     ("sessions", "persistent_opencode", "INTEGER NOT NULL DEFAULT 1"),
+    ("sessions", "persistent_cursor", "INTEGER NOT NULL DEFAULT 1"),
     # Маркер одноразового бэкфилла persistent_*=1 (см. _before_add).
     ("sessions", "persistent_default_migrated", "INTEGER NOT NULL DEFAULT 1"),
     # Легаси автокомпакта: не используется, не удаляется ради отката.

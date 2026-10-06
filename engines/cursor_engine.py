@@ -8,6 +8,8 @@
 - MCP cursor берёт только из ``~/.cursor/mcp.json`` и ``<cwd>/.cursor/mcp.json``,
   per-invocation подключения нет. Manager MCP регистрируется глобально
   (engines/jarvis_mcp.py), Playwright и topic-MCP для cursor не поддержаны.
+
+Живой процесс (/persistent) — engines/persistent_cursor.py поверх ``cursor-agent acp``.
 """
 
 from __future__ import annotations
