@@ -49,9 +49,7 @@ from bot.topics import (
     wait_turn_end,
 )
 from engines import engine_model_scope, get_engine_by_name
-from engines.claude_engine import CLAUDE_TIMEOUT
-from engines.codex_engine import CODEX_TIMEOUT
-from engines.opencode_engine import OPENCODE_TIMEOUT
+from engines.persistent import persistent_timeout
 from engines.process_control import terminate_process_tree
 
 logger = logging.getLogger(__name__)
@@ -147,9 +145,7 @@ async def _run_job_turn_persistent(
         _is_new, fut = await worker.submit(prompt)
         if fut is not None:
             break
-    timeout = {"codex": CODEX_TIMEOUT, "opencode": OPENCODE_TIMEOUT}.get(
-        get_session(*key)[2], CLAUDE_TIMEOUT,
-    )
+    timeout = persistent_timeout(get_session(*key)[2])
     worker.on_intermediate = on_intermediate
     try:
         return await asyncio.wait_for(fut, timeout=timeout)

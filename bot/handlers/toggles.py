@@ -168,7 +168,7 @@ async def _apply_persistent(key: tuple[int, int], enable: bool) -> str:
     _session_id, _cwd, engine_name = get_session(*key)
     if enable and _persistent_column_for_engine(engine_name) is None:
         return (
-            f"⚠️ Живой процесс поддержан для claude, codex и opencode, а у "
+            f"⚠️ Живой процесс поддержан для claude, codex, opencode и cursor, а у "
             f"топика движок `{engine_name}`. Переключи `/engine` и включай после."
         )
     set_persistent_for_engine(key[0], key[1], engine_name, enable)
@@ -183,6 +183,14 @@ async def _apply_persistent(key: tuple[int, int], enable: bool) -> str:
         elif engine_name == "opencode":
             transport = "opencode serve"
             append = "через prompt_async"
+        elif engine_name == "cursor":
+            return (
+                "⚡ Живой процесс cursor включён для топика. Со следующего сообщения "
+                "cursor-agent acp поднимается один раз на весь сеанс; то, что прилетит "
+                "посреди хода, прерывает текущий ход и продолжает его с учётом нового "
+                "сообщения. Сеансы живого и разового режимов cursor раздельные — "
+                "контекст прежнего не переносится. Выключай через /persistent off."
+            )
         else:
             transport = engine_name
             append = "через stdin stream-json"
@@ -196,7 +204,9 @@ async def _apply_persistent(key: tuple[int, int], enable: bool) -> str:
             "когда не нужно — простаивающий процесс просто занимает память."
         )
     await _kill_persistent_worker(key, "выключено через /persistent off")
-    return "🚫 Живой процесс выключен. Дальше — как обычно, процесс на сообщение."
+    note = (" Сеанс cursor начнётся заново: живой режим хранит его отдельно."
+            if engine_name == "cursor" else "")
+    return "🚫 Живой процесс выключен. Дальше — как обычно, процесс на сообщение." + note
 
 
 async def cmd_persistent(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

@@ -113,10 +113,13 @@ The Russian section «Плагины» below has a full example.
   По умолчанию **выключен** (on-demand): браузерные tools грузятся в контекст
   только там, где реально нужны — иначе ~30 `browser_*` тулов висят в каждом
   запросе и зря жгут токены.
-- `/persistent [on|off]` — живой процесс для `claude`, `codex` и `opencode`:
+- `/persistent [on|off]` — живой процесс для `claude`, `codex`, `opencode` и `cursor`:
   новое сообщение во время активного хода не ждёт topic-lock, а дописывается в
   текущую работу (`claude` через stream-json stdin, `codex` через app-server
-  `turn/steer`, `opencode` через `opencode serve` и `prompt_async`); `cursor` — не поддержан.
+  `turn/steer`, `opencode` через `opencode serve` и `prompt_async`). `cursor` —
+  через `cursor-agent acp`: реплика посреди хода прерывает его и продолжает с
+  учётом нового сообщения. Сеансы ACP (`~/.cursor/acp-sessions/`) хранятся отдельно
+  от чатов разового режима, поэтому смена режима у cursor начинает новый сеанс.
 - **Журнал хода** — шаги агента (инструменты, рассуждения, промежуточный текст)
   копятся в одном сообщении и **остаются** в топике после ответа. Раньше они
   писались в индикатор, где каждый апдейт затирал предыдущий, а в конце
@@ -950,8 +953,10 @@ opencode mcp list
    systemd-сервису, задать `CURSOR_BIN=/полный/путь/к/cursor-agent`.
 3. `systemctl --user restart jarvis-bot.service`.
 
-Ограничения cursor: нет `/persistent`, Playwright (`/browser`) и topic-MCP; расход
-контекста сессии (`/tokens`) не отслеживается.
+Ограничения cursor: нет Playwright (`/browser`) и topic-MCP (ACP принимает только
+http/sse MCP, stdio — нет); расход контекста сессии (`/tokens`) не отслеживается.
+`cursor-agent acp` не выходит по закрытию stdin — живой процесс гасится только
+сигналом (`terminate_process_tree`).
 
 ## Запуск вручную
 

@@ -51,7 +51,7 @@ class SingleWorkerTest(unittest.IsolatedAsyncioTestCase):
     async def test_concurrent_turns_spawn_one_worker(self) -> None:
         spawned: list[FakeWorker] = []
 
-        async def slow_start(**_kwargs):
+        async def slow_start(_engine, **_kwargs):
             await asyncio.sleep(0.05)
             worker = FakeWorker()
             spawned.append(worker)
@@ -64,7 +64,7 @@ class SingleWorkerTest(unittest.IsolatedAsyncioTestCase):
              patch.object(messages, "get_mcp_playwright", return_value=False), \
              patch.object(messages, "resolve_topic_role", return_value="agent"), \
              patch.object(messages, "build_system_prefix", return_value=""), \
-             patch.object(messages, "start_persistent_claude", side_effect=slow_start):
+             patch.object(messages, "start_persistent", side_effect=slow_start):
             results = await asyncio.gather(*(
                 messages._get_or_start_persistent_worker(None, KEY[1], KEY)
                 for _ in range(3)

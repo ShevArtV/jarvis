@@ -354,12 +354,14 @@ def _persistent_column_for_engine(engine_name: str) -> str | None:
         return "persistent_codex"
     if engine_name == "opencode":
         return "persistent_opencode"
+    if engine_name == "cursor":
+        return "persistent_cursor"
     return None
 
 
 def get_persistent_for_engine(chat_id: int, thread_id: int, engine_name: str) -> bool:
     """Persistent включён по умолчанию для движков, которые его поддерживают
-    (claude, codex): NULL в колонке и отсутствие строки топика трактуются как
+    (claude, codex, opencode, cursor): NULL в колонке и отсутствие строки топика трактуются как
     ВКЛЮЧЕНО. Выключается только явным /persistent off (значение 0). Движки
     без поддержки persistent всегда возвращают False."""
     column = _persistent_column_for_engine(engine_name)
