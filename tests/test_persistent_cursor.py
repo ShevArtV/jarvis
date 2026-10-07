@@ -124,6 +124,22 @@ class PersistentCursorTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(sid, "sid" if exists else "acp-1")
             self.assertEqual(bool(worker._prefix), not exists)
 
+    async def test_open_session_passes_topic_mcp_servers(self) -> None:
+        worker, stdin, _ = make_worker()
+        servers = [{"type": "http", "name": "qw", "url": "https://qw.test/mcp",
+                    "headers": [{"name": "Authorization", "value": "Bearer t"}]}]
+
+        async def fake_call(m, params, timeout=0):
+            stdin.sent.append({"method": m, "params": params})
+            return {"sessionId": "acp-1"}
+
+        with patch.object(persistent_cursor, "acp_session_exists", return_value=False), \
+             patch.object(persistent_cursor, "acp_mcp_servers", return_value=servers) as role_servers, \
+             patch.object(worker, "_call", side_effect=fake_call):
+            await worker.open_session("sid", None, "teamlead")
+        role_servers.assert_called_once_with("teamlead")
+        self.assertEqual(stdin.sent[-1]["params"]["mcpServers"], servers)
+
     async def test_history_replay_is_not_journaled(self) -> None:
         worker, _, published = make_worker()
         worker._loading = True

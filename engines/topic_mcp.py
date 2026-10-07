@@ -224,6 +224,15 @@ def claude_mcp_servers(role: str) -> dict[str, dict[str, Any]]:
     }
 
 
+def acp_mcp_servers(role: str) -> list[dict[str, Any]]:
+    """``mcpServers`` for ACP ``session/new``/``session/load`` (cursor-agent acp)."""
+    return [
+        {"type": "http", "name": spec["name"], "url": spec["url"],
+         "headers": [{"name": k, "value": str(v)} for k, v in spec["headers"].items()]}
+        for spec in servers_for_role(role)
+    ]
+
+
 def opencode_mcp_servers(role: str) -> dict[str, dict[str, Any]]:
     """``mcp`` fragment for an opencode config file."""
     return {

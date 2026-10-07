@@ -106,6 +106,17 @@ class RoleResolutionTest(TopicMcpTestBase):
         self.assertEqual(agent[0]["headers"]["Authorization"], "Bearer agent-token")
         self.assertEqual(manager[0]["url"], "https://example.test/mcp.php")
 
+    def test_acp_servers_use_header_list(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write(tmp, CONFIG)
+            with self._env(path):
+                servers = topic_mcp.acp_mcp_servers("agent")
+
+        self.assertEqual(servers, [{
+            "type": "http", "name": "tracker", "url": "https://example.test/mcp.php",
+            "headers": [{"name": "Authorization", "value": "Bearer agent-token"}],
+        }])
+
     def test_service_roles_fall_back_to_legacy_manager_credentials(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = self._write(tmp, CONFIG)
