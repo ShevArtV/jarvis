@@ -109,6 +109,34 @@ class PersistentCursorTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(ok)
         self.assertIn("usage limit", text)
 
+    async def test_retriable_error_repeats_prompt_then_fails(self) -> None:
+        worker, stdin, _ = make_worker()
+        _, fut = await worker.submit("релизь")
+        with patch.object(persistent_cursor, "_RETRY_DELAY", 0):
+            for _ in range(persistent_cursor._RETRY_LIMIT + 1):
+                await worker._handle_update(chunk("Error: RetriableError: [resource_exhausted] Error"))
+                await worker._handle_response({"id": stdin.sent[-1]["id"], "result": {}})
+                if worker._retry_task:
+                    await worker._retry_task
+                    worker._retry_task = None
+        prompts = [m for m in stdin.sent if m.get("method") == "session/prompt"]
+        self.assertEqual(len(prompts), persistent_cursor._RETRY_LIMIT + 1)
+        self.assertTrue(prompts[-1]["params"]["prompt"][0]["text"].endswith("релизь"))
+        ok, text = await fut
+        self.assertFalse(ok)
+        self.assertIn("resource_exhausted", text)
+
+    async def test_retry_recovers_turn(self) -> None:
+        worker, stdin, _ = make_worker()
+        _, fut = await worker.submit("x")
+        with patch.object(persistent_cursor, "_RETRY_DELAY", 0):
+            await worker._handle_update(chunk("Error: RetriableError: [resource_exhausted] Error"))
+            await worker._handle_response({"id": stdin.sent[-1]["id"], "result": {}})
+            await worker._retry_task
+        await worker._handle_update(chunk("готово"))
+        await worker._handle_response({"id": stdin.sent[-1]["id"], "result": {}})
+        self.assertEqual(await fut, (True, "готово"))
+
     async def test_open_session_loads_known_or_creates_new(self) -> None:
         for exists, method in ((True, "session/load"), (False, "session/new")):
             worker, stdin, _ = make_worker()

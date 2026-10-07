@@ -27,6 +27,7 @@ from collections.abc import Awaitable, Callable
 from engines.claude_engine import _tool_step
 from engines.common import IntermediateBuffer, iter_json_events, resolve_cwd
 from engines.cursor_engine import (
+    _RETRIABLE,
     _TOOL_NAMES,
     CURSOR_BIN,
     FILE_MARKER_SYSTEM,
@@ -41,6 +42,8 @@ logger = logging.getLogger(__name__)
 # session/load проигрывает историю — на длинной сессии это дольше обычного вызова.
 _LOAD_TIMEOUT = 120.0
 _CALL_TIMEOUT = 30.0
+_RETRY_LIMIT = 2
+_RETRY_DELAY = 5.0
 
 # Вид tool_call в ACP → вид cursor stream-json (а он уже → имя инструмента claude).
 _ACP_KINDS = {"execute": "shell", "read": "read", "edit": "edit", "delete": "delete",
@@ -91,6 +94,10 @@ class PersistentCursorWorker:
         self._calls: dict[int, asyncio.Future] = {}
         # id ``session/prompt`` текущего хода; ответ на прежние (cancelled) не закрывает ход.
         self._prompt_id: int | None = None
+        # Текст последнего prompt и число его автоповторов (см. _RETRIABLE).
+        self._last_prompt = ""
+        self._retries = 0
+        self._retry_task: asyncio.Task | None = None
         self._loading = False
         # Префикс первого prompt: [SYSTEM:] и FILE-маркер — только в новую сессию.
         self._prefix = ""
@@ -143,22 +150,38 @@ class PersistentCursorWorker:
                 self.busy = True
                 self.steerable = not exclusive
                 self._text, self._tail, self._tools = "", [], {}
+                self._retries = 0
                 self.pending_future = asyncio.get_running_loop().create_future()
             else:
                 # Cursor прервёт идущий ход — его недосказанный текст ответом не станет.
                 self._text, self._tail = "", []
+                self._retries = 0
             fut = self.pending_future
             text, self._prefix = self._prefix + text, ""
-            rid = self._take_id()
-            self._prompt_id = rid
-            try:
-                await self._send({"jsonrpc": "2.0", "id": rid, "method": "session/prompt", "params": {
-                    "sessionId": self.session_id, "prompt": [{"type": "text", "text": text}]}})
-            except Exception as exc:
-                logger.warning("persistent cursor: session/prompt failed key=%s", self.key, exc_info=True)
-                self._resolve(False, f"Ошибка session/prompt: {exc}")
-            self.last_activity = time.monotonic()
+            self._last_prompt = text
+            await self._prompt(text)
             return is_new, fut
+
+    async def _prompt(self, text: str) -> None:
+        rid = self._take_id()
+        self._prompt_id = rid
+        try:
+            await self._send({"jsonrpc": "2.0", "id": rid, "method": "session/prompt", "params": {
+                "sessionId": self.session_id, "prompt": [{"type": "text", "text": text}]}})
+        except Exception as exc:
+            logger.warning("persistent cursor: session/prompt failed key=%s", self.key, exc_info=True)
+            self._resolve(False, f"Ошибка session/prompt: {exc}")
+        self.last_activity = time.monotonic()
+
+    async def _retry(self, rid: int) -> None:
+        await asyncio.sleep(_RETRY_DELAY)
+        async with self.turn_lock:
+            # За паузу ход могли закрыть, прервать репликой или убить процесс.
+            if self.dead or self.pending_future is None or self._prompt_id != rid:
+                return
+            self._text, self._tail, self._tools = "", [], {}
+            await self._prompt("[SYSTEM: прошлый ход оборвался сбоем связи с сервером Cursor "
+                               "(RetriableError) — выполни сообщение заново.]\n\n" + self._last_prompt)
 
     def _take_id(self) -> int:
         rid = self._next_id
@@ -239,6 +262,15 @@ class PersistentCursorWorker:
             self._resolve(False, f"Ошибка cursor: {_format_error(error)}")
             return
         answer = "\n\n".join(self._tail)
+        if _RETRIABLE.match(answer.strip()):
+            if self._retries < _RETRY_LIMIT:
+                self._retries += 1
+                logger.warning("persistent cursor: %s, retry %d key=%s",
+                               answer.strip()[:120], self._retries, self.key)
+                self._retry_task = asyncio.create_task(self._retry(rid))
+                return
+            self._resolve(False, f"Ошибка cursor после {_RETRY_LIMIT} повторов: {answer.strip()[:300]}")
+            return
         stop = (ev.get("result") or {}).get("stopReason")
         if not answer.strip():
             self._resolve(False, f"cursor вернул пустой ответ (stopReason={stop}).")
