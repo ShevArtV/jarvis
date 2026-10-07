@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from engines import topic_mcp
-from engines.claude_engine import _mcp_config_flags as claude_mcp_flags
+from engines.claude_cli import _mcp_config_flags as claude_mcp_flags
 from engines.codex_engine import (
     _mcp_config_overrides as codex_mcp_overrides,
 )

@@ -61,7 +61,7 @@ jobs:
           from bot.app import build_application
           from bot.db import init_db
           from bot.topics import resolve_manager_topic
-          from engines.claude_engine import _mcp_config_flags
+          from engines.claude_cli import _mcp_config_flags
 
           init_db()
           app = build_application(token="123456:fake", allowed_user_ids={1})

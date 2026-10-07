@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import unittest
 
-from engines.claude_engine import _accumulate_assistant_event, _tool_step
+from engines.claude_cli import _accumulate_assistant_event
+from engines.tool_steps import _tool_step
 
 CWD = "/home/u/projects/jarvis"
 

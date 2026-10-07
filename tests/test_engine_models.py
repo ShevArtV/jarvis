@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from bot import db as bot_db
 from bot import sessions as bot_sessions
-from engines import claude_engine, cursor_engine
+from engines import claude_models, cursor_engine
 
 
 def _init_response(values: list[str]) -> str:
@@ -34,11 +34,11 @@ class ClaudeModelDiscoveryTest(unittest.TestCase):
         out = '{"type":"system"}\n' + _init_response(
             ["default", "opus", "claude-opus-5", "claude-sonnet-4-6"],
         )
-        with patch.object(claude_engine.subprocess, "run", return_value=self._run(out)), \
+        with patch.object(claude_models.subprocess, "run", return_value=self._run(out)), \
                 patch.dict("os.environ", {}, clear=False) as env:
             env.pop("CLAUDE_MODELS", None)
             self.assertEqual(
-                claude_engine._discover_claude_models(),
+                claude_models._discover_claude_models(),
                 ["opus", "claude-opus-5", "claude-sonnet-4-6"],
             )
 
@@ -51,31 +51,31 @@ class ClaudeModelDiscoveryTest(unittest.TestCase):
             {"value": "claude-fable-5-1", "displayName": "Fable 5.1"},
         ]
         with patch.object(
-            claude_engine.subprocess, "run", return_value=self._run(json.dumps(ev) + "\n"),
+            claude_models.subprocess, "run", return_value=self._run(json.dumps(ev) + "\n"),
         ):
             self.assertEqual(
-                claude_engine._models_from_claude_init(), ["opus", "claude-fable-5-1"],
+                claude_models._models_from_claude_init(), ["opus", "claude-fable-5-1"],
             )
         self.assertEqual(_model_label("opus"), "Opus 5.5")
         self.assertEqual(_model_label("claude-fable-5-1"), "Fable 5.1")
         self.assertEqual(_model_label("deepseek/deepseek-chat"), "deepseek-chat")
 
     def test_env_override_wins(self) -> None:
-        with patch.object(claude_engine.subprocess, "run") as run, \
+        with patch.object(claude_models.subprocess, "run") as run, \
                 patch.dict("os.environ", {"CLAUDE_MODELS": "opus,haiku"}):
-            self.assertEqual(claude_engine._discover_claude_models(), ["opus", "haiku"])
+            self.assertEqual(claude_models._discover_claude_models(), ["opus", "haiku"])
             run.assert_not_called()
 
     def test_fallback_when_cli_fails(self) -> None:
         with patch.object(
-            claude_engine.subprocess, "run",
+            claude_models.subprocess, "run",
             side_effect=subprocess.TimeoutExpired("claude", 30),
-        ), patch.object(claude_engine, "_models_from_claude_config", return_value=["x"]), \
+        ), patch.object(claude_models, "_models_from_claude_config", return_value=["x"]), \
                 patch.dict("os.environ", {}, clear=False) as env:
             env.pop("CLAUDE_MODELS", None)
             self.assertEqual(
-                claude_engine._discover_claude_models(),
-                claude_engine.DEFAULT_CLAUDE_MODELS + ["x"],
+                claude_models._discover_claude_models(),
+                claude_models.DEFAULT_CLAUDE_MODELS + ["x"],
             )
 
 

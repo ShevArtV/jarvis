@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from engines.claude_engine import CLAUDE_TIMEOUT
-from engines.claude_engine import start_persistent as _start_claude
+from engines.claude_cli import CLAUDE_TIMEOUT
 from engines.codex_engine import CODEX_TIMEOUT
 from engines.cursor_engine import CURSOR_TIMEOUT
 from engines.opencode_engine import OPENCODE_TIMEOUT
+from engines.persistent_claude import start_persistent as _start_claude
 from engines.persistent_codex import start_persistent as _start_codex
 from engines.persistent_cursor import start_persistent as _start_cursor
 from engines.persistent_opencode import start_persistent as _start_opencode
