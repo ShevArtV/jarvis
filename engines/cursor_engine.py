@@ -26,7 +26,6 @@ from pathlib import Path
 from typing import Any
 
 from engines.base import BaseEngine
-from engines.claude_engine import _tool_step
 from engines.common import (
     IntermediateBuffer,
     iter_json_events,
@@ -37,6 +36,7 @@ from engines.common import (
     unregister_proc,
     wait_stream,
 )
+from engines.cursor_events import _cursor_tool_step
 from engines.model_cache import cli_models, remember_labels, split_models
 from engines.process_control import feed_stdin, spawn
 
@@ -66,22 +66,6 @@ CURRENT_MODEL: ContextVar[str | None] = ContextVar("cursor_model", default=None)
 
 # Строка `--list-models`: "<id> - <название>".
 _MODEL_LINE = re.compile(r"^(\S+) - (.+)$")
-
-# Вид tool_call cursor → имя инструмента claude: журнал шагов общий с claude.
-_TOOL_NAMES = {
-    "shell": "Bash",
-    "read": "Read",
-    "edit": "Edit",
-    "write": "Write",
-    "delete": "Delete",
-    "grep": "Grep",
-    "glob": "Glob",
-    "semSearch": "Grep",
-    "webFetch": "WebFetch",
-    "fetch": "WebFetch",
-    "webSearch": "WebSearch",
-    "task": "Task",
-}
 
 # Сбой связи с бэкендом Cursor CLI отдаёт не ошибкой, а текстом ответа:
 # «Error: RetriableError: [resource_exhausted] Error».
@@ -145,27 +129,6 @@ def _cursor_command(session_id: str, cwd: str, model: str | None) -> list[str]:
         cmd.extend(["--model", model])
     return cmd
 
-
-def _cursor_tool_step(tool_call: Any, cwd: str) -> str | None:
-    """Строка журнала для ``tool_call``: ``{"shellToolCall": {"args": {...}}}``."""
-    if not isinstance(tool_call, dict):
-        return None
-    for key, body in tool_call.items():
-        if not key.endswith("ToolCall") or not isinstance(body, dict):
-            continue
-        kind = key[: -len("ToolCall")]
-        args = body.get("args") if isinstance(body.get("args"), dict) else {}
-        if kind == "mcp":
-            server = args.get("providerIdentifier") or args.get("serverName") or "mcp"
-            tool = args.get("toolName") or args.get("name") or ""
-            return _tool_step(f"mcp__{server}__{tool}", args.get("args"), cwd)
-        if kind == "shell" and body.get("description") and not args.get("description"):
-            args = {**args, "description": body["description"]}
-        # Файловые инструменты cursor называют путь `path`, у claude — `file_path`.
-        if args.get("path") and not args.get("file_path"):
-            args = {**args, "file_path": args["path"]}
-        return _tool_step(_TOOL_NAMES.get(kind, kind), args, cwd)
-    return None
 
 
 class _CursorStream:

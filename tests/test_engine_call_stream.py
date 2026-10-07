@@ -17,7 +17,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from engines import claude_engine, codex_engine, common, cursor_engine, opencode_engine
+from engines import claude_engine, codex_engine, common, cursor_engine, cursor_events, opencode_engine
 
 
 class _FakeStdout:
@@ -534,11 +534,11 @@ class CursorCallStreamTest(_Base):
             self.assertTrue(self.engine().session_exists("s1", "/proj"))
 
     def test_mcp_tool_step(self) -> None:
-        step = cursor_engine._cursor_tool_step({"mcpToolCall": {"args": {
+        step = cursor_events._cursor_tool_step({"mcpToolCall": {"args": {
             "providerIdentifier": "jarvis", "toolName": "manager_inbox",
             "args": {"thread_id": 5}}}}, self.cwd)
         self.assertEqual(step, "📨 jarvis · manager_inbox (thread 5)")
-        step = cursor_engine._cursor_tool_step(
+        step = cursor_events._cursor_tool_step(
             {"readToolCall": {"args": {"path": self.cwd + "/a.py"}}}, self.cwd)
         self.assertEqual(step, "📖 a.py")
 

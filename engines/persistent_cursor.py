@@ -24,16 +24,15 @@ import time
 from collections import deque
 from collections.abc import Awaitable, Callable
 
-from engines.claude_engine import _tool_step
 from engines.common import IntermediateBuffer, iter_json_events, resolve_cwd
 from engines.cursor_engine import (
     _RETRIABLE,
-    _TOOL_NAMES,
     CURSOR_BIN,
     FILE_MARKER_SYSTEM,
     CursorEngine,
     _config_dir,
 )
+from engines.cursor_events import _acp_tool_step, _format_error
 from engines.process_control import spawn, terminate_process_tree
 from engines.topic_mcp import acp_mcp_servers
 
@@ -45,26 +44,10 @@ _CALL_TIMEOUT = 30.0
 _RETRY_LIMIT = 2
 _RETRY_DELAY = 5.0
 
-# Вид tool_call в ACP → вид cursor stream-json (а он уже → имя инструмента claude).
-_ACP_KINDS = {"execute": "shell", "read": "read", "edit": "edit", "delete": "delete",
-              "search": "grep", "fetch": "webFetch"}
-
 
 def acp_session_exists(session_id: str) -> bool:
     return bool(session_id) and (_config_dir() / "acp-sessions" / session_id / "store.db").exists()
 
-
-def _acp_tool_step(kind: str, title: str, raw: dict, cwd: str) -> str:
-    """Строка журнала для tool_call ACP; без rawInput — заголовок от CLI."""
-    if raw.get("providerIdentifier"):
-        return _tool_step(f"mcp__{raw['providerIdentifier']}__{raw.get('toolName') or ''}",
-                          raw.get("args"), cwd)
-    mapped = _ACP_KINDS.get(kind)
-    if mapped and raw:
-        if raw.get("path") and not raw.get("file_path"):
-            raw = {**raw, "file_path": raw["path"]}
-        return _tool_step(_TOOL_NAMES.get(mapped, mapped), raw, cwd)
-    return f"🔧 {title or kind or 'tool'}"
 
 
 class PersistentCursorWorker:
@@ -344,15 +327,6 @@ class PersistentCursorWorker:
     def read_stderr_tail(self) -> str:
         return "\n".join(self._stderr_tail)[-2000:]
 
-
-def _format_error(error: object) -> str:
-    if not isinstance(error, dict):
-        return str(error)
-    text = str(error.get("message") or "")
-    data = error.get("data")
-    if isinstance(data, dict) and data.get("message"):
-        text = f"{text}: {data['message']}" if text else str(data["message"])
-    return text or json.dumps(error, ensure_ascii=False)[:1500]
 
 
 async def start_persistent(
