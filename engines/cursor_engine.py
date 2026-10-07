@@ -83,6 +83,10 @@ _TOOL_NAMES = {
     "task": "Task",
 }
 
+# Сбой связи с бэкендом Cursor CLI отдаёт не ошибкой, а текстом ответа:
+# «Error: RetriableError: [resource_exhausted] Error».
+_RETRIABLE = re.compile(r"^(Error: )?RetriableError\b")
+
 
 def _config_dir() -> Path:
     """Каталог данных CLI — тот же порядок, что у самого cursor-agent."""
@@ -297,6 +301,8 @@ class CursorEngine(BaseEngine):
     ) -> tuple[bool, str, str | None, str | None]:
         """Итог вызова по коду выхода и событию result."""
         final_text = stream.answer()
+        if _RETRIABLE.match(final_text.strip()):
+            return False, f"Ошибка cursor: {final_text.strip()[:300]}", session_id, stream.actual_model
         actual_model = stream.actual_model
 
         if proc.returncode != 0 or stream.error:
