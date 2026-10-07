@@ -34,6 +34,7 @@ from engines.cursor_engine import (
     _config_dir,
 )
 from engines.process_control import spawn, terminate_process_tree
+from engines.topic_mcp import acp_mcp_servers
 
 logger = logging.getLogger(__name__)
 
@@ -100,15 +101,17 @@ class PersistentCursorWorker:
         self._tools: dict[str, dict] = {}
         self._stderr_tail: deque[str] = deque(maxlen=80)
 
-    async def open_session(self, requested_session_id: str, system_prefix: str | None) -> str:
+    async def open_session(self, requested_session_id: str, system_prefix: str | None,
+                           mcp_topic_role: str | None = None) -> str:
         await self._call("initialize", {"protocolVersion": 1, "clientCapabilities": {
             "fs": {"readTextFile": False, "writeTextFile": False}, "terminal": False}})
         # Ключ API CLI берёт из env сам, а cursor_login при ключе уводит во вход через браузер.
         if not os.environ.get("CURSOR_API_KEY"):
             await self._call("authenticate", {"methodId": "cursor_login"})
         # Manager MCP cursor читает из ~/.cursor/mcp.json и в ACP тоже; stdio-серверы
-        # полем mcpServers ACP не принимает (только http/sse).
-        params = {"cwd": self.cwd, "mcpServers": []}
+        # полем mcpServers ACP не принимает (только http/sse) — сюда идут http-серверы роли.
+        servers = acp_mcp_servers(mcp_topic_role) if mcp_topic_role else []
+        params = {"cwd": self.cwd, "mcpServers": servers}
         if acp_session_exists(requested_session_id):
             self._loading = True
             try:
@@ -344,7 +347,7 @@ async def start_persistent(
     worker.reader_task = asyncio.create_task(worker._read_loop())
     worker.stderr_task = asyncio.create_task(worker._read_stderr_loop())
     try:
-        await worker.open_session(session_id, system_prefix)
+        await worker.open_session(session_id, system_prefix, mcp_topic_role)
     except BaseException:
         worker.dead = True
         worker.reader_task.cancel()
