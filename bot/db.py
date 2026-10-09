@@ -128,6 +128,8 @@ _ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     # Кому адресован триггер ('executor' | 'manager'): ask_user не задаёт
     # вопросов в чат исполнителю внешней задачи. NULL — не блокируем.
     ("agent_triggers", "role", "TEXT"),
+    # Аккаунт движка (engines.accounts); NULL — main, каталог CLI по умолчанию.
+    ("sessions", "account", "TEXT"),
 )
 
 

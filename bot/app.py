@@ -30,6 +30,7 @@ from telegram.ext import (
 )
 
 from bot.asks import on_ask_answer
+from bot.handlers.account import on_account_select
 from bot.handlers.commands import (
     cmd_bind,
     cmd_close,
@@ -242,6 +243,7 @@ def build_application(
     app.add_handler(CallbackQueryHandler(on_engine_select, pattern=r"^engine_select:"))
     app.add_handler(CallbackQueryHandler(on_model_select, pattern=r"^model_select:"))
     app.add_handler(CallbackQueryHandler(on_engine_carry, pattern=r"^engine_carry:"))
+    app.add_handler(CallbackQueryHandler(on_account_select, pattern=r"^account_select:"))
     app.add_handler(CallbackQueryHandler(on_ask_answer, pattern=r"^ask:"))
     app.add_handler(CallbackQueryHandler(on_browser_toggle, pattern=r"^browser_toggle:"))
     app.add_handler(CallbackQueryHandler(on_persistent_toggle, pattern=r"^persistent_toggle:"))

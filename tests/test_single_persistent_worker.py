@@ -61,6 +61,7 @@ class SingleWorkerTest(unittest.IsolatedAsyncioTestCase):
                           return_value=("sid", "/tmp", "claude", False)), \
              patch.object(messages, "get_persistent_for_engine", return_value=True), \
              patch.object(messages, "get_model", return_value=None), \
+             patch.object(messages, "get_account", return_value="main"), \
              patch.object(messages, "get_mcp_playwright", return_value=False), \
              patch.object(messages, "resolve_topic_role", return_value="agent"), \
              patch.object(messages, "build_system_prefix", return_value=""), \

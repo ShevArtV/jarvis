@@ -21,6 +21,7 @@ from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
 
+from engines.accounts import configured
 from engines.base import BaseEngine
 from engines.claude_cli import (
     CLAUDE_BIN,
@@ -115,8 +116,13 @@ class ClaudeEngine(BaseEngine):
 
     def clear_stale_session_pidfile(self, session_id: str) -> None:
         """Claude CLI хранит лок-файлы в ~/.claude/sessions/<pid>.json с полем sessionId.
-        Если процесс мёртв — удаляем файл, чтобы --resume не упёрся в 'session in use'."""
-        sessions_dir = Path.home() / ".claude" / "sessions"
+        Если процесс мёртв — удаляем файл, чтобы --resume не упёрся в 'session in use'.
+        У каждого аккаунта свой sessions/, транскрипты общие — смотрим все."""
+        config_dirs = [Path.home() / ".claude", *configured().get(self.name, {}).values()]
+        for config_dir in config_dirs:
+            self._clear_stale_pidfiles(config_dir / "sessions", session_id)
+
+    def _clear_stale_pidfiles(self, sessions_dir: Path, session_id: str) -> None:
         if not sessions_dir.is_dir():
             return
         for p in sessions_dir.glob("*.json"):

@@ -20,6 +20,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from engines.accounts import current_dir
 from engines.session_usage import _codex_sessions_root
 
 HTTP_TIMEOUT = 15.0
@@ -71,10 +72,16 @@ def _fetch_json(
 
 
 def _claude_config_path() -> Path:
+    account = current_dir("claude")  # аккаунт топика: свой .claude.json внутри каталога
+    if account is not None:
+        return account / ".claude.json"
     return Path(os.environ.get("CLAUDE_CONFIG_JSON", Path.home() / ".claude.json"))
 
 
 def _claude_credentials_path() -> Path:
+    account = current_dir("claude")
+    if account is not None:
+        return account / ".credentials.json"
     return Path(
         os.environ.get("CLAUDE_CREDENTIALS_JSON", Path.home() / ".claude" / ".credentials.json")
     )
@@ -240,6 +247,9 @@ def _iter_recent_rollouts(root: Path, limit: int):
 
 
 def _codex_auth_path() -> Path:
+    account = current_dir("codex")
+    if account is not None:
+        return account / "auth.json"
     return Path(os.environ.get("CODEX_AUTH_JSON", Path.home() / ".codex" / "auth.json"))
 
 

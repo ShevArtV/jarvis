@@ -18,6 +18,7 @@ from telegram.ext import ContextTypes
 
 from bot.delivery import send_to_topic
 from bot.formatting import _html_escape
+from bot.handlers.account import switch_account, with_account_rows
 from bot.handlers.commands import _topic_status_block
 from bot.sessions import _transfer_marker, get_model, get_session, set_engine, set_pending_summary, update_model_only
 from bot.settings import CLAUDE_CWD, DEFAULT_ENGINE_NAME
@@ -205,6 +206,27 @@ async def _do_engine_handoff(
 
 
 async def cmd_engine(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/engine […] @<аккаунт> — то же, что /engine, плюс смена аккаунта движка
+    топика. Аккаунт применяется, только если топик в итоге на целевом движке."""
+    key = _key(update)
+    args = list(context.args or [])
+    accounts = [a[1:] for a in args if a.startswith("@") and len(a) > 1]
+    rest = [a for a in args if not a.startswith("@")]
+    if not accounts:
+        await _cmd_engine(update, context)
+        return
+    _, _, current_engine = get_session(*key)
+    named = [a for a in rest if not a.startswith("--")]
+    target = named[0].strip().lower() if named else current_engine
+    if rest:
+        context.args = rest
+        await _cmd_engine(update, context)
+    _, _, engine_name = get_session(*key)
+    if engine_name == target:
+        await update.message.reply_text(await switch_account(key, engine_name, accounts[-1]))
+
+
+async def _cmd_engine(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """/engine — показать движок топика с кнопками переключения;
     /engine <name> [model-substring] [--keep-context] — переключить движок.
     С флагом --keep-context: summary-based handoff (старый движок пишет резюме,
@@ -231,7 +253,7 @@ async def cmd_engine(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await update.message.reply_text(
             _topic_status_block(key) + footer,
             parse_mode=ParseMode.HTML,
-            reply_markup=_engine_keyboard(engine_name),
+            reply_markup=with_account_rows(key, _engine_keyboard(engine_name)),
         )
         return
 
@@ -311,7 +333,10 @@ async def cmd_engine(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await update.message.reply_text(text)
     else:
         text = await _do_engine_switch(key, target, model=chosen_model)
-        await update.message.reply_text(text + "\nКонтекст прежнего диалога не переносится.")
+        await update.message.reply_text(
+            text + "\nКонтекст прежнего диалога не переносится.",
+            reply_markup=with_account_rows(key),
+        )
 
 
 async def on_engine_select(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -569,9 +594,10 @@ async def on_engine_carry(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         text = await _do_engine_switch(key, new_engine, model=chosen_model)
         text += "\nКонтекст прежнего диалога не переносится."
         try:
-            await query.edit_message_text(text)
+            await query.edit_message_text(text, reply_markup=with_account_rows(key))
         except BadRequest:
-            await send_to_topic(update.effective_chat, key[1], text)
+            await send_to_topic(update.effective_chat, key[1], text,
+                                reply_markup=with_account_rows(key))
         return
 
     # choice == 'y' — handoff с резюме. Может занять десятки секунд.
@@ -584,12 +610,13 @@ async def on_engine_carry(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     text = await _do_engine_handoff(
         key, old_engine, new_engine, progress_edit, model=chosen_model,
     )
+    markup = with_account_rows(key)
     try:
-        await query.edit_message_text(text, parse_mode=ParseMode.HTML)
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
     except BadRequest:
         # Возможно HTML невалиден — fallback на plain.
         plain = re.sub(r"<[^>]+>", "", text)
         try:
-            await query.edit_message_text(plain)
+            await query.edit_message_text(plain, reply_markup=markup)
         except BadRequest:
             await send_to_topic(update.effective_chat, key[1], plain)
