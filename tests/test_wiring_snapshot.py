@@ -57,6 +57,7 @@ EXPECTED_HANDLERS = [
     (0, 'CallbackQueryHandler', '^engine_select:', 'on_engine_select'),
     (0, 'CallbackQueryHandler', '^model_select:', 'on_model_select'),
     (0, 'CallbackQueryHandler', '^engine_carry:', 'on_engine_carry'),
+    (0, 'CallbackQueryHandler', '^account_select:', 'on_account_select'),
     (0, 'CallbackQueryHandler', '^ask:', 'on_ask_answer'),
     (0, 'CallbackQueryHandler', '^browser_toggle:', 'on_browser_toggle'),
     (0, 'CallbackQueryHandler', '^persistent_toggle:', 'on_persistent_toggle'),

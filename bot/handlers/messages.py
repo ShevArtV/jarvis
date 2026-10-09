@@ -47,6 +47,7 @@ from bot.sessions import (
 )
 from bot.settings import CLAUDE_CWD, MEDIA_DIR
 from bot.timeutil import utcnow
+from bot.topic_account import get_account
 from bot.topics import (
     _key,
     _kill_persistent_worker,
@@ -59,6 +60,7 @@ from bot.topics import (
     wait_turn_end,
 )
 from engines import engine_model_scope, get_engine_by_name
+from engines.accounts import engine_account_scope
 from engines.persistent import persistent_timeout, start_persistent
 
 logger = logging.getLogger(__name__)
@@ -207,11 +209,12 @@ async def _get_or_start_persistent_worker(chat, thread_id: int, key: tuple[int, 
         effective_cwd = cwd or CLAUDE_CWD
         system_prefix = build_system_prefix(effective_cwd, mcp_playwright, key=key)
 
-        worker = await start_persistent(
-            engine_name, key=key, session_id=session_id, cwd=effective_cwd, model=model,
-            system_prefix=system_prefix, mcp_playwright=mcp_playwright,
-            mcp_topic_role=mcp_topic_role,
-        )
+        with engine_account_scope(engine_name, get_account(*key)):
+            worker = await start_persistent(
+                engine_name, key=key, session_id=session_id, cwd=effective_cwd, model=model,
+                system_prefix=system_prefix, mcp_playwright=mcp_playwright,
+                mcp_topic_role=mcp_topic_role,
+            )
         if worker.session_id and worker.session_id != session_id:
             update_session_id(key[0], key[1], engine_name, worker.session_id)
         if getattr(worker, "fresh", False) and not opened_new:

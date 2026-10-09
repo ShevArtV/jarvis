@@ -18,8 +18,10 @@ from bot.sessions import (
     update_session_id,
 )
 from bot.settings import CLAUDE_CWD
+from bot.topic_account import get_account
 from bot.topics import active_procs, resolve_topic_role, spawn_procs
 from engines import Engine, ensure_engine_tools
+from engines.accounts import engine_account_scope
 
 logger = logging.getLogger(__name__)
 
@@ -117,19 +119,20 @@ async def call_llm_stream(
     effective_cwd = cwd or CLAUDE_CWD
     system_prefix = build_system_prefix(effective_cwd, mcp_playwright, key=key)
 
-    ok, final_text, sid_after, actual_model = await engine.call_stream(
-        session_id=session_id,
-        prompt=prompt,
-        key=key,
-        cwd=cwd,
-        on_intermediate=on_intermediate,
-        active_procs=active_procs,
-        spawn_procs=spawn_procs,
-        spawn_id=spawn_id,
-        system_prefix=system_prefix,
-        mcp_playwright=mcp_playwright,
-        mcp_topic_role=mcp_topic_role,
-    )
+    with engine_account_scope(engine.name, get_account(*key)):
+        ok, final_text, sid_after, actual_model = await engine.call_stream(
+            session_id=session_id,
+            prompt=prompt,
+            key=key,
+            cwd=cwd,
+            on_intermediate=on_intermediate,
+            active_procs=active_procs,
+            spawn_procs=spawn_procs,
+            spawn_id=spawn_id,
+            system_prefix=system_prefix,
+            mcp_playwright=mcp_playwright,
+            mcp_topic_role=mcp_topic_role,
+        )
     # Recovery: иногда opencode/codex на resume могут вернуть rc=0, но пустой
     # текст. Для постоянной сессии делаем один автоповтор в новой сессии.
     if (

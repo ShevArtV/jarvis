@@ -271,8 +271,8 @@ def set_engine(
     chat_id: int, thread_id: int, new_engine_name: str, model: str | None = None,
 ) -> tuple[str, str | None]:
     """Меняет движок топика: создаёт новый session_id под новый движок, cwd
-    сохраняется, model записывается явно (NULL допустим), actual_model
-    сбрасывается — он от прежнего движка. Если записи не было —
+    сохраняется, model записывается явно (NULL допустим), actual_model и
+    account сбрасываются — они от прежнего движка. Если записи не было —
     создаётся. Возвращает (session_id, cwd).
 
     Engine-проверка (поддерживается ли имя) — на стороне get_engine_by_name."""
@@ -290,7 +290,7 @@ def set_engine(
             "VALUES (?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(chat_id, thread_id) DO UPDATE SET "
             "session_id=excluded.session_id, engine=excluded.engine, "
-            "model=excluded.model, actual_model=NULL, "
+            "model=excluded.model, actual_model=NULL, account=NULL, "
             "updated_at=excluded.updated_at",
             (chat_id, thread_id, new_id, cwd, new_engine.name, model, now),
         )

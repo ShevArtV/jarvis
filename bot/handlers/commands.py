@@ -32,8 +32,10 @@ from bot.sessions import (
     touch_session,
 )
 from bot.settings import CLAUDE_CWD, DEFAULT_ENGINE_NAME, SESSION_IDLE_MINUTES
+from bot.topic_account import get_account
 from bot.topics import _key, _kill_persistent_worker, active_procs, persistent_workers, spawn_procs
 from engines import get_engine_by_name
+from engines.accounts import account_names, engine_account_scope
 from engines.limits import all_limits, format_limits_block
 from engines.process_control import terminate_process_tree
 from engines.session_usage import SessionUsage, inspect_session_usage
@@ -162,8 +164,12 @@ def _topic_status_block(key: tuple[int, int]) -> str:
         if _persistent_column_for_engine(engine_name)
         else "не поддерживается для этого движка"
     )
+    account_line = (
+        f"account    : {get_account(*key)}\n" if len(account_names(engine_name)) > 1 else ""
+    )
     body = (
         f"engine     : {engine_name}\n"
+        f"{account_line}"
         f"model      : {model_line}\n"
         f"session-id : {session_id}\n"
         f"cwd        : {effective_cwd}{cwd_suffix}\n"
@@ -199,8 +205,15 @@ async def cmd_tokens(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 async def cmd_usage(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # all_limits() ходит в сеть за свежими цифрами — держать на этом event loop
     # бота нельзя, иначе на время запроса встают все остальные топики.
-    items = await asyncio.to_thread(all_limits)
+    # Лимиты — того аккаунта, на котором работает топик (to_thread копирует контекст).
+    key = _key(update)
+    _, _, engine_name = get_session(*key)
+    account = get_account(*key)
+    with engine_account_scope(engine_name, account):
+        items = await asyncio.to_thread(all_limits)
     body = format_limits_block(items)
+    if len(account_names(engine_name)) > 1:
+        body = f"Аккаунт {engine_name}: {account}\n\n" + body
     body += "\n\nКонтекст текущей сессии: /tokens"
     await update.message.reply_text(md_to_html(body), parse_mode=ParseMode.HTML)
 
