@@ -29,9 +29,9 @@ class RegistryTest(unittest.TestCase):
         with accounts.engine_account_scope("claude", "main"):
             self.assertEqual(accounts.account_env(), {})
         with accounts.engine_account_scope("claude", "work"):
-            self.assertEqual(accounts.account_env(), {"CLAUDE_CONFIG_DIR": "/tmp/claude-work"})
+            self.assertEqual(accounts.account_env(), {"CLAUDE_CONFIG_DIR": str(Path("/tmp/claude-work"))})
         with accounts.engine_account_scope("codex", "alt"):
-            self.assertEqual(accounts.account_env(), {"CODEX_HOME": "/tmp/codex-alt"})
+            self.assertEqual(accounts.account_env(), {"CODEX_HOME": str(Path("/tmp/codex-alt"))})
         self.assertEqual(accounts.account_env(), {})
 
     def test_limits_read_credentials_of_topic_account(self) -> None:
@@ -48,7 +48,7 @@ class RegistryTest(unittest.TestCase):
             with accounts.engine_account_scope("claude", "work"):
                 asyncio.run(process_control.spawn(["claude", "-p"]))
             env = create.call_args.kwargs["env"]
-            self.assertEqual(env["CLAUDE_CONFIG_DIR"], "/tmp/claude-work")
+            self.assertEqual(env["CLAUDE_CONFIG_DIR"], str(Path("/tmp/claude-work")))
             self.assertEqual(env["PATH"], os.environ["PATH"])
 
             asyncio.run(process_control.spawn(["claude", "-p"]))
