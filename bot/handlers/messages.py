@@ -18,6 +18,7 @@ from telegram.error import TelegramError
 from telegram.ext import ContextTypes
 
 from bot.asks import _mark_ask_answered, answer_ask, get_pending_ask, get_recent_timed_out_ask, mark_ask_late_answered
+from bot.background_turns import attach_background_turns
 from bot.db import log_message
 from bot.delivery import (
     SILENT_MARKER,
@@ -226,6 +227,10 @@ async def _get_or_start_persistent_worker(chat, thread_id: int, key: tuple[int, 
                 )
             except Exception:
                 logger.exception("failed to send fresh-session notice key=%s", key)
+        attach_background_turns(
+            worker, chat, thread_id, key, engine_name,
+            persistent_timeout(engine_name), _finish_turn_reply,
+        )
         persistent_workers[key] = worker
         return worker, True
 
