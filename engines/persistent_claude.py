@@ -44,6 +44,9 @@ class PersistentClaudeWorker:
         self.turn_lock = asyncio.Lock()
         self.pending_future: asyncio.Future | None = None
         self.on_intermediate: Callable[[str], Awaitable[None]] | None = None
+        # Ход, который CLI начал сам (отчёт фонового субагента), — его никто не
+        # ждёт. Колбэк получает future этого хода, как submit() для обычного.
+        self.on_background_turn: Callable[[asyncio.Future], None] | None = None
         self.reader_task: asyncio.Task | None = None
         # Модель, которой CLI ответил последний раз (system.init / assistant).
         self.actual_model: str | None = None
@@ -90,6 +93,16 @@ class PersistentClaudeWorker:
         self.last_activity = time.monotonic()
         return is_new, fut
 
+    def _begin_background_turn(self) -> None:
+        self.busy = True
+        self.steerable = True
+        self.pending_future = asyncio.get_running_loop().create_future()
+        if self.on_background_turn is not None:
+            try:
+                self.on_background_turn(self.pending_future)
+            except Exception:
+                logger.exception("persistent worker: on_background_turn failed key=%s", self.key)
+
     async def _flush(self, force: bool = False) -> None:
         await self._journal.flush(self.on_intermediate, force)
 
@@ -111,6 +124,12 @@ class PersistentClaudeWorker:
                     if isinstance(m, str) and m:
                         self.actual_model = m
                 if etype == "assistant":
+                    if not self.busy:
+                        # Субагент дорабатывает в фоне после конца хода — его шаги
+                        # не журналим; ответ самого агента без хода — новый ход.
+                        if ev.get("parent_tool_use_id") is not None:
+                            continue
+                        self._begin_background_turn()
                     m = (ev.get("message") or {}).get("model")
                     if isinstance(m, str) and m:
                         self.actual_model = m
