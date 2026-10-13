@@ -47,6 +47,9 @@ class SingleWorkerTest(unittest.IsolatedAsyncioTestCase):
         topics.persistent_spawn_locks.clear()
         self.addCleanup(topics.persistent_workers.clear)
         self.addCleanup(topics.persistent_spawn_locks.clear)
+        touch = patch.object(messages, "touch_session")
+        touch.start()
+        self.addCleanup(touch.stop)
 
     async def test_concurrent_turns_spawn_one_worker(self) -> None:
         spawned: list[FakeWorker] = []
@@ -173,3 +176,22 @@ class TurnWaitTest(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LiveWorkerTouchTest(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        topics.persistent_workers.clear()
+        self.addCleanup(topics.persistent_workers.clear)
+
+    async def test_live_worker_turn_extends_session(self) -> None:
+        worker = FakeWorker()
+        topics.persistent_workers[KEY] = worker
+        with patch.object(messages, "touch_session") as touch, \
+                patch.object(messages, "ensure_active_session") as ensure:
+            got, spawned = await messages._get_or_start_persistent_worker(
+                None, KEY[1], KEY)
+        self.assertIs(got, worker)
+        self.assertFalse(spawned)
+        touch.assert_called_once_with(*KEY)
+        ensure.assert_not_called()
+
