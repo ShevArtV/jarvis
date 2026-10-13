@@ -43,6 +43,7 @@ from bot.sessions import (
     get_pending_summary,
     get_persistent_for_engine,
     get_session,
+    touch_session,
     update_actual_model,
     update_session_id,
 )
@@ -185,6 +186,10 @@ async def _get_or_start_persistent_worker(chat, thread_id: int, key: tuple[int, 
             persistent_workers.pop(key, None)
             worker = None
         if worker is not None:
+            # Ход в живой процесс мимо ensure_active_session: без отметки
+            # last_activity_at застывает на старте процесса, и после reaper'а
+            # сеанс переоткрывается как «stale», теряя контекст.
+            touch_session(*key)
             return worker, False
 
         session_id, cwd, engine_name, opened_new = ensure_active_session(*key)
