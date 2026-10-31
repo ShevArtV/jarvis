@@ -30,7 +30,12 @@ from bot.delivery import (
     split_media_markers,
 )
 from bot.handlers.toggles import _ask_done_confirmation_if_needed, _warn_large_context_if_needed
-from bot.llm import _build_reply_context_prefix, build_system_prefix, call_llm_stream
+from bot.llm import (
+    _build_reply_context_prefix,
+    build_system_prefix,
+    call_llm_stream,
+    reply_visible_text,
+)
 from bot.rich_message import get_rich_message, rich_message_files, rich_message_to_markdown
 from bot.sessions import (
     _parse_transfer_marker,
@@ -413,7 +418,7 @@ async def _process_prompt(
     if reply is not None:
         quote = getattr(msg, "quote", None)
         quote_text = getattr(quote, "text", None) if quote is not None else None
-        replied_text = (reply.text or reply.caption or "") or None
+        replied_text = reply_visible_text(reply)
         ctx = load_message_context(chat.id, reply.message_id)
         extra_lines.append(
             _build_reply_context_prefix(

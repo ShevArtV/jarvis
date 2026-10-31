@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 
+from bot.rich_message import get_rich_message, rich_message_to_markdown
 from bot.sessions import (
     get_mcp_playwright,
     reset_session,
@@ -184,6 +185,20 @@ async def call_llm_stream(
 
 
 _REPLY_TEXT_LIMIT = 500
+
+
+def reply_visible_text(reply) -> str | None:
+    """Видимый текст сообщения, на которое ответили.
+
+    У rich-сообщений нет text/caption — текст лежит в блоках ``rich_message``.
+    """
+    text = (reply.text or reply.caption or "") or None
+    if text is not None:
+        return text
+    rich = get_rich_message(reply)
+    if rich:
+        return rich_message_to_markdown(rich) or None
+    return None
 
 
 def _clip_reply_text(text: str, limit: int = _REPLY_TEXT_LIMIT) -> str:
