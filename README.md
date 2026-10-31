@@ -114,12 +114,13 @@ The Russian section «Плагины» below has a full example.
   только там, где реально нужны — иначе ~30 `browser_*` тулов висят в каждом
   запросе и зря жгут токены.
 - `/persistent [on|off]` — живой процесс для `claude`, `codex`, `opencode`, `cursor` и `kimi`:
-  новое сообщение во время активного хода не ждёт topic-lock, а дописывается в
-  текущую работу (`claude` через stream-json stdin, `codex` через app-server
-  `turn/steer`, `opencode` через `opencode serve` и `prompt_async`). `cursor` —
-  через `cursor-agent acp`: реплика посреди хода прерывает его и продолжает с
-  учётом нового сообщения. Сеансы ACP (`~/.cursor/acp-sessions/`) хранятся отдельно
-  от чатов разового режима, поэтому смена режима у cursor начинает новый сеанс.
+  сообщение во время хода либо дописывается в текущую работу, либо (у kimi) ждёт
+  конца хода. `claude` — stream-json stdin; `codex` — app-server `turn/steer`;
+  `opencode` — `opencode serve` + `prompt_async`; `cursor` — `cursor-agent acp`
+  (второй `session/prompt` прерывает ход). `kimi` — `kimi acp`, но второй prompt
+  в busy отвергается (`another turn is already in progress`) → Jarvis ждёт конца
+  хода и стартует новый turn. Сеансы cursor ACP (`~/.cursor/acp-sessions/`) отдельно
+  от чатов `--print`; у kimi print и ACP делят `~/.kimi-code/sessions/`.
 - **Журнал хода** — шаги агента (инструменты, рассуждения, промежуточный текст)
   копятся в одном сообщении и **остаются** в топике после ответа. Раньше они
   писались в индикатор, где каждый апдейт затирал предыдущий, а в конце
@@ -601,19 +602,16 @@ options=[...])` публикует вопрос в топик и **блокир�
 ### Живой процесс `/persistent`
 
 Обычный путь Jarvis сериализует сообщения в топике через topic-lock: если агент
-уже работает, следующее сообщение ждёт очереди. `/persistent on` включает
-исключение для текущего движка (`claude`, `codex` или `opencode`; `cursor` не
-поддержан): живой subprocess держится
-между ходами, а сообщение, пришедшее во время активного хода, отправляется в
-него сразу и подтверждается фразой «добавил к текущей работе».
+уже работает, следующее сообщение ждёт очереди. `/persistent on` (дефолт для
+поддерживаемых движков) держит живой subprocess между ходами.
 
-- `claude`: запускается `claude --print --input-format stream-json
-  --output-format stream-json`; новые сообщения пишутся в stdin.
-- `codex`: запускается experimental `codex app-server --listen stdio://`.
-  Jarvis делает JSON-RPC `initialize` с `experimentalApi: true`, затем
-  `thread/start` или `thread/resume`; новый ход идёт через `turn/start`, а
-  сообщение во время активного хода — через `turn/steer` с `expectedTurnId`.
-- `opencode`: запускается `opencode serve --hostname 127.0.0.1 --port 0`
+- `claude`: `claude --print --input-format stream-json --output-format stream-json`;
+  новые сообщения пишутся в stdin (довесок к ходу).
+- `codex`: experimental `codex app-server --listen stdio://`. JSON-RPC
+  `initialize` с `experimentalApi: true`, затем `thread/start` или
+  `thread/resume`; новый ход — `turn/start`, довесок — `turn/steer` с
+  `expectedTurnId` (ack «добавил к текущей работе»).
+- `opencode`: `opencode serve --hostname 127.0.0.1 --port 0`
   (`engines/persistent_opencode.py`), по одному серверу на топик. Jarvis
   подписывается на SSE `/event`, открывает или создаёт сессию (`POST /session`
   с правилом «разрешено всё», аналог `--dangerously-skip-permissions`) и шлёт
@@ -624,6 +622,13 @@ options=[...])` публикует вопрос в топик и **блокир�
   сообщении. `permission.asked` для старых сессий из `opencode run`
   автоматически получает ответ `always`, `question.asked` отклоняется.
   Живая проверка: `scripts/smoke_persistent_opencode.py`.
+- `cursor`: `cursor-agent acp` (`engines/acp_worker.py` + `persistent_cursor.py`).
+  Второй `session/prompt` прерывает ход (`cancelled`) и продолжает с новой
+  репликой. Сеансы ACP — в `~/.cursor/acp-sessions/`, отдельно от `--print`.
+- `kimi`: `kimi acp` (тот же `acp_worker`, `persistent_kimi.py`). Второй
+  `session/prompt` в busy отвергается CLI → `supports_steer=False`: Jarvis ждёт
+  конца хода (ack «занят предыдущим ходом») и стартует новый turn. Print и ACP
+  делят `~/.kimi-code/sessions/`.
 
 Важно для Codex: `codex exec` не подходит для true persistent. Проверено на
 `codex-cli 0.131.0`: `codex exec --input-format stream-json --help` падает с
@@ -989,6 +994,8 @@ http/sse MCP, stdio — нет); расход контекста сессии (`
 Print и ACP делят сессии в `~/.kimi-code/sessions/`. Playwright и topic-MCP
 работают в `/persistent` (по умолчанию вкл.) через ACP `mcpServers` (stdio/http).
 В разовом print-режиме per-invocation MCP нет. `/usage` для kimi не отслеживается.
+В отличие от cursor, kimi не принимает реплику посреди хода — сообщение ждёт
+конца текущего turn.
 
 ## Запуск вручную
 
