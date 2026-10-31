@@ -42,6 +42,13 @@ CURSOR_MCP_CONFIG = Path(
     os.environ.get("CURSOR_MCP_CONFIG", HOME / ".cursor" / "mcp.json")
 ).expanduser()
 
+KIMI_MCP_CONFIG = Path(
+    os.environ.get(
+        "KIMI_MCP_CONFIG",
+        Path(os.environ.get("KIMI_CODE_HOME", HOME / ".kimi-code")) / "mcp.json",
+    )
+).expanduser()
+
 BEGIN_MARKER = "# BEGIN JARVIS MANAGER MCP"
 END_MARKER = "# END JARVIS MANAGER MCP"
 
@@ -107,7 +114,8 @@ def _toml_array(values: list[str]) -> str:
     return "[" + ", ".join(_toml_string(v) for v in values) + "]"
 
 
-def _configure_codex(python: str, args: list[str]) -> None:
+def _configure_codex(python: str, args: list[str], config_path: Path | None = None) -> None:
+    path = config_path or CODEX_CONFIG
     table = f"mcp_servers.{SERVER_NAME}"
     block = "\n".join(
         [
@@ -124,7 +132,7 @@ def _configure_codex(python: str, args: list[str]) -> None:
             "",
         ]
     )
-    old = CODEX_CONFIG.read_text(encoding="utf-8") if CODEX_CONFIG.exists() else ""
+    old = path.read_text(encoding="utf-8") if path.exists() else ""
     managed_re = re.compile(
         rf"(?ms)^{re.escape(BEGIN_MARKER)}\n.*?^{re.escape(END_MARKER)}\n?"
     )
@@ -137,56 +145,46 @@ def _configure_codex(python: str, args: list[str]) -> None:
         else:
             new = old.rstrip() + ("\n\n" if old.strip() else "") + block
     if new != old:
-        CODEX_CONFIG.parent.mkdir(parents=True, exist_ok=True)
-        CODEX_CONFIG.write_text(new, encoding="utf-8")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(new, encoding="utf-8")
 
 
 def _configure_opencode(python: str, args: list[str]) -> None:
-    if OPENCODE_CONFIG.exists():
+    _configure_opencode_at(OPENCODE_CONFIG, python, args)
+
+
+def _configure_mcp_json(path: Path, python: str, args: list[str]) -> None:
+    """Общий формат ``mcpServers`` для cursor и kimi Code."""
+    if path.exists():
         try:
-            data = json.loads(OPENCODE_CONFIG.read_text(encoding="utf-8"))
+            data = json.loads(path.read_text(encoding="utf-8"))
         except json.JSONDecodeError as exc:
-            raise RuntimeError(f"Cannot parse {OPENCODE_CONFIG}: {exc}") from exc
+            raise RuntimeError(f"Cannot parse {path}: {exc}") from exc
     else:
-        data = {"$schema": "https://opencode.ai/config.json"}
+        data = {}
     if not isinstance(data, dict):
-        raise RuntimeError(f"{OPENCODE_CONFIG} must contain a JSON object")
-    mcp = data.setdefault("mcp", {})
-    if not isinstance(mcp, dict):
-        raise RuntimeError(f"{OPENCODE_CONFIG}: `mcp` must be an object")
-    mcp[SERVER_NAME] = {
-        "type": "local",
-        "command": [python, *args],
-        "enabled": True,
-    }
+        raise RuntimeError(f"{path} must contain a JSON object")
+    servers = data.setdefault("mcpServers", {})
+    if not isinstance(servers, dict):
+        raise RuntimeError(f"{path}: `mcpServers` must be an object")
+    servers[SERVER_NAME] = {"command": python, "args": args}
     new = json.dumps(data, ensure_ascii=False, indent=2) + "\n"
-    old = OPENCODE_CONFIG.read_text(encoding="utf-8") if OPENCODE_CONFIG.exists() else ""
+    old = path.read_text(encoding="utf-8") if path.exists() else ""
     if new != old:
-        OPENCODE_CONFIG.parent.mkdir(parents=True, exist_ok=True)
-        OPENCODE_CONFIG.write_text(new, encoding="utf-8")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(new, encoding="utf-8")
 
 
 def _configure_cursor(python: str, args: list[str]) -> None:
     """cursor-agent читает MCP только из ~/.cursor/mcp.json (и проектного
     .cursor/mcp.json) — других способов подключить сервер у него нет."""
-    if CURSOR_MCP_CONFIG.exists():
-        try:
-            data = json.loads(CURSOR_MCP_CONFIG.read_text(encoding="utf-8"))
-        except json.JSONDecodeError as exc:
-            raise RuntimeError(f"Cannot parse {CURSOR_MCP_CONFIG}: {exc}") from exc
-    else:
-        data = {}
-    if not isinstance(data, dict):
-        raise RuntimeError(f"{CURSOR_MCP_CONFIG} must contain a JSON object")
-    servers = data.setdefault("mcpServers", {})
-    if not isinstance(servers, dict):
-        raise RuntimeError(f"{CURSOR_MCP_CONFIG}: `mcpServers` must be an object")
-    servers[SERVER_NAME] = {"command": python, "args": args}
-    new = json.dumps(data, ensure_ascii=False, indent=2) + "\n"
-    old = CURSOR_MCP_CONFIG.read_text(encoding="utf-8") if CURSOR_MCP_CONFIG.exists() else ""
-    if new != old:
-        CURSOR_MCP_CONFIG.parent.mkdir(parents=True, exist_ok=True)
-        CURSOR_MCP_CONFIG.write_text(new, encoding="utf-8")
+    _configure_mcp_json(CURSOR_MCP_CONFIG, python, args)
+
+
+def _configure_kimi(python: str, args: list[str]) -> None:
+    """kimi читает MCP из ``$KIMI_CODE_HOME/mcp.json`` (по умолчанию
+    ``~/.kimi-code/mcp.json``)."""
+    _configure_mcp_json(KIMI_MCP_CONFIG, python, args)
 
 
 def _configure_claude(claude_bin: str, python: str, args: list[str]) -> None:
@@ -241,8 +239,11 @@ def ensure_jarvis_mcp(engine_name: str, engine_bin: str) -> tuple[bool, str]:
             _configure_opencode(python, args)
         elif engine_name == "cursor":
             _configure_cursor(python, args)
+        elif engine_name == "kimi":
+            _configure_kimi(python, args)
         else:
             raise RuntimeError(f"unknown engine: {engine_name}")
+        _configure_extra_accounts(engine_name, engine_bin, python, args)
     except Exception as exc:
         logger.warning("Jarvis MCP setup failed for %s: %s", engine_name, exc, exc_info=True)
         status = (False, f"Jarvis Manager MCP не подключён: {exc}")
@@ -253,3 +254,79 @@ def ensure_jarvis_mcp(engine_name: str, engine_bin: str) -> tuple[bool, str]:
     _STATUS[engine_name] = status
     logger.info("Jarvis Manager MCP configured for engine=%s", engine_name)
     return status
+
+
+def _configure_extra_accounts(
+    engine_name: str, engine_bin: str, python: str, args: list[str],
+) -> None:
+    """Прописать Manager MCP и в доп. аккаунты из JARVIS_ACCOUNTS."""
+    from engines.accounts import configured
+
+    extras = configured().get(engine_name, {})
+    if not extras:
+        return
+    for name, root in extras.items():
+        try:
+            if engine_name == "cursor":
+                _configure_mcp_json(root / "mcp.json", python, args)
+            elif engine_name == "kimi":
+                _configure_mcp_json(root / "mcp.json", python, args)
+            elif engine_name == "opencode":
+                _configure_opencode_at(root / "config" / "opencode" / "opencode.json", python, args)
+            elif engine_name == "codex":
+                _configure_codex(python, args, config_path=root / "config.toml")
+            elif engine_name == "claude":
+                env = {**os.environ, "CLAUDE_CONFIG_DIR": str(root)}
+                run_cli(
+                    [shutil.which(engine_bin) or engine_bin, "mcp", "remove",
+                     "--scope", "user", SERVER_NAME],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    check=False, env=env,
+                )
+                server_json = json.dumps(
+                    {"type": "stdio", "command": python, "args": args},
+                    ensure_ascii=False,
+                )
+                result = run_cli(
+                    [shutil.which(engine_bin) or engine_bin, "mcp", "add-json",
+                     "--scope", "user", SERVER_NAME, server_json],
+                    text=True, capture_output=True, check=False, env=env,
+                )
+                if result.returncode != 0:
+                    raise RuntimeError(
+                        (result.stderr or result.stdout or "").strip()
+                        or f"claude mcp add-json failed rc={result.returncode}"
+                    )
+            logger.info("Jarvis MCP configured for %s account=%s root=%s", engine_name, name, root)
+        except Exception:
+            logger.warning(
+                "Jarvis MCP setup failed for %s account=%s", engine_name, name,
+                exc_info=True,
+            )
+
+
+def _configure_opencode_at(path: Path, python: str, args: list[str]) -> None:
+    """Как ``_configure_opencode``, но в произвольный opencode.json."""
+    if path.exists():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"Cannot parse {path}: {exc}") from exc
+    else:
+        data = {"$schema": "https://opencode.ai/config.json"}
+    if not isinstance(data, dict):
+        raise RuntimeError(f"{path} must contain a JSON object")
+    mcp = data.setdefault("mcp", {})
+    if not isinstance(mcp, dict):
+        raise RuntimeError(f"{path}: `mcp` must be an object")
+    mcp[SERVER_NAME] = {
+        "type": "local",
+        "command": [python, *args],
+        "enabled": True,
+    }
+    new = json.dumps(data, ensure_ascii=False, indent=2) + "\n"
+    old = path.read_text(encoding="utf-8") if path.exists() else ""
+    if new != old:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(new, encoding="utf-8")
+

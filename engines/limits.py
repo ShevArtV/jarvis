@@ -457,6 +457,10 @@ def opencode_limits() -> EngineLimits:
 def _cursor_auth_path() -> Path:
     if "CURSOR_AUTH_JSON" in os.environ:
         return Path(os.environ["CURSOR_AUTH_JSON"])
+    account = current_dir("cursor")
+    if account is not None:
+        # См. engines.accounts.env_for_account: auth под <acct>/xdg-config/cursor/.
+        return account / "xdg-config" / "cursor" / "auth.json"
     config_home = os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config"
     return Path(config_home) / "cursor" / "auth.json"
 
@@ -531,8 +535,15 @@ def cursor_limits() -> EngineLimits:
     return result
 
 
+def kimi_limits() -> EngineLimits:
+    return EngineLimits(engine="kimi", note="лимиты подписки kimi не отслеживаются")
+
+
 def all_limits() -> list[EngineLimits]:
-    return [claude_limits(), codex_limits(), opencode_limits(), cursor_limits()]
+    return [
+        claude_limits(), codex_limits(), opencode_limits(),
+        cursor_limits(), kimi_limits(),
+    ]
 
 
 def _as_float(value: Any) -> float | None:

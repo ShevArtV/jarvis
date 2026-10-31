@@ -36,7 +36,7 @@ _ICON_NAMES = {
     16749490: "rose",
     16478047: "red",
 }
-_PLACEHOLDER_ENGINES = {"codex", "opencode"}
+_PLACEHOLDER_ENGINES = {"codex", "opencode", "kimi"}
 
 
 class _ClosingConnection(sqlite3.Connection):

@@ -83,11 +83,19 @@ async def _apply_browser(key: tuple[int, int], enable: bool) -> str:
     set_mcp_playwright(key[0], key[1], enable)
     logger.info("browser toggled for key=%s: %s", key, "on" if enable else "off")
     if enable:
-        if get_session(*key)[2] == "cursor":
+        engine = get_session(*key)[2]
+        if engine == "cursor":
             return (
                 "🌐 Флаг браузера включён, но движок cursor не умеет подключать "
                 "MCP на отдельный вызов — Playwright заработает после /engine "
-                "на claude, codex или opencode."
+                "на claude, codex, opencode или kimi (/persistent)."
+            )
+        if engine == "kimi":
+            return (
+                "🌐 Браузер включён для топика. У kimi Playwright подключается "
+                "в живом режиме (`/persistent`, по умолчанию вкл.) через ACP "
+                "stdio MCP со следующего сообщения. В разовом print-режиме "
+                "per-invocation MCP нет."
             )
         return (
             "🌐 Браузер включён для топика. Playwright MCP подключится со "
@@ -168,7 +176,7 @@ async def _apply_persistent(key: tuple[int, int], enable: bool) -> str:
     _session_id, _cwd, engine_name = get_session(*key)
     if enable and _persistent_column_for_engine(engine_name) is None:
         return (
-            f"⚠️ Живой процесс поддержан для claude, codex, opencode и cursor, а у "
+            f"⚠️ Живой процесс поддержан для claude, codex, opencode, cursor и kimi, а у "
             f"топика движок `{engine_name}`. Переключи `/engine` и включай после."
         )
     set_persistent_for_engine(key[0], key[1], engine_name, enable)
@@ -190,6 +198,15 @@ async def _apply_persistent(key: tuple[int, int], enable: bool) -> str:
                 "посреди хода, прерывает текущий ход и продолжает его с учётом нового "
                 "сообщения. Сеансы живого и разового режимов cursor раздельные — "
                 "контекст прежнего не переносится. Выключай через /persistent off."
+            )
+        elif engine_name == "kimi":
+            return (
+                "⚡ Живой процесс kimi включён для топика. Со следующего сообщения "
+                "kimi acp поднимается один раз на весь сеанс; реплика посреди хода "
+                "прерывает текущий ход и продолжает с учётом нового сообщения. "
+                "Сеансы print и ACP общие (`~/.kimi-code/sessions/`). "
+                "Playwright (`/browser`) в ACP подключается через stdio MCP. "
+                "Выключай через /persistent off."
             )
         else:
             transport = engine_name
@@ -223,7 +240,7 @@ async def cmd_persistent(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         if _persistent_column_for_engine(engine_name) is None:
             await update.message.reply_text(
                 f"Живой процесс не поддержан для `{engine_name}`. "
-                "Доступно для `claude`, `codex` и `opencode`."
+                "Доступно для `claude`, `codex`, `opencode`, `cursor` и `kimi`."
             )
             return
         await update.message.reply_text(

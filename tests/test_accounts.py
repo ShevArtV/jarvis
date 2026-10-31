@@ -14,7 +14,13 @@ from bot.sessions import get_session, set_engine
 from bot.topic_account import get_account, set_account
 from engines import accounts, limits, process_control
 
-ENV = {"JARVIS_ACCOUNTS": "claude:work=/tmp/claude-work, codex:alt=/tmp/codex-alt, bogus:x=/y, claude:main=/z"}
+ENV = {
+    "JARVIS_ACCOUNTS": (
+        "claude:work=/tmp/claude-work, codex:alt=/tmp/codex-alt, "
+        "kimi:job=/tmp/kimi-job, cursor:job=/tmp/cursor-job, "
+        "opencode:job=/tmp/opencode-job, bogus:x=/y, claude:main=/z"
+    ),
+}
 
 
 @patch.dict(os.environ, ENV)
@@ -22,7 +28,9 @@ class RegistryTest(unittest.TestCase):
     def test_names_main_first_and_bad_items_skipped(self) -> None:
         self.assertEqual(accounts.account_names("claude"), ["main", "work"])
         self.assertEqual(accounts.account_names("codex"), ["main", "alt"])
-        self.assertEqual(accounts.account_names("cursor"), ["main"])
+        self.assertEqual(accounts.account_names("kimi"), ["main", "job"])
+        self.assertEqual(accounts.account_names("cursor"), ["main", "job"])
+        self.assertEqual(accounts.account_names("opencode"), ["main", "job"])
 
     def test_env_only_inside_scope_of_non_main_account(self) -> None:
         self.assertEqual(accounts.account_env(), {})
@@ -32,6 +40,27 @@ class RegistryTest(unittest.TestCase):
             self.assertEqual(accounts.account_env(), {"CLAUDE_CONFIG_DIR": str(Path("/tmp/claude-work"))})
         with accounts.engine_account_scope("codex", "alt"):
             self.assertEqual(accounts.account_env(), {"CODEX_HOME": str(Path("/tmp/codex-alt"))})
+        with accounts.engine_account_scope("kimi", "job"):
+            self.assertEqual(accounts.account_env(), {"KIMI_CODE_HOME": str(Path("/tmp/kimi-job"))})
+        with accounts.engine_account_scope("cursor", "job"):
+            self.assertEqual(
+                accounts.account_env(),
+                {
+                    "CURSOR_CONFIG_DIR": str(Path("/tmp/cursor-job")),
+                    "XDG_CONFIG_HOME": str(Path("/tmp/cursor-job/xdg-config")),
+                },
+            )
+        with accounts.engine_account_scope("opencode", "job"):
+            root = Path("/tmp/opencode-job")
+            self.assertEqual(
+                accounts.account_env(),
+                {
+                    "XDG_CONFIG_HOME": str(root / "config"),
+                    "XDG_DATA_HOME": str(root / "data"),
+                    "XDG_STATE_HOME": str(root / "state"),
+                    "OPENCODE_CONFIG": str(root / "config" / "opencode" / "opencode.json"),
+                },
+            )
         self.assertEqual(accounts.account_env(), {})
 
     def test_limits_read_credentials_of_topic_account(self) -> None:
@@ -40,6 +69,11 @@ class RegistryTest(unittest.TestCase):
                              Path("/tmp/claude-work/.credentials.json"))
             self.assertEqual(limits._claude_config_path(), Path("/tmp/claude-work/.claude.json"))
         self.assertNotIn("claude-work", str(limits._claude_credentials_path()))
+        with accounts.engine_account_scope("cursor", "job"):
+            self.assertEqual(
+                limits._cursor_auth_path(),
+                Path("/tmp/cursor-job/xdg-config/cursor/auth.json"),
+            )
 
     def test_spawn_passes_account_dir_to_cli(self) -> None:
         create = AsyncMock()
@@ -50,6 +84,11 @@ class RegistryTest(unittest.TestCase):
             env = create.call_args.kwargs["env"]
             self.assertEqual(env["CLAUDE_CONFIG_DIR"], str(Path("/tmp/claude-work")))
             self.assertEqual(env["PATH"], os.environ["PATH"])
+
+            with accounts.engine_account_scope("kimi", "job"):
+                asyncio.run(process_control.spawn(["kimi", "-p"]))
+            env = create.call_args.kwargs["env"]
+            self.assertEqual(env["KIMI_CODE_HOME"], str(Path("/tmp/kimi-job")))
 
             asyncio.run(process_control.spawn(["claude", "-p"]))
             self.assertNotIn("env", create.call_args.kwargs)

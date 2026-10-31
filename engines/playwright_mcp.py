@@ -205,6 +205,8 @@ def disable_global_playwright_mcp(engine_name: str, engine_bin: str) -> tuple[bo
             _disable_opencode()
         elif engine_name == "cursor":
             pass  # Jarvis никогда не регистрировал Playwright для cursor
+        elif engine_name == "kimi":
+            pass  # Playwright только через ACP mcpServers, не в mcp.json
         else:
             raise RuntimeError(f"unknown engine: {engine_name}")
     except Exception as exc:
