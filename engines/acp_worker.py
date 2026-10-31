@@ -2,8 +2,9 @@
 
 Используется cursor-agent acp и kimi acp: ``initialize`` → auth →
 ``session/new|load`` → ``session/prompt``. Поток хода — ``session/update``,
-конец — ответ на ``session/prompt``. Второй prompt посреди хода прерывает
-первый (``cancelled``) — это реплика в идущий ход.
+конец — ответ на ``session/prompt``. У cursor второй prompt посреди хода
+прерывает первый (``cancelled``) — реплика в идущий ход. У kimi
+(``supports_steer=False``) второй prompt отвергается — ждём конца хода.
 
 Закрытие stdin процесс не гасит — воркер убивают через ``terminate_process_tree``.
 """
@@ -35,6 +36,8 @@ class AcpWorker:
     RETRY_DELAY = 5.0
     label = "acp"
     file_marker = ""
+    # False — ACP не принимает второй session/prompt в busy (kimi).
+    supports_steer = True
 
     def __init__(
         self,
@@ -155,11 +158,11 @@ class AcpWorker:
             if self.dead or self.proc.returncode is not None:
                 raise RuntimeError(f"persistent {self.label} process is not running")
             is_new = not self.busy
-            if not is_new and (exclusive or not self.steerable):
+            if not is_new and (exclusive or not self.steerable or not self.supports_steer):
                 return False, None
             if is_new:
                 self.busy = True
-                self.steerable = not exclusive
+                self.steerable = not exclusive and self.supports_steer
                 self._text, self._tail, self._tools = "", [], {}
                 self._retries = 0
                 self.pending_future = asyncio.get_running_loop().create_future()
