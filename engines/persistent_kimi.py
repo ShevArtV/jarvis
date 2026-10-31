@@ -40,6 +40,8 @@ class PersistentKimiWorker(AcpWorker):
 
     label = "kimi"
     file_marker = FILE_MARKER_SYSTEM
+    # kimi отвечает «another turn is already in progress» на второй prompt.
+    supports_steer = False
 
     async def authenticate(self) -> None:
         # Device-code login; при уже валидном oauth CLI отвечает без ошибок.

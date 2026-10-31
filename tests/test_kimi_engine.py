@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -140,6 +141,26 @@ class PersistentKimiTest(unittest.IsolatedAsyncioTestCase):
             servers = worker.mcp_servers("teamlead", True)
         self.assertEqual(servers[0]["name"], "qw")
         self.assertEqual(servers[1]["type"], "stdio")
+
+    async def test_busy_turn_refuses_steer(self) -> None:
+        """Kimi ACP не принимает второй session/prompt — ждём конца хода."""
+        sent: list[dict] = []
+
+        class _Stdin:
+            def write(self, data: bytes) -> None:
+                sent.append(json.loads(data))
+
+            async def drain(self) -> None:
+                return None
+
+        proc = SimpleNamespace(returncode=None, stdin=_Stdin())
+        worker = PersistentKimiWorker((1, 2), proc, "sid", "/tmp", None)
+        is_new, fut = await worker.submit("первое")
+        self.assertTrue(is_new)
+        self.assertFalse(worker.steerable)
+        self.assertEqual(await worker.submit("второе"), (False, None))
+        self.assertEqual(len(sent), 1)  # второй prompt не ушёл
+        self.assertIsNotNone(fut)
 
 
 if __name__ == "__main__":

@@ -293,7 +293,7 @@ async def _handle_persistent_message(
             try:
                 await send_to_topic(
                     chat, thread_id,
-                    "⏳ Сейчас разбираю внешнее уведомление — отвечу следующим ходом.",
+                    "⏳ Сейчас занят предыдущим ходом — отвечу следующим ходом.",
                 )
             except Exception:
                 logger.exception("failed to send persistent-wait ack key=%s", key)
