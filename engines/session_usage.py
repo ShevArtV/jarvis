@@ -333,7 +333,15 @@ def _inspect_codex(session_id: str) -> SessionUsage:
 
 def _inspect_opencode(session_id: str) -> SessionUsage:
     usage = SessionUsage(engine="opencode", session_id=session_id, source="opencode-db")
-    db_path = Path(os.environ.get("OPENCODE_DB", Path.home() / ".local/share/opencode/opencode.db"))
+    from engines.accounts import current_dir
+
+    account = current_dir("opencode")
+    if account is not None:
+        db_path = account / "data" / "opencode" / "opencode.db"
+    elif "OPENCODE_DB" in os.environ:
+        db_path = Path(os.environ["OPENCODE_DB"])
+    else:
+        db_path = Path.home() / ".local/share/opencode/opencode.db"
     usage.path = str(db_path)
     if session_id.startswith("placeholder-"):
         usage.note = "placeholder session; opencode has not returned real session id yet"

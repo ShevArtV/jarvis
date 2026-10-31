@@ -2,17 +2,17 @@
 
 [![tests](https://github.com/ShevArtV/jarvis/actions/workflows/tests.yml/badge.svg)](https://github.com/ShevArtV/jarvis/actions/workflows/tests.yml)
 
-Тонкая обёртка Telegram-бота над LLM CLI (`claude`, `codex`, `opencode` или `cursor`). Один топик = одна непрерывная сессия.
+Тонкая обёртка Telegram-бота над LLM CLI (`claude`, `codex`, `opencode`, `cursor` или `kimi`). Один топик = одна непрерывная сессия.
 Пишешь в Telegram — получаешь ответ, как если бы запускал CLI в терминале.
 
 ## Quick start (English)
 
 Jarvis is a Telegram bot that drives the LLM CLIs you already use — `claude`,
-`codex`, `opencode` or `cursor` (Cursor CLI, `cursor-agent`). Each forum topic is one long-running CLI session with its
+`codex`, `opencode`, `cursor` (`cursor-agent`) or `kimi` (Kimi Code CLI). Each forum topic is one long-running CLI session with its
 own working directory, engine and model. The rest of this README is in Russian;
 this section is enough to get the bot running.
 
-**Requirements:** Python 3.11+, at least one of `claude` / `codex` / `opencode` / `cursor-agent`
+**Requirements:** Python 3.11+, at least one of `claude` / `codex` / `opencode` / `cursor-agent` / `kimi`
 installed and logged in under the same OS user, a bot token from
 [@BotFather](https://t.me/BotFather) and your Telegram user id (e.g. from
 `@userinfobot`). Add the bot to a forum group with topics enabled, or just talk
@@ -56,7 +56,7 @@ Scheduler or NSSM and the Windows-specific notes are in
 - In a topic: `/engine` shows and switches the engine and model, `/bind <path>`
   sets the topic's working directory; `/session`, `/stop`, `/close` do what
   they say.
-- Default engine for new topics: `JARVIS_ENGINE=claude|codex|opencode|cursor` in `.env`.
+- Default engine for new topics: `JARVIS_ENGINE=claude|codex|opencode|cursor|kimi` in `.env`.
 - Every other setting is documented in `.env.example`.
 
 ### Plugins
@@ -91,9 +91,9 @@ The Russian section «Плагины» below has a full example.
 
 ## Что умеет
 
-- Передаёт любые текстовые запросы в выбранный движок (`claude`, OpenAI `codex`, `opencode` или `cursor`).
+- Передаёт любые текстовые запросы в выбранный движок (`claude`, OpenAI `codex`, `opencode`, `cursor` или `kimi`).
 - Запоминает session-id на каждый топик — контекст диалога сохраняется.
-- Движок и модель per-topic: `JARVIS_ENGINE=claude|codex|opencode|cursor` задаёт
+- Движок и модель per-topic: `JARVIS_ENGINE=claude|codex|opencode|cursor|kimi` задаёт
   дефолтный движок для новых топиков; в любом топике можно переключиться
   командой `/engine <name> [model-substring]`.
 - `/engine` — показать текущий движок и список доступных; `/engine <name>` —
@@ -113,7 +113,7 @@ The Russian section «Плагины» below has a full example.
   По умолчанию **выключен** (on-demand): браузерные tools грузятся в контекст
   только там, где реально нужны — иначе ~30 `browser_*` тулов висят в каждом
   запросе и зря жгут токены.
-- `/persistent [on|off]` — живой процесс для `claude`, `codex`, `opencode` и `cursor`:
+- `/persistent [on|off]` — живой процесс для `claude`, `codex`, `opencode`, `cursor` и `kimi`:
   новое сообщение во время активного хода не ждёт topic-lock, а дописывается в
   текущую работу (`claude` через stream-json stdin, `codex` через app-server
   `turn/steer`, `opencode` через `opencode serve` и `prompt_async`). `cursor` —
@@ -281,10 +281,16 @@ PLUGIN = Plugin(
 
 ### Переменные окружения (опционально)
 
-- `JARVIS_ENGINE` — `claude` (дефолт), `codex`, `opencode` или `cursor`. Задаёт **дефолтный
+- `JARVIS_ENGINE` — `claude` (дефолт), `codex`, `opencode`, `cursor` или `kimi`. Задаёт **дефолтный
   движок для новых топиков**. Существующие топики хранят свой движок в БД и
   не пересоздаются при смене env — для переключения активного топика используй
   команду `/engine <name>` прямо в Telegram.
+- `JARVIS_ACCOUNTS` — доп. логины одного CLI: `engine:name=~/dir,…` (claude, codex,
+  kimi, cursor, opencode). `main` всегда есть (каталог CLI по умолчанию). Выбор
+  per-topic в `/engine` (кнопки 👤) или `/engine @name`. На ход: claude→`CLAUDE_CONFIG_DIR`,
+  codex→`CODEX_HOME`, kimi→`KIMI_CODE_HOME`, cursor→`CURSOR_CONFIG_DIR`+`XDG_CONFIG_HOME=<dir>/xdg-config`,
+  opencode→`XDG_{CONFIG,DATA,STATE}_HOME` под каталогом + `OPENCODE_CONFIG`. У cursor/opencode
+  XDG наследуется дочерними процессами CLI — каталог аккаунта держите отдельным.
 - `CLAUDE_BIN` — путь к бинарю claude (по умолчанию `claude`).
 - `CODEX_BIN` — путь к бинарю codex (по умолчанию `codex`).
 - `OPENCODE_BIN` — путь к бинарю opencode (по умолчанию `opencode`).
@@ -311,6 +317,12 @@ PLUGIN = Plugin(
   inline-клавиатуры Telegram потолок 100 кнопок.
 - `CURSOR_MCP_CONFIG` — путь к `mcp.json` cursor, куда регистрируется Manager MCP
   (по умолчанию `~/.cursor/mcp.json`).
+- `KIMI_BIN` — путь к бинарю Kimi Code CLI (по умолчанию `kimi`).
+- `KIMI_TIMEOUT` — таймаут kimi, секунд (по умолчанию `3600`).
+- `KIMI_MODEL` — дефолтная модель (`-m`), если в топике не выбрана.
+- `KIMI_MODELS` — CSV override списка моделей из `$KIMI_CODE_HOME/config.toml`.
+- `KIMI_CODE_HOME` — каталог данных CLI (по умолчанию `~/.kimi-code`).
+- `KIMI_MCP_CONFIG` — путь к `mcp.json` kimi для Manager MCP (по умолчанию `$KIMI_CODE_HOME/mcp.json`).
 - `CURSOR_API_KEY` — ключ API вместо `cursor-agent login` (читает сам CLI).
 - `PLAYWRIGHT_MCP_NPX` — абсолютный путь к `npx` для Playwright MCP. Если не
   задан, runtime-хелпер ищет `npx` в `PATH` и `~/.nvm/versions/node/*/bin/npx`.
@@ -398,6 +410,9 @@ Playwright **не** регистрируется глобально, а инъе
   и `<cwd>/.cursor/mcp.json`, per-invocation подключения нет. `/browser on` в
   cursor-топике ставит флаг, но бот предупреждает: браузер заработает только
   после смены движка.
+- **kimi**: в print нет per-invocation MCP; в `/persistent` (ACP) Playwright и
+  topic-MCP уходят в `mcpServers` (stdio/http). `/browser on` включает флаг под
+  живой режим.
 - **opencode**: у `opencode run` нет per-invocation MCP-флага, поэтому Jarvis
   клонирует глобальный `opencode.json` (Manager MCP и provider-настройки
   сохраняются), добавляет `mcp.playwright` во временный файл и подсовывает его
@@ -756,6 +771,7 @@ mcp_servers.playwright.*` overrides при старте app-server; topic-MCP �
 | codex | `~/.codex/models_cache.json` (только модели с `visibility: list`) |
 | opencode | вывод `opencode models` — все сконфигурированные провайдеры |
 | cursor | вывод `cursor-agent --list-models` (строки «id - Название», названия идут в подписи кнопок), первые `CURSOR_MODELS_LIMIT`; фолбэк — `auto` |
+| kimi | ключи `[models.*]` из `$KIMI_CODE_HOME/config.toml` (display_name → подписи); фолбэк — `kimi-code/k3` |
 
 Env `CLAUDE_MODELS` / `CODEX_MODELS` / `OPENCODE_MODELS` / `CURSOR_MODELS` перекрывают источник.
 Если источник молчит (CLI не установлен, конфиг битый), адаптер отдаёт свой
@@ -957,6 +973,22 @@ opencode mcp list
 http/sse MCP, stdio — нет); расход контекста сессии (`/tokens`) не отслеживается.
 `cursor-agent acp` не выходит по закрытию stdin — живой процесс гасится только
 сигналом (`terminate_process_tree`).
+
+### Переход на kimi
+
+1. Установить [Kimi Code CLI](https://www.kimi.com/code/docs/en/kimi-code-cli/) и войти:
+   ```bash
+   kimi login --region global   # или mainland-cn
+   kimi -p "ping" --output-format text
+   ```
+2. Добавить в `.env`: `JARVIS_ENGINE=kimi` (или выбрать `/engine kimi` в топике).
+   Если `kimi` не в PATH сервиса — `KIMI_BIN=/полный/путь/к/kimi`
+   (часто `~/.kimi-code/bin/kimi`).
+3. `systemctl --user restart jarvis-bot.service`.
+
+Print и ACP делят сессии в `~/.kimi-code/sessions/`. Playwright и topic-MCP
+работают в `/persistent` (по умолчанию вкл.) через ACP `mcpServers` (stdio/http).
+В разовом print-режиме per-invocation MCP нет. `/usage` для kimi не отслеживается.
 
 ## Запуск вручную
 

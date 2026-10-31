@@ -31,7 +31,10 @@ ENGINE_CLAUDE = "claude"
 ENGINE_CODEX = "codex"
 ENGINE_OPENCODE = "opencode"
 ENGINE_CURSOR = "cursor"
-SUPPORTED_ENGINES = (ENGINE_CLAUDE, ENGINE_CODEX, ENGINE_OPENCODE, ENGINE_CURSOR)
+ENGINE_KIMI = "kimi"
+SUPPORTED_ENGINES = (
+    ENGINE_CLAUDE, ENGINE_CODEX, ENGINE_OPENCODE, ENGINE_CURSOR, ENGINE_KIMI,
+)
 
 
 _CACHE: dict[str, Engine] = {}
@@ -67,9 +70,12 @@ def get_engine_by_name(name: str) -> Engine:
     elif name == ENGINE_OPENCODE:
         from engines.opencode_engine import OpenCodeEngine
         eng = OpenCodeEngine()
-    else:
+    elif name == ENGINE_CURSOR:
         from engines.cursor_engine import CursorEngine
         eng = CursorEngine()
+    else:
+        from engines.kimi_engine import KimiEngine
+        eng = KimiEngine()
     _CACHE[name] = eng
     return eng
 
@@ -119,7 +125,7 @@ def prewarm_models() -> None:
 def engine_model_scope(engine_name: str, model: str | None) -> Iterator[None]:
     """Выставляет текущую модель для движка через ContextVar на время блока.
 
-    Поддерживаются claude, codex, opencode и cursor.
+    Поддерживаются claude, codex, opencode, cursor и kimi.
     Для движков без поддержки или при model=None — no-op.
     ContextVar.set/reset синхронны, но значение видно через `await` внутри
     той же таски — этого достаточно для call_stream.
@@ -159,5 +165,13 @@ def engine_model_scope(engine_name: str, model: str | None) -> Iterator[None]:
             yield
         finally:
             CU_MODEL.reset(token)
+    elif engine_name == ENGINE_KIMI:
+        from engines.kimi_engine import CURRENT_MODEL as KM_MODEL
+
+        token = KM_MODEL.set(model)
+        try:
+            yield
+        finally:
+            KM_MODEL.reset(token)
     else:
         yield

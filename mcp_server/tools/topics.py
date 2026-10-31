@@ -124,14 +124,17 @@ def manager_set_engine(
 ) -> dict[str, Any]:
     """Persistently switch the topic to a different engine/model."""
     engine = engine.strip().lower()
-    if engine not in {"claude", "codex", "opencode", "cursor"}:
-        raise ValueError(f"engine must be claude|codex|opencode|cursor, got {engine!r}")
+    from engines import SUPPORTED_ENGINES, get_engine_by_name  # type: ignore
+
+    if engine not in SUPPORTED_ENGINES:
+        raise ValueError(
+            f"engine must be {'|'.join(SUPPORTED_ENGINES)}, got {engine!r}"
+        )
     target_chat_id = chat_id if chat_id is not None else common._default_chat_id()
 
     # Lazy import — same reason as manager_engines.
     import shutil
 
-    from engines import get_engine_by_name  # type: ignore
 
     try:
         eng = get_engine_by_name(engine)
@@ -332,8 +335,12 @@ def manager_create_topic(
     if not cwd or not os.path.isabs(cwd):
         raise ValueError("cwd must be an absolute path")
     engine = engine.strip().lower()
-    if engine not in {"claude", "codex", "opencode", "cursor"}:
-        raise ValueError(f"engine must be claude|codex|opencode|cursor, got {engine!r}")
+    from engines import SUPPORTED_ENGINES  # type: ignore
+
+    if engine not in SUPPORTED_ENGINES:
+        raise ValueError(
+            f"engine must be {'|'.join(SUPPORTED_ENGINES)}, got {engine!r}"
+        )
     if icon_color is not None and icon_color not in common._ICON_COLORS:
         raise ValueError(
             f"icon_color must be one of {common._ICON_COLORS} (Telegram palette)"

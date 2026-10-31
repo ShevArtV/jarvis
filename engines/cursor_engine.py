@@ -74,6 +74,11 @@ _RETRIABLE = re.compile(r"^(Error: )?RetriableError\b")
 
 def _config_dir() -> Path:
     """Каталог данных CLI — тот же порядок, что у самого cursor-agent."""
+    from engines.accounts import current_dir
+
+    account = current_dir("cursor")
+    if account is not None:
+        return account
     explicit = os.environ.get("CURSOR_CONFIG_DIR", "").strip()
     if explicit:
         return Path(explicit)
