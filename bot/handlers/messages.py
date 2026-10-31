@@ -408,11 +408,21 @@ async def _process_prompt(
 
     # Reply-to контекст и вложения → meta_block
     extra_lines: list[str] = [late_ask_note] if late_ask_note else []
-    reply = update.message.reply_to_message if update.message else None
+    msg = update.message
+    reply = msg.reply_to_message if msg else None
     if reply is not None:
+        quote = getattr(msg, "quote", None)
+        quote_text = getattr(quote, "text", None) if quote is not None else None
+        replied_text = (reply.text or reply.caption or "") or None
         ctx = load_message_context(chat.id, reply.message_id)
-        if ctx:
-            extra_lines.append(_build_reply_context_prefix(ctx))
+        extra_lines.append(
+            _build_reply_context_prefix(
+                message_id=reply.message_id,
+                quote_text=quote_text,
+                replied_text=replied_text,
+                ctx=ctx,
+            )
+        )
     if attachments:
         for p in attachments:
             extra_lines.append(f"[Прикреплён файл: {p}]")

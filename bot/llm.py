@@ -183,15 +183,46 @@ async def call_llm_stream(
     return ok, final_text, sid_after
 
 
-def _build_reply_context_prefix(ctx: dict) -> str:
-    parts = []
-    t = ctx.get("type")
-    created = ctx.get("_created_at", "")
-    if t == "claude_response":
-        parts.append(f"пользователь отвечает на твой предыдущий ответ (время {created})")
-    else:
-        parts.append(f"пользователь отвечает на твоё сообщение типа {t!r} (время {created})")
-        extras = {k: v for k, v in ctx.items() if k not in ("type", "_created_at")}
-        if extras:
-            parts.append(f"метаданные: {json.dumps(extras, ensure_ascii=False)}")
+_REPLY_TEXT_LIMIT = 500
+
+
+def _clip_reply_text(text: str, limit: int = _REPLY_TEXT_LIMIT) -> str:
+    text = text.strip()
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1] + "…"
+
+
+def _build_reply_context_prefix(
+    *,
+    message_id: int,
+    quote_text: str | None = None,
+    replied_text: str | None = None,
+    ctx: dict | None = None,
+) -> str:
+    """Префикс к prompt: на какое сообщение отвечает пользователь.
+
+    ``message_id`` — Telegram id сообщения, на которое reply. ``quote_text`` —
+    выделенная цитата из Bot API (поле ``Message.quote`` у нового сообщения).
+    ``replied_text`` — текст/подпись исходного сообщения, если Telegram его отдал.
+    ``ctx`` — запись из таблицы ``messages``, если бот сам это сообщение слал.
+    """
+    parts = [f"message_id={message_id}"]
+    if ctx:
+        t = ctx.get("type")
+        created = ctx.get("_created_at", "")
+        if t == "claude_response":
+            parts.append(f"это твой предыдущий ответ (время {created})")
+        else:
+            parts.append(f"тип {t!r} (время {created})")
+            extras = {k: v for k, v in ctx.items() if k not in ("type", "_created_at")}
+            if extras:
+                parts.append(f"метаданные: {json.dumps(extras, ensure_ascii=False)}")
+    if quote_text and quote_text.strip():
+        parts.append(f"цитата: {_clip_reply_text(quote_text)}")
+    if replied_text and replied_text.strip():
+        # Не дублируем, если цитата уже покрывает весь видимый фрагмент.
+        clipped = _clip_reply_text(replied_text)
+        if not quote_text or clipped != _clip_reply_text(quote_text):
+            parts.append(f"текст: {clipped}")
     return "[Пользователь отвечает на:] " + "; ".join(parts)
