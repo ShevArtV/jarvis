@@ -135,7 +135,9 @@ class ParseTest(unittest.TestCase):
         for part in ("queuewarden_task_get", "не подтверждай gate", "ask_user",
                      "AGENTS.md твоего рабочего каталога", "`**[<установка>] <номер задачи>",
                      "6) новая задача (task.created) — докладывай ВСЕГДА",
-                     "участие уже проверено", "<тег>"):
+                     "участие уже проверено", "<тег>",
+                     "докладывай только одним сообщением с human gate на плане",
+                     "pending gate на плане нет", "План → В работе без pending approval"):
             self.assertIn(part, prompt)
         self.assertTrue(prompt.endswith("ответь ровно [[SILENT]]"))
 
