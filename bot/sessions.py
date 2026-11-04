@@ -196,7 +196,9 @@ def _instructions_changed(cwd: str | None, started_at: str | None) -> bool:
     задачу, а поведение прежнее, и непонятно почему (напоролись 2026-07-11 на
     новостном топике: правки формата дайджеста не доходили до агента).
 
-    Поэтому: инструкции новее сеанса → сеанс переоткрываем.
+    Поэтому: инструкции новее сеанса → в ближайший prompt уходит напоминание
+    перечитать их (``pop_instructions_note``). Сеанс НЕ переоткрывается: правка
+    инструкций посреди ночной работы стоила Тимлиду всего контекста (04.11.2026).
     """
     if not cwd or not started_at:
         return False
@@ -219,13 +221,32 @@ def _instructions_changed(cwd: str | None, started_at: str | None) -> bool:
     return False
 
 
+# Топики, где инструкции обновились посреди сеанса: в ближайший prompt
+# добавляется напоминание перечитать их.
+_instructions_note_pending: set[tuple[int, int]] = set()
+
+INSTRUCTIONS_NOTE = (
+    "[SYSTEM: инструкции проекта (AGENTS.md / CLAUDE.md в рабочей папке) "
+    "изменились с начала сеанса — перечитай их и дальше работай по новой версии.]"
+)
+
+
+def pop_instructions_note(chat_id: int, thread_id: int) -> str | None:
+    """Напоминание перечитать инструкции — один раз после их правки."""
+    key = (chat_id, thread_id)
+    if key in _instructions_note_pending:
+        _instructions_note_pending.discard(key)
+        return INSTRUCTIONS_NOTE
+    return None
+
+
 def ensure_active_session(
     chat_id: int, thread_id: int,
 ) -> tuple[str, str | None, str, bool]:
     """Сеанс топика для текущего сообщения: (session_id, cwd, engine, opened_new).
 
-    Новый сеанс открывается, если прошлый закрыт, протух ИЛИ если изменились
-    инструкции проекта (их движок читает только при старте сессии).
+    Новый сеанс открывается, если прошлый закрыт или протух. Изменившиеся
+    инструкции сеанс не переоткрывают — ставят напоминание перечитать их.
     opened_new=True, чтобы вызывающий сообщил об этом пользователю.
     """
     with _db() as conn:
@@ -245,19 +266,20 @@ def ensure_active_session(
         return session_id, cwd, engine_name, True
 
     stale = _session_is_stale(row[0])
-    fresh_instructions = not stale and _instructions_changed(row[1], row[2])
+    if not stale and _instructions_changed(row[1], row[2]):
+        mark_session_start(chat_id, thread_id)
+        _instructions_note_pending.add((chat_id, thread_id))
+        logger.info("instructions changed: session kept, reread note queued key=%s",
+                    (chat_id, thread_id))
 
-    if stale or fresh_instructions:
+    if stale:
         # Делегированные задачи (jobs) переоткрытию сеанса не мешают: job несёт
         # полный текст задачи и не зависит от контекста прошлого сеанса, а
         # Менеджер поднимает своё состояние через manager_inbox.
         session_id, cwd, engine_name = reset_session(chat_id, thread_id)
         touch_session(chat_id, thread_id)
         mark_session_start(chat_id, thread_id)
-        if fresh_instructions:
-            reason = "instructions changed"
-        else:
-            reason = "closed" if row[0] is None else "stale"
+        reason = "closed" if row[0] is None else "stale"
         logger.info("session opened (%s): key=%s session=%s",
                     reason, (chat_id, thread_id), session_id)
         return session_id, cwd, engine_name, True

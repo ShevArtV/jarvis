@@ -50,6 +50,9 @@ class PersistentClaudeWorker:
         self.reader_task: asyncio.Task | None = None
         # Модель, которой CLI ответил последний раз (system.init / assistant).
         self.actual_model: str | None = None
+        # Фоновые задачи CLI (субагенты, shell) по последнему
+        # system/background_tasks_changed — пока они есть, reaper процесс не трогает.
+        self.background_tasks: list = []
         self._journal = IntermediateBuffer(
             "persistent worker: on_intermediate failed key=%s", key,
         )
@@ -93,6 +96,9 @@ class PersistentClaudeWorker:
         self.last_activity = time.monotonic()
         return is_new, fut
 
+    def has_background_work(self) -> bool:
+        return bool(self.background_tasks)
+
     def _begin_background_turn(self) -> None:
         self.busy = True
         self.steerable = True
@@ -123,6 +129,9 @@ class PersistentClaudeWorker:
                     m = ev.get("model")
                     if isinstance(m, str) and m:
                         self.actual_model = m
+                if etype == "system" and ev.get("subtype") == "background_tasks_changed":
+                    tasks = ev.get("tasks")
+                    self.background_tasks = tasks if isinstance(tasks, list) else []
                 if etype == "assistant":
                     if not self.busy:
                         # Субагент дорабатывает в фоне после конца хода — его шаги

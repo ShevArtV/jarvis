@@ -227,6 +227,9 @@ persistent_spawn_locks: dict[tuple[int, int], asyncio.Lock] = {}
 # Простаивающий живой процесс не экономит токены (сессия и так резюмируется
 # с диска) — только задержку на старте. Держать его вечно смысла нет.
 PERSISTENT_IDLE_MINUTES = int_env("JARVIS_PERSISTENT_IDLE_MINUTES", 20)
+# Процесс с фоновой работой (субагент, фоновая команда) reaper не трогает, но
+# не дольше этого срока простоя — зависшая задача не держит процесс вечно.
+BACKGROUND_MAX_HOURS = int_env("JARVIS_BACKGROUND_MAX_HOURS", 6)
 
 
 def _lock_for(key: tuple[int, int]) -> asyncio.Lock:
