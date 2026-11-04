@@ -34,6 +34,7 @@ from bot.plugins import trigger_source
 from bot.sessions import (
     clear_pending_summary,
     ensure_active_session,
+    pop_instructions_note,
     get_model,
     get_pending_summary,
     get_persistent_for_engine,
@@ -209,6 +210,9 @@ async def _run_manager_job(app: Application, job: dict) -> tuple[bool, int | Non
         prompt_parts: list[str] = []  # [SYSTEM:]-блок уходит через системный канал движка
         if pending_summary:
             prompt_parts.append("[Контекст:]\n" + pending_summary)
+        instructions_note = pop_instructions_note(*key)
+        if instructions_note:
+            prompt_parts.append(instructions_note)
         mgr_target = resolve_job_notice_target(origin_chat_id, origin_thread_id)
         if is_self_kick:
             prompt_parts.append(

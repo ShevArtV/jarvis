@@ -38,6 +38,7 @@ from bot.llm import (
 )
 from bot.rich_message import get_rich_message, rich_message_files, rich_message_to_markdown
 from bot.sessions import (
+    pop_instructions_note,
     _parse_transfer_marker,
     _persistent_column_for_engine,
     build_context_handoff,
@@ -68,6 +69,7 @@ from bot.topics import (
 )
 from engines import engine_model_scope, get_engine_by_name
 from engines.accounts import engine_account_scope
+from engines.background_work import capture_baseline
 from engines.persistent import persistent_timeout, start_persistent
 
 logger = logging.getLogger(__name__)
@@ -241,6 +243,7 @@ async def _get_or_start_persistent_worker(chat, thread_id: int, key: tuple[int, 
             worker, chat, thread_id, key, engine_name,
             persistent_timeout(engine_name), _finish_turn_reply,
         )
+        capture_baseline(worker)
         persistent_workers[key] = worker
         return worker, True
 
@@ -279,6 +282,9 @@ async def _handle_persistent_message(
             if pending_summary:
                 prompt_parts.append("[Контекст:]\n" + pending_summary)
                 pending_summary_delivered = True
+    instructions_note = pop_instructions_note(*key)
+    if instructions_note:
+        prompt_parts.append(instructions_note)
     if meta_block:
         prompt_parts.append(meta_block)
     prompt_parts.append("---\n\nСообщение пользователя:\n" + user_text)
@@ -541,6 +547,9 @@ async def _process_prompt_locked(
         prompt_parts: list[str] = []  # [SYSTEM:]-блок уходит через системный канал движка
         if pending_summary:
             prompt_parts.append("[Контекст:]\n" + pending_summary)
+        instructions_note = pop_instructions_note(*key)
+        if instructions_note:
+            prompt_parts.append(instructions_note)
         if meta_block:
             prompt_parts.append(meta_block)
         prompt_parts.append("---\n\nСообщение пользователя:\n" + user_text)

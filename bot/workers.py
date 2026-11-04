@@ -30,16 +30,18 @@ from bot.queues import (
     finish_agent_trigger,
     finish_job,
 )
-from bot.sessions import clear_close_request, close_session, get_session
+from bot.sessions import clear_close_request, close_session, get_session, touch_session
 from bot.settings import CLAUDE_CWD
 from bot.timeutil import utcnow
 from bot.topics import (
+    BACKGROUND_MAX_HOURS,
     PERSISTENT_IDLE_MINUTES,
     _kill_persistent_worker,
     active_procs,
     persistent_workers,
     resolve_job_notice_target,
 )
+from engines.background_work import has_background_work
 from engines.process_control import terminate_process_tree
 
 logger = logging.getLogger(__name__)
@@ -114,10 +116,17 @@ async def persistent_reaper(app: Application) -> None:
         try:
             await asyncio.sleep(60.0)
             now = time.monotonic()
-            stale = [
-                key for key, w in list(persistent_workers.items())
-                if not w.busy and (now - w.last_activity) > PERSISTENT_IDLE_MINUTES * 60
-            ]
+            stale = []
+            for key, w in list(persistent_workers.items()):
+                idle = now - w.last_activity
+                if w.busy or idle <= PERSISTENT_IDLE_MINUTES * 60:
+                    continue
+                if idle <= BACKGROUND_MAX_HOURS * 3600 and has_background_work(w):
+                    # Агент ждёт фоновую работу: держим процесс и сеанс живыми,
+                    # иначе работа умрёт с процессом, а сеанс протухнет к утру.
+                    touch_session(*key)
+                    continue
+                stale.append(key)
             for key in stale:
                 await _kill_persistent_worker(key, "")
                 logger.info("persistent_reaper: killed idle worker key=%s", key)
