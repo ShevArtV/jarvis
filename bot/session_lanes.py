@@ -27,12 +27,15 @@ from engines.session_usage import inspect_session_usage
 
 logger = logging.getLogger(__name__)
 
-# Движки, у которых inspect_session_usage умеет отдать размер контекста.
-# cursor/kimi → source=unknown, threshold_tokens=None — ротация на них молчит.
-ROTATE_ENGINES = frozenset({"claude", "codex", "opencode"})
+# Движки, у которых inspect_session_usage отдаёт размер (точный или estimate).
+ROTATE_ENGINES = frozenset({"claude", "codex", "opencode", "cursor", "kimi"})
 
 _TASK_KEY_RE = re.compile(r"\b(\d{4}-\d+)\b")
 _HASHTAG_RE = re.compile(r"#(?:qw[_-])?[a-z0-9_-]+-\d{4}-\d+", re.I)
+# Дампы кода/логов в ответах бота — не в seed.
+_FENCE_RE = re.compile(r"```[\s\S]*?```")
+# После снятия fenced-блоков: короче — почти наверняка был один дамп.
+_MIN_ASSISTANT_SEED_CHARS = 12
 
 
 def dialog_busy_reasons(key: tuple[int, int]) -> list[str]:
@@ -179,26 +182,21 @@ def _clip_seed_text(text: str, limit: int = 4000) -> str:
     return text[: limit - 1] + "…"
 
 
-def build_dialog_seed(chat_id: int, thread_id: int, limit: int | None = None) -> str | None:
-    """Последние диалоговые реплики: user_text и ответы на них.
-
-    ``queuewarden_inject`` и доклады по ним (bot_reply/ask_user сразу после
-    inject или с meta lane=notify) в seed не входят.
-    """
-    n = SESSION_SEED_MESSAGES if limit is None else limit
-    if n <= 0:
+def _assistant_seed_body(text: str) -> str | None:
+    """Текст ответа бота без fenced-блоков; None — почти один дамп, пропускаем."""
+    cleaned = _FENCE_RE.sub("", text or "")
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+    if len(cleaned) < _MIN_ASSISTANT_SEED_CHARS:
         return None
-    with _db() as conn:
-        rows = conn.execute(
-            "SELECT direction, kind, text, telegram_message_id FROM messages_log "
-            "WHERE chat_id = ? AND thread_id = ? ORDER BY id DESC LIMIT ?",
-            (chat_id, thread_id, max(n * 8, 40)),
-        ).fetchall()
-    if not rows:
-        return None
+    return _clip_seed_text(cleaned)
 
-    # Идём от старых к новым в окне кандидатов.
-    chronological = list(reversed(rows))
+
+def _pick_dialog_chronological(
+    chronological: list[tuple],
+    chat_id: int,
+    thread_id: int,
+    limit: int,
+) -> list[tuple[str, str]]:
     picked: list[tuple[str, str]] = []
     last_inbound_kind: str | None = None
     for direction, kind, text, tg_id in chronological:
@@ -222,25 +220,57 @@ def build_dialog_seed(chat_id: int, thread_id: int, limit: int | None = None) ->
                     )
             if lane == "notify" or last_inbound_kind == "queuewarden_inject":
                 continue
-            if last_inbound_kind != "user_text" and not picked:
-                continue
-            # Ответ на user_text (последний inbound был user или уже есть диалог).
-            if last_inbound_kind == "user_text" or (
+            if last_inbound_kind != "user_text" and not (
                 picked and picked[-1][0] == "user"
             ):
-                role = "ask" if kind == "ask_user" else "assistant"
-                picked.append((role, _clip_seed_text(text)))
+                continue
+            body = _assistant_seed_body(text)
+            if body is None:
+                continue
+            role = "ask" if kind == "ask_user" else "assistant"
+            picked.append((role, body))
             continue
         if direction == "in":
             last_inbound_kind = kind
+    return picked[-limit:]
+
+
+def build_dialog_seed(chat_id: int, thread_id: int, limit: int | None = None) -> str | None:
+    """Последние диалоговые реплики: user_text и информативные ответы на них.
+
+    ``queuewarden_inject`` и доклады по ним не входят. Ответы бота — без
+    fenced-блоков; почти пустые после чистки пропускаются. Окно ``messages_log``
+    расширяется, пока не наберём ``limit`` диалоговых реплик (или история кончится).
+    """
+    n = SESSION_SEED_MESSAGES if limit is None else limit
+    if n <= 0:
+        return None
+
+    page = max(n * 8, 40)
+    offset = 0
+    chronological: list[tuple] = []
+    picked: list[tuple[str, str]] = []
+    while True:
+        with _db() as conn:
+            page_rows = conn.execute(
+                "SELECT direction, kind, text, telegram_message_id FROM messages_log "
+                "WHERE chat_id = ? AND thread_id = ? ORDER BY id DESC LIMIT ? OFFSET ?",
+                (chat_id, thread_id, page, offset),
+            ).fetchall()
+        if not page_rows:
+            break
+        # Более старые страницы — в начало хронологии.
+        chronological = list(reversed(page_rows)) + chronological
+        picked = _pick_dialog_chronological(chronological, chat_id, thread_id, n)
+        if len(picked) >= n or len(page_rows) < page:
+            break
+        offset += page
 
     if not picked:
         return None
-    # Берём хвост из n реплик.
-    picked = picked[-n:]
     lines = [
         "[Контекст: последние сообщения диалога этого топика "
-        "(без уведомлений QueueWarden), от старых к новым:]",
+        "(без уведомлений QueueWarden и дампов кода/логов), от старых к новым:]",
     ]
     for role, body in picked:
         label = {"user": "Оператор", "assistant": "Ассистент", "ask": "Вопрос ассистента"}[role]

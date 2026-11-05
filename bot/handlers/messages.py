@@ -265,8 +265,12 @@ async def _get_or_start_persistent_worker(chat, thread_id: int, key: tuple[int, 
             worker = None
         if worker is not None and get_rotate_pending(*key):
             # Контекст перерос порог; worker ещё жив (раньше нельзя было убить).
+            # Без close_session ensure_active_session вернёт тот же раздутый id
+            # (opened_new=False) — seed не подставится.
             if not dialog_busy_reasons(key):
                 await _kill_persistent_worker(key, "context rotate")
+                close_session(*key)
+                set_rotate_pending(*key, False)
                 worker = None
         if worker is not None:
             # Ход в живой процесс мимо ensure_active_session: без отметки
