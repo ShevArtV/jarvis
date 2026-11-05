@@ -128,17 +128,24 @@ async def _maybe_rotate_dialog(
     chat, thread_id: int, key: tuple[int, int],
     engine_name: str, session_id: str, cwd: str | None,
 ) -> None:
-    """Закрыть диалоговый сеанс по размеру контекста, если безопасно."""
-    action = plan_dialog_rotate(key, engine_name, session_id, cwd)
-    if action == "noop":
+    """Закрыть диалоговый сеанс по размеру контекста, если безопасно.
+
+    Любая ошибка (БД, usage, kill) только логируется — ход уже завершён.
+    """
+    try:
+        action = plan_dialog_rotate(key, engine_name, session_id, cwd)
+        if action == "noop":
+            return
+        if action == "defer":
+            set_rotate_pending(*key, True)
+            return
+        close_session(*key)
+        set_rotate_pending(*key, False)
+        await _kill_persistent_worker(key, "context rotate")
+        logger.info("dialog session closed for context rotate: key=%s", key)
+    except Exception:
+        logger.exception("dialog rotate failed key=%s", key)
         return
-    if action == "defer":
-        set_rotate_pending(*key, True)
-        return
-    close_session(*key)
-    set_rotate_pending(*key, False)
-    await _kill_persistent_worker(key, "context rotate")
-    logger.info("dialog session closed for context rotate: key=%s", key)
     try:
         await send_to_topic(
             chat, thread_id,
@@ -174,11 +181,15 @@ async def _finish_turn_reply(
             await journal.finish(discard=True)
             logger.info("silent turn, nothing sent: key=%s engine=%s", key, engine_name)
             if lane == "dialog":
-                session_id, cwd, current_engine_name = get_session(*key)
-                await _maybe_rotate_dialog(
-                    chat, thread_id, key, current_engine_name or engine_name,
-                    session_id, cwd,
-                )
+                try:
+                    session_id, cwd, current_engine_name = get_session(*key)
+                except Exception:
+                    logger.exception("get_session after silent turn failed key=%s", key)
+                else:
+                    await _maybe_rotate_dialog(
+                        chat, thread_id, key, current_engine_name or engine_name,
+                        session_id, cwd,
+                    )
             return
     await journal.finish(final_text)
 
@@ -237,7 +248,11 @@ async def _finish_turn_reply(
     if file_markers:
         await deliver_file_markers(chat, thread_id, file_markers)
 
-    session_id, cwd, current_engine_name = get_session(*key)
+    try:
+        session_id, cwd, current_engine_name = get_session(*key)
+    except Exception:
+        logger.exception("get_session after turn failed key=%s", key)
+        return
     if lane == "dialog":
         await _warn_large_context_if_needed(
             chat, thread_id, current_engine_name or engine_name, session_id, cwd, key,

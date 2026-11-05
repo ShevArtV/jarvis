@@ -41,34 +41,54 @@ _MIN_ASSISTANT_SEED_CHARS = 12
 def dialog_busy_reasons(key: tuple[int, int]) -> list[str]:
     """Почему нельзя закрыть/ротировать диалоговый сеанс прямо сейчас."""
     reasons: list[str] = []
-    if get_pending_ask(*key) is not None:
-        reasons.append("ask_user")
+    try:
+        if get_pending_ask(*key) is not None:
+            reasons.append("ask_user")
+    except Exception:
+        logger.exception("dialog_busy_reasons: get_pending_ask failed key=%s", key)
     worker = persistent_workers.get(key)
     if worker is not None:
         if getattr(worker, "busy", False):
             reasons.append("turn")
-        if has_background_work(worker):
-            reasons.append("background")
+        try:
+            if has_background_work(worker):
+                reasons.append("background")
+        except Exception:
+            logger.exception("dialog_busy_reasons: has_background_work failed key=%s", key)
     if active_procs.get(key) is not None:
         reasons.append("oneshot")
     return reasons
 
 
 def set_rotate_pending(chat_id: int, thread_id: int, pending: bool = True) -> None:
-    with _db() as conn:
-        conn.execute(
-            "UPDATE sessions SET rotate_pending = ? WHERE chat_id = ? AND thread_id = ?",
-            (1 if pending else 0, chat_id, thread_id),
+    try:
+        with _db() as conn:
+            conn.execute(
+                "UPDATE sessions SET rotate_pending = ? "
+                "WHERE chat_id = ? AND thread_id = ?",
+                (1 if pending else 0, chat_id, thread_id),
+            )
+    except Exception:
+        logger.exception(
+            "set_rotate_pending failed chat=%s thread=%s", chat_id, thread_id,
         )
 
 
 def get_rotate_pending(chat_id: int, thread_id: int) -> bool:
-    with _db() as conn:
-        row = conn.execute(
-            "SELECT rotate_pending FROM sessions WHERE chat_id = ? AND thread_id = ?",
-            (chat_id, thread_id),
-        ).fetchone()
-    return bool(row and row[0])
+    """False при любой ошибке БД — ротация не должна валить ход."""
+    try:
+        with _db() as conn:
+            row = conn.execute(
+                "SELECT rotate_pending FROM sessions "
+                "WHERE chat_id = ? AND thread_id = ?",
+                (chat_id, thread_id),
+            ).fetchone()
+        return bool(row and row[0])
+    except Exception:
+        logger.exception(
+            "get_rotate_pending failed chat=%s thread=%s", chat_id, thread_id,
+        )
+        return False
 
 
 def _notify_is_stale(last_activity_at: str | None) -> bool:
@@ -333,15 +353,20 @@ def plan_dialog_rotate(
 
     ``close`` — безопасно закрыть сейчас (следующее сообщение откроет новый).
     ``defer`` — поставить ``rotate_pending`` (ход/ask/фон ещё живы).
+    Ошибка БД/usage → ``noop``: ход не роняем.
     """
-    over = context_over_rotate(engine_name, session_id, cwd)
-    pending = get_rotate_pending(*key)
-    if over is None:
+    try:
+        over = context_over_rotate(engine_name, session_id, cwd)
+        pending = get_rotate_pending(*key)
+        if over is None:
+            return "noop"
+        if not over and not pending:
+            return "noop"
+        reasons = dialog_busy_reasons(key)
+        if reasons:
+            logger.info("dialog rotate deferred key=%s reasons=%s", key, reasons)
+            return "defer"
+        return "close"
+    except Exception:
+        logger.exception("plan_dialog_rotate failed key=%s", key)
         return "noop"
-    if not over and not pending:
-        return "noop"
-    reasons = dialog_busy_reasons(key)
-    if reasons:
-        logger.info("dialog rotate deferred key=%s reasons=%s", key, reasons)
-        return "defer"
-    return "close"
