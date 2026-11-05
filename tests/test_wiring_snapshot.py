@@ -72,9 +72,11 @@ EXPECTED_HANDLERS = [
 # bot.reminders, остальное — тесты и bot.app.
 EXPECTED_LAYOUT = {
     "bot.settings": [
-        "CLAUDE_CWD", "CONTEXT_WARN_TOKENS", "DEFAULT_ENGINE", "DEFAULT_ENGINE_NAME",
+        "CLAUDE_CWD", "CONTEXT_WARN_TOKENS", "CONTEXT_ROTATE_TOKENS",
+        "DEFAULT_ENGINE", "DEFAULT_ENGINE_NAME",
         "DONE_CONFIRM_ON_DONE", "FILE_MARKER_RE", "MEDIA_DIR", "MSG_LIMIT",
-        "SESSION_IDLE_MINUTES", "TG_FILE_LIMIT_MB", "TG_HARD_LIMIT",
+        "NOTIFY_IDLE_MINUTES", "SESSION_IDLE_MINUTES", "SESSION_SEED_MESSAGES",
+        "TG_FILE_LIMIT_MB", "TG_HARD_LIMIT",
         "DB_PATH", "int_env", "bool_env",
     ],
     "bot.db": ["DB_PATH", "init_db", "log_message", "_db"],

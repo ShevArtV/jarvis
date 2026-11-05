@@ -131,6 +131,13 @@ _ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("agent_triggers", "role", "TEXT"),
     # Аккаунт движка (engines.accounts); NULL — main, каталог CLI по умолчанию.
     ("sessions", "account", "TEXT"),
+    # Диалог перерос порог CONTEXT_ROTATE_TOKENS, но закрыть сейчас нельзя
+    # (ход / ask_user / фон) — сработает на следующей безопасной границе.
+    ("sessions", "rotate_pending", "INTEGER NOT NULL DEFAULT 0"),
+    # Отдельный сеанс уведомлений QW (не диалог топика).
+    ("sessions", "notify_session_id", "TEXT"),
+    ("sessions", "notify_last_activity_at", "TEXT"),
+    ("sessions", "notify_started_at", "TEXT"),
 )
 
 

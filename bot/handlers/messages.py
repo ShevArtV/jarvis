@@ -11,6 +11,7 @@ import asyncio
 import json
 import logging
 import os
+import secrets
 import uuid
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -37,12 +38,26 @@ from bot.llm import (
     reply_visible_text,
 )
 from bot.rich_message import get_rich_message, rich_message_files, rich_message_to_markdown
+from bot.session_lanes import (
+    build_dialog_seed,
+    build_notify_reply_seed,
+    dialog_busy_reasons,
+    ensure_notify_session,
+    extract_task_markers,
+    get_rotate_pending,
+    notify_session_is_open,
+    plan_dialog_rotate,
+    set_rotate_pending,
+    touch_notify_session,
+    update_notify_session_id,
+)
 from bot.sessions import (
     pop_instructions_note,
     _parse_transfer_marker,
     _persistent_column_for_engine,
     build_context_handoff,
     clear_pending_summary,
+    close_session,
     ensure_active_session,
     get_mcp_playwright,
     get_model,
@@ -74,6 +89,20 @@ from engines.persistent import persistent_timeout, start_persistent
 
 logger = logging.getLogger(__name__)
 
+# Seed первого prompt нового диалогового сеанса (без LLM-сводки).
+_pending_dialog_seed: dict[tuple[int, int], str] = {}
+
+
+def _queue_dialog_seed(key: tuple[int, int]) -> None:
+    seed = build_dialog_seed(*key)
+    if seed:
+        _pending_dialog_seed[key] = seed
+
+
+def _take_dialog_seed(key: tuple[int, int]) -> str | None:
+    return _pending_dialog_seed.pop(key, None)
+
+
 async def _resolve_pending_summary(
     key: tuple[int, int], pending: str,
 ) -> str | None:
@@ -95,11 +124,37 @@ STATUS_PROBE = (
 )
 
 
+async def _maybe_rotate_dialog(
+    chat, thread_id: int, key: tuple[int, int],
+    engine_name: str, session_id: str, cwd: str | None,
+) -> None:
+    """Закрыть диалоговый сеанс по размеру контекста, если безопасно."""
+    action = plan_dialog_rotate(key, engine_name, session_id, cwd)
+    if action == "noop":
+        return
+    if action == "defer":
+        set_rotate_pending(*key, True)
+        return
+    close_session(*key)
+    set_rotate_pending(*key, False)
+    await _kill_persistent_worker(key, "context rotate")
+    logger.info("dialog session closed for context rotate: key=%s", key)
+    try:
+        await send_to_topic(
+            chat, thread_id,
+            "🔄 Сеанс закрыт: контекст перерос порог. Следующее сообщение "
+            "откроет новый (подставлю последние реплики диалога).",
+        )
+    except Exception:
+        logger.exception("failed to send rotate notice key=%s", key)
+
+
 async def _finish_turn_reply(
     chat, thread_id: int, journal: ProgressJournal, ok: bool, final_text: str,
     engine_name: str, key: tuple[int, int],
     retry_cb=None,
     allow_silent: bool = False,
+    reply_meta: dict | None = None,
 ) -> None:
     """Общий хвост хода: закрыть журнал, отправить финальный ответ и файлы.
     Общий для разового вызова движка и живого процесса claude (/persistent).
@@ -112,11 +167,18 @@ async def _finish_turn_reply(
     `allow_silent` — ход по внешнему триггеру, где агенту разрешено промолчать:
     ответ из одного SILENT_MARKER в топик не уходит, журнал удаляется.
     """
+    lane = (reply_meta or {}).get("lane") or "dialog"
     if allow_silent and ok and SILENT_MARKER in final_text:
         final_text = final_text.replace(SILENT_MARKER, "").strip()
         if not final_text:
             await journal.finish(discard=True)
             logger.info("silent turn, nothing sent: key=%s engine=%s", key, engine_name)
+            if lane == "dialog":
+                session_id, cwd, current_engine_name = get_session(*key)
+                await _maybe_rotate_dialog(
+                    chat, thread_id, key, current_engine_name or engine_name,
+                    session_id, cwd,
+                )
             return
     await journal.finish(final_text)
 
@@ -163,7 +225,10 @@ async def _finish_turn_reply(
                 "Что делать: повторить запрос; /new — начать новую сессию; "
                 "/engine — сменить движок."
             )
-    meta = {"type": "claude_response", "engine": engine_name}
+    meta = {"type": "claude_response", "engine": engine_name, **(reply_meta or {})}
+    if lane == "notify":
+        meta.setdefault("source", "queuewarden")
+        meta.update(extract_task_markers(cleaned_text))
     media, file_markers = split_media_markers(file_markers)
     try:
         await send_claude_reply(chat, thread_id, cleaned_text, meta, media=media)
@@ -173,10 +238,16 @@ async def _finish_turn_reply(
         await deliver_file_markers(chat, thread_id, file_markers)
 
     session_id, cwd, current_engine_name = get_session(*key)
-    await _warn_large_context_if_needed(
-        chat, thread_id, current_engine_name or engine_name, session_id, cwd, key,
-    )
-    await _ask_done_confirmation_if_needed(chat, thread_id, ok, final_text, session_id, key)
+    if lane == "dialog":
+        await _warn_large_context_if_needed(
+            chat, thread_id, current_engine_name or engine_name, session_id, cwd, key,
+        )
+        await _ask_done_confirmation_if_needed(
+            chat, thread_id, ok, final_text, session_id, key,
+        )
+        await _maybe_rotate_dialog(
+            chat, thread_id, key, current_engine_name or engine_name, session_id, cwd,
+        )
 
 
 async def _get_or_start_persistent_worker(chat, thread_id: int, key: tuple[int, int]):
@@ -192,6 +263,11 @@ async def _get_or_start_persistent_worker(chat, thread_id: int, key: tuple[int, 
         if worker is not None and (worker.dead or worker.proc.returncode is not None):
             persistent_workers.pop(key, None)
             worker = None
+        if worker is not None and get_rotate_pending(*key):
+            # Контекст перерос порог; worker ещё жив (раньше нельзя было убить).
+            if not dialog_busy_reasons(key):
+                await _kill_persistent_worker(key, "context rotate")
+                worker = None
         if worker is not None:
             # Ход в живой процесс мимо ensure_active_session: без отметки
             # last_activity_at застывает на старте процесса, и после reaper'а
@@ -208,11 +284,13 @@ async def _get_or_start_persistent_worker(chat, thread_id: int, key: tuple[int, 
         model = get_model(*key)
 
         if opened_new:
+            _queue_dialog_seed(key)
             try:
                 await send_to_topic(
                     chat, thread_id,
-                    f"🆕 Новый сеанс ({engine_name}). Контекст прошлых разговоров "
-                    "не загружен — попроси поднять историю, если нужно.",
+                    f"🆕 Новый сеанс ({engine_name}). Подставлю последние реплики "
+                    "диалога; полную историю при необходимости подними через "
+                    "manager_inbox.",
                 )
             except Exception:
                 logger.exception("failed to send new-session notice key=%s", key)
@@ -275,6 +353,9 @@ async def _handle_persistent_message(
 
     pending_summary_delivered = False
     prompt_parts: list[str] = []
+    seed = _take_dialog_seed(key)
+    if seed:
+        prompt_parts.append(seed)
     if spawned:
         pending_raw = get_pending_summary(*key)
         if pending_raw:
@@ -396,6 +477,8 @@ async def _process_prompt(
     if pending_ask is not None and user_text.strip():
         if answer_ask(pending_ask["id"], user_text.strip(), via="text"):
             logger.info("ask #%s answered by text: key=%s", pending_ask["id"], key)
+            if notify_session_is_open(*key):
+                touch_notify_session(*key)
             await _mark_ask_answered(chat, pending_ask, user_text.strip())
             return
         # Не смогли записать — вопрос уже закрыт (кнопка/таймаут). Обрабатываем
@@ -421,23 +504,41 @@ async def _process_prompt(
     extra_lines: list[str] = [late_ask_note] if late_ask_note else []
     msg = update.message
     reply = msg.reply_to_message if msg else None
+    reply_ctx = None
+    replied_text = None
     if reply is not None:
         quote = getattr(msg, "quote", None)
         quote_text = getattr(quote, "text", None) if quote is not None else None
         replied_text = reply_visible_text(reply)
-        ctx = load_message_context(chat.id, reply.message_id)
+        reply_ctx = load_message_context(chat.id, reply.message_id)
         extra_lines.append(
             _build_reply_context_prefix(
                 message_id=reply.message_id,
                 quote_text=quote_text,
                 replied_text=replied_text,
-                ctx=ctx,
+                ctx=reply_ctx,
             )
         )
     if attachments:
         for p in attachments:
             extra_lines.append(f"[Прикреплён файл: {p}]")
     meta_block = "\n".join(extra_lines)
+
+    # Reply на доклад QW: полоса notify (тот же сеанс, если ещё открыт; иначе новый).
+    if reply is not None and _is_notify_report_ctx(reply_ctx):
+        report = (replied_text or "").strip() or "(текст доклада недоступен)"
+        seed = None
+        if not notify_session_is_open(*key):
+            seed = build_notify_reply_seed(
+                report, user_text, extract_task_markers(report),
+            )
+        prompt = user_text if seed is None else seed
+        if meta_block and seed is None:
+            prompt = meta_block + "\n\n---\n\nСообщение пользователя:\n" + user_text
+        await run_notify_lane_turn(
+            chat, thread_id, key, prompt, allow_silent=False,
+        )
+        return
 
     # Живой процесс (/persistent on) — своя ветка, без topic-lock:
     # сообщение, пришедшее пока агент работает, дописывается ему на лету.
@@ -447,6 +548,68 @@ async def _process_prompt(
         return
 
     await _process_prompt_locked(chat, thread_id, key, user_text, meta_block)
+
+
+def _is_notify_report_ctx(ctx: dict | None) -> bool:
+    if not ctx:
+        return False
+    if ctx.get("lane") == "notify":
+        return True
+    return ctx.get("source") == "queuewarden"
+
+
+async def run_notify_lane_turn(
+    chat, thread_id: int, key: tuple[int, int], prompt_text: str,
+    allow_silent: bool = False,
+) -> None:
+    """Разовый CLI-процесс на notify_session_id — параллельно диалоговому worker.
+
+    ``spawn_id`` кладёт процесс в ``spawn_procs``, не в ``active_procs[key]``,
+    поэтому диалог не трогаем.
+    """
+    session_id, cwd, engine_name, opened_new = ensure_notify_session(*key)
+    engine = get_engine_by_name(engine_name)
+    model = get_model(*key)
+    spawn_id = f"n{secrets.token_hex(2)}"
+
+    prompt_parts: list[str] = []
+    if opened_new:
+        try:
+            await send_to_topic(
+                chat, thread_id,
+                f"🆕 Сеанс уведомлений ({engine_name}).",
+            )
+        except Exception:
+            logger.exception("failed to send notify-session notice key=%s", key)
+    prompt_parts.append("---\n\n" + prompt_text)
+    prompt = "\n\n".join(prompt_parts)
+
+    journal = ProgressJournal(chat, thread_id, quiet=allow_silent)
+    await journal.start()
+    sid_after = session_id
+    try:
+        with engine_model_scope(engine.name, model):
+            ok, final_text, sid_after = await call_llm_stream(
+                engine, session_id, prompt, key, cwd, journal.append,
+                spawn_id=spawn_id,
+            )
+    except Exception as exc:
+        logger.exception("notify lane crashed: key=%s engine=%s", key, engine.name)
+        ok, final_text = False, f"Внутренняя ошибка: {exc}"
+
+    if sid_after and sid_after != session_id:
+        update_notify_session_id(key[0], key[1], engine_name, sid_after)
+    touch_notify_session(*key)
+
+    await _finish_turn_reply(
+        chat, thread_id, journal, ok, final_text, engine_name, key,
+        allow_silent=allow_silent,
+        reply_meta={"lane": "notify", "source": "queuewarden"},
+    )
+    logger.info(
+        "notify turn done: key=%s engine=%s ok=%s session=%s",
+        key, engine_name, ok, sid_after or session_id,
+    )
 
 
 async def _process_prompt_locked(
@@ -525,11 +688,13 @@ async def _process_prompt_locked(
         model = get_model(*key)
 
         if opened_new:
+            _queue_dialog_seed(key)
             try:
                 await send_to_topic(
                     chat, thread_id,
-                    f"🆕 Новый сеанс ({engine_name}). Контекст прошлых разговоров "
-                    "не загружен — попроси поднять историю, если нужно.",
+                    f"🆕 Новый сеанс ({engine_name}). Подставлю последние реплики "
+                    "диалога; полную историю при необходимости подними через "
+                    "manager_inbox.",
                 )
             except Exception:
                 logger.exception("failed to send new-session notice key=%s", key)
@@ -545,6 +710,9 @@ async def _process_prompt_locked(
                             engine_name, key, len(pending_summary))
 
         prompt_parts: list[str] = []  # [SYSTEM:]-блок уходит через системный канал движка
+        seed = _take_dialog_seed(key)
+        if seed:
+            prompt_parts.append(seed)
         if pending_summary:
             prompt_parts.append("[Контекст:]\n" + pending_summary)
         instructions_note = pop_instructions_note(*key)

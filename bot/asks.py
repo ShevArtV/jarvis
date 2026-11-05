@@ -164,6 +164,13 @@ async def on_ask_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await query.answer("Вопрос уже закрыт", show_alert=False)
         return
 
+    try:
+        from bot.session_lanes import notify_session_is_open, touch_notify_session
+        if notify_session_is_open(ask["chat_id"], ask["thread_id"]):
+            touch_notify_session(ask["chat_id"], ask["thread_id"])
+    except Exception:
+        logger.debug("ask #%s: notify touch failed", ask_id, exc_info=True)
+
     logger.info("ask #%s answered by button: %r", ask_id, answer)
     try:
         await query.answer(f"Принято: {answer}"[:200])
