@@ -454,17 +454,16 @@ def _cursor_store_text_chars(db_path: Path) -> int | None:
                 continue
             if isinstance(data, memoryview):
                 data = data.tobytes()
+            # Бинарные узлы дерева ACP — не JSON; len(data) раздувал оценку ×10+.
             if isinstance(data, bytes):
                 try:
-                    obj = json.loads(data.decode("utf-8", errors="replace"))
+                    obj = json.loads(data.decode("utf-8"))
                 except (UnicodeDecodeError, json.JSONDecodeError):
-                    total += len(data)
                     continue
             elif isinstance(data, str):
                 try:
                     obj = json.loads(data)
                 except json.JSONDecodeError:
-                    total += len(data)
                     continue
             else:
                 continue

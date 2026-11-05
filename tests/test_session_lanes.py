@@ -274,6 +274,33 @@ class KimiCursorUsageTest(unittest.TestCase):
         # 100 << 120k порога
         self.assertIs(over, False)
 
+    def test_cursor_store_skips_binary_blobs(self) -> None:
+        """Бинарные узлы дерева ACP не должны входить в оценку токенов."""
+        import json
+        import sqlite3
+
+        from engines.session_usage import _cursor_store_text_chars
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db_path = Path(tmp.name) / "store.db"
+        con = sqlite3.connect(db_path)
+        con.execute("CREATE TABLE blobs (id TEXT PRIMARY KEY, data BLOB)")
+        text_blob = json.dumps({
+            "role": "assistant",
+            "content": "hello world from json",
+        }).encode()
+        binary_blob = bytes(range(256)) * 1000  # ~256k, как узлы дерева
+        con.execute("INSERT INTO blobs(id, data) VALUES (?, ?)", ("json", text_blob))
+        con.execute("INSERT INTO blobs(id, data) VALUES (?, ?)", ("bin", binary_blob))
+        con.commit()
+        con.close()
+
+        chars = _cursor_store_text_chars(db_path)
+        self.assertEqual(chars, len("hello world from json"))
+        # Если бы считали binary — было бы ~256k+
+        self.assertLess(chars, 100)
+
 
 if __name__ == "__main__":
     unittest.main()
