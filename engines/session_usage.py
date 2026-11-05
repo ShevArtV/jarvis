@@ -58,6 +58,10 @@ def inspect_session_usage(engine: str, session_id: str, cwd: str | None) -> Sess
         return _inspect_codex(session_id)
     if engine == "opencode":
         return _inspect_opencode(session_id)
+    if engine == "kimi":
+        return _inspect_kimi(session_id, cwd)
+    if engine == "cursor":
+        return _inspect_cursor(session_id, cwd)
     return SessionUsage(engine=engine, session_id=session_id, source="unknown")
 
 
@@ -391,6 +395,171 @@ def _inspect_opencode(session_id: str) -> SessionUsage:
             conn.close()
         except Exception:
             logger.debug("cannot close sqlite connection", exc_info=True)
+    return usage
+
+
+def _inspect_kimi(session_id: str, cwd: str | None) -> SessionUsage:
+    """Размер контекста — последнее ``token_counting.measured`` в wire.jsonl."""
+    from engines.kimi_engine import _session_dir
+
+    usage = SessionUsage(engine="kimi", session_id=session_id, source="kimi-wire")
+    if session_id.startswith("placeholder-"):
+        usage.note = "placeholder session"
+        return usage
+    effective_cwd = cwd or os.environ.get("CLAUDE_CWD", str(Path.home()))
+    session_dir = _session_dir(session_id, effective_cwd)
+    if session_dir is None:
+        usage.note = "kimi session dir not found"
+        return usage
+    path = session_dir / "agents" / "main" / "wire.jsonl"
+    usage.path = str(path)
+    if not path.is_file():
+        usage.note = "wire.jsonl not found"
+        return usage
+    try:
+        usage.bytes_size = path.stat().st_size
+        last_tokens: int | None = None
+        with path.open("r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if "token_counting.measured" not in line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if row.get("type") != "token_counting.measured":
+                    continue
+                tokens = _as_int(row.get("tokens"))
+                if tokens is not None:
+                    last_tokens = tokens
+        if last_tokens is None:
+            usage.note = "no token_counting.measured in wire.jsonl"
+            return usage
+        usage.context_tokens = last_tokens
+    except OSError as exc:
+        usage.note = f"read failed: {exc}"
+    return usage
+
+
+def _cursor_store_text_chars(db_path: Path) -> int | None:
+    """Сумма символов role/content в blobs store.db (ACP и print — одна схема)."""
+    try:
+        conn = sqlite3.connect(str(db_path))
+    except sqlite3.Error:
+        return None
+    total = 0
+    try:
+        for (data,) in conn.execute("SELECT data FROM blobs"):
+            if data is None:
+                continue
+            if isinstance(data, memoryview):
+                data = data.tobytes()
+            # Бинарные узлы дерева ACP — не JSON; len(data) раздувал оценку ×10+.
+            if isinstance(data, bytes):
+                try:
+                    obj = json.loads(data.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    continue
+            elif isinstance(data, str):
+                try:
+                    obj = json.loads(data)
+                except json.JSONDecodeError:
+                    continue
+            else:
+                continue
+            if not isinstance(obj, dict):
+                continue
+            content = obj.get("content")
+            if isinstance(content, str):
+                total += len(content)
+            elif isinstance(content, list):
+                for part in content:
+                    if isinstance(part, dict) and isinstance(part.get("text"), str):
+                        total += len(part["text"])
+                    elif isinstance(part, str):
+                        total += len(part)
+    except sqlite3.Error:
+        return None
+    finally:
+        conn.close()
+    return total
+
+
+def _estimate_cursor_from_messages_log(session_id: str) -> tuple[int | None, str | None]:
+    """Fallback: сумма символов ходов топика с session_started_at / 4."""
+    try:
+        from bot.db import DB_PATH, connect
+    except Exception:
+        return None, None
+    try:
+        conn = connect(DB_PATH)
+    except Exception:
+        return None, None
+    try:
+        row = conn.execute(
+            "SELECT chat_id, thread_id, session_started_at FROM sessions "
+            "WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+        if row is None or not row[2]:
+            return None, "topic row / session_started_at not found"
+        chat_id, thread_id, started = row
+        total = conn.execute(
+            "SELECT COALESCE(SUM(LENGTH(text)), 0) FROM messages_log "
+            "WHERE chat_id = ? AND thread_id = ? AND ts >= ? "
+            "AND kind IN ('user_text', 'bot_reply', 'ask_user', "
+            "'queuewarden_inject', 'manager_inject')",
+            (chat_id, thread_id, started),
+        ).fetchone()[0]
+        return max(1, int(total) // 4), None
+    except Exception as exc:
+        return None, str(exc)
+    finally:
+        conn.close()
+
+
+def _inspect_cursor(session_id: str, cwd: str | None) -> SessionUsage:
+    """ACP ``session/update`` usage не отдаёт; оценка по тексту store.db или журналу."""
+    usage = SessionUsage(engine="cursor", session_id=session_id, source="cursor-estimate")
+    if session_id.startswith("placeholder-"):
+        usage.note = "placeholder session"
+        return usage
+
+    candidates: list[Path] = [
+        Path.home() / ".cursor" / "acp-sessions" / session_id / "store.db",
+    ]
+    if cwd:
+        from engines.cursor_engine import _chat_dir
+        candidates.append(_chat_dir(session_id, cwd) / "store.db")
+
+    for db_path in candidates:
+        if not db_path.is_file():
+            continue
+        chars = _cursor_store_text_chars(db_path)
+        if chars is None:
+            continue
+        usage.path = str(db_path)
+        try:
+            usage.bytes_size = db_path.stat().st_size
+        except OSError:
+            pass
+        usage.estimated_tokens = max(1, chars // 4)
+        usage.source = (
+            "cursor-acp-estimate" if "acp-sessions" in str(db_path) else "cursor-chats-estimate"
+        )
+        usage.note = (
+            "cursor store.db has no token counter; estimated from message text /4 "
+            "(ACP session/update also has no usage)"
+        )
+        return usage
+
+    est, err = _estimate_cursor_from_messages_log(session_id)
+    if est is not None:
+        usage.estimated_tokens = est
+        usage.source = "cursor-messages-log-estimate"
+        usage.note = "fallback: messages_log chars since session_started_at /4"
+        return usage
+    usage.note = err or "cursor session store not found"
     return usage
 
 

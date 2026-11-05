@@ -75,6 +75,7 @@ from bot.workers import (
     close_requests_worker,
     health_worker,
     jobs_worker,
+    notify_idle_reaper,
     persistent_reaper,
 )
 from config import ALLOWED_USER_IDS, TELEGRAM_TOKEN
@@ -158,6 +159,10 @@ async def _post_init(application: Application) -> None:
     # /persistent: убивает простаивающие живые процессы claude.
     persistent_reaper_task = asyncio.create_task(persistent_reaper(application))
     application.bot_data["persistent_reaper_task"] = persistent_reaper_task
+
+    # Полоса notify (QW): закрыть сеанс уведомлений после короткого простоя.
+    notify_reaper_task = asyncio.create_task(notify_idle_reaper(application))
+    application.bot_data["notify_idle_reaper_task"] = notify_reaper_task
 
     # Закрытия сеансов, запрошенные Менеджером через manager_close_session:
     # MCP помечает строку в sessions, добивает процессы топика бот.

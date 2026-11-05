@@ -30,8 +30,10 @@ from bot.queues import (
     finish_agent_trigger,
     finish_job,
 )
+from bot.asks import get_pending_ask
+from bot.session_lanes import close_notify_session
 from bot.sessions import clear_close_request, close_session, get_session, touch_session
-from bot.settings import CLAUDE_CWD
+from bot.settings import CLAUDE_CWD, NOTIFY_IDLE_MINUTES
 from bot.timeutil import utcnow
 from bot.topics import (
     BACKGROUND_MAX_HOURS,
@@ -40,6 +42,7 @@ from bot.topics import (
     active_procs,
     persistent_workers,
     resolve_job_notice_target,
+    spawn_procs,
 )
 from engines.background_work import has_background_work
 from engines.process_control import terminate_process_tree
@@ -135,6 +138,50 @@ async def persistent_reaper(app: Application) -> None:
             raise
         except Exception:
             logger.exception("persistent_reaper loop crashed; continuing")
+
+
+async def notify_idle_reaper(app: Application) -> None:
+    """Закрывает полосу notify после NOTIFY_IDLE_MINUTES без активности.
+
+    Диалог и его persistent-worker не трогает. Пока жив ask_user или разовый
+    notify-процесс (spawn_id с префиксом ``n``) — не закрывает.
+    """
+    if NOTIFY_IDLE_MINUTES <= 0:
+        logger.info("notify_idle_reaper: disabled (JARVIS_NOTIFY_IDLE_MINUTES<=0)")
+        return
+    logger.info("notify_idle_reaper started (idle=%dmin)", NOTIFY_IDLE_MINUTES)
+    while True:
+        try:
+            await asyncio.sleep(30.0)
+            with _db() as conn:
+                rows = conn.execute(
+                    "SELECT chat_id, thread_id, notify_last_activity_at "
+                    "FROM sessions WHERE notify_last_activity_at IS NOT NULL"
+                ).fetchall()
+            now = utcnow()
+            for chat_id, thread_id, last_at in rows:
+                key = (chat_id, thread_id)
+                try:
+                    last = datetime.fromisoformat(last_at)
+                except (TypeError, ValueError):
+                    continue
+                if now - last <= timedelta(minutes=NOTIFY_IDLE_MINUTES):
+                    continue
+                if get_pending_ask(*key) is not None:
+                    continue
+                if any(
+                    skey[0] == chat_id and skey[1] == thread_id
+                    and isinstance(skey[2], str) and skey[2].startswith("n")
+                    for skey in list(spawn_procs)
+                ):
+                    continue
+                if close_notify_session(*key):
+                    logger.info("notify_idle_reaper: closed notify session key=%s", key)
+        except asyncio.CancelledError:
+            logger.info("notify_idle_reaper cancelled")
+            raise
+        except Exception:
+            logger.exception("notify_idle_reaper loop crashed; continuing")
 
 
 async def _apply_close_request(app: Application, key: tuple[int, int]) -> None:

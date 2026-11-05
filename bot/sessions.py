@@ -251,8 +251,8 @@ def ensure_active_session(
     """
     with _db() as conn:
         row = conn.execute(
-            "SELECT last_activity_at, cwd, session_started_at FROM sessions "
-            "WHERE chat_id = ? AND thread_id = ?",
+            "SELECT last_activity_at, cwd, session_started_at, rotate_pending "
+            "FROM sessions WHERE chat_id = ? AND thread_id = ?",
             (chat_id, thread_id),
         ).fetchone()
 
@@ -266,20 +266,31 @@ def ensure_active_session(
         return session_id, cwd, engine_name, True
 
     stale = _session_is_stale(row[0])
-    if not stale and _instructions_changed(row[1], row[2]):
+    rotate_pending = bool(row[3])
+    if not stale and not rotate_pending and _instructions_changed(row[1], row[2]):
         mark_session_start(chat_id, thread_id)
         _instructions_note_pending.add((chat_id, thread_id))
         logger.info("instructions changed: session kept, reread note queued key=%s",
                     (chat_id, thread_id))
 
-    if stale:
+    if stale or rotate_pending:
         # Делегированные задачи (jobs) переоткрытию сеанса не мешают: job несёт
         # полный текст задачи и не зависит от контекста прошлого сеанса, а
         # Менеджер поднимает своё состояние через manager_inbox.
+        # rotate_pending: контекст перерос порог, закрытие отложили до границы хода.
         session_id, cwd, engine_name = reset_session(chat_id, thread_id)
         touch_session(chat_id, thread_id)
         mark_session_start(chat_id, thread_id)
-        reason = "closed" if row[0] is None else "stale"
+        with _db() as conn:
+            conn.execute(
+                "UPDATE sessions SET rotate_pending = 0 "
+                "WHERE chat_id = ? AND thread_id = ?",
+                (chat_id, thread_id),
+            )
+        if rotate_pending and not stale:
+            reason = "context rotate"
+        else:
+            reason = "closed" if row[0] is None else "stale"
         logger.info("session opened (%s): key=%s session=%s",
                     reason, (chat_id, thread_id), session_id)
         return session_id, cwd, engine_name, True

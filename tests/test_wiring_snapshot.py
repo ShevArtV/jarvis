@@ -32,6 +32,7 @@ import telegram_bot
 # PTB проверяет хендлеры в порядке регистрации, поэтому перестановка
 # unauthorized_handler выше остальных отключила бы бота целиком.
 EXPECTED_HANDLERS = [
+    (-2, 'TypeHandler', '-', 'skip_support_topic'),
     (-1, 'TypeHandler', '-', 'log_incoming_update'),
     (0, 'CommandHandler', 'start', 'cmd_start'),
     (0, 'CommandHandler', 'new', 'cmd_reset'),
@@ -48,6 +49,7 @@ EXPECTED_HANDLERS = [
     (0, 'CommandHandler', 'bind', 'cmd_bind'),
     (0, 'CommandHandler', 'unbind', 'cmd_unbind'),
     (0, 'CommandHandler', 'where', 'cmd_where'),
+    (0, 'CommandHandler', 'board', 'cmd_board'),
     (0, 'MessageHandler', '-', 'handle_photo'),
     (0, 'MessageHandler', '-', 'handle_document'),
     (0, 'MessageHandler', '-', 'handle_text'),
@@ -72,9 +74,11 @@ EXPECTED_HANDLERS = [
 # bot.reminders, остальное — тесты и bot.app.
 EXPECTED_LAYOUT = {
     "bot.settings": [
-        "CLAUDE_CWD", "CONTEXT_WARN_TOKENS", "DEFAULT_ENGINE", "DEFAULT_ENGINE_NAME",
+        "CLAUDE_CWD", "CONTEXT_WARN_TOKENS", "CONTEXT_ROTATE_TOKENS",
+        "DEFAULT_ENGINE", "DEFAULT_ENGINE_NAME",
         "DONE_CONFIRM_ON_DONE", "FILE_MARKER_RE", "MEDIA_DIR", "MSG_LIMIT",
-        "SESSION_IDLE_MINUTES", "TG_FILE_LIMIT_MB", "TG_HARD_LIMIT",
+        "NOTIFY_IDLE_MINUTES", "SESSION_IDLE_MINUTES", "SESSION_SEED_MESSAGES",
+        "TG_FILE_LIMIT_MB", "TG_HARD_LIMIT",
         "DB_PATH", "int_env", "bool_env",
     ],
     "bot.db": ["DB_PATH", "init_db", "log_message", "_db"],
@@ -110,9 +114,13 @@ EXPECTED_LAYOUT = {
     "plugins.reminders.schedule": ["parse_reminder_schedule", "compute_next_fire"],
     "bot.jobs": ["_run_manager_job", "_run_spawn", "_process_agent_trigger"],
     "bot.workers": [
-        "cleanup_worker", "persistent_reaper",
+        "cleanup_worker", "persistent_reaper", "notify_idle_reaper",
         "close_requests_worker", "health_worker", "jobs_worker",
         "agent_triggers_worker", "_apply_close_request",
+    ],
+    "bot.session_lanes": [
+        "get_rotate_pending", "set_rotate_pending", "plan_dialog_rotate",
+        "build_dialog_seed", "ensure_notify_session", "ROTATE_ENGINES",
     ],
     "plugins.queuewarden.notifications": ["queuewarden_notifications_worker"],
     "plugins.reminders.worker": ["reminders_worker"],

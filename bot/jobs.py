@@ -481,9 +481,17 @@ async def _process_agent_trigger(app: Application, trigger: dict) -> tuple[bool,
     from bot.handlers.messages import (
         _handle_persistent_message,
         _process_prompt_locked,
+        run_notify_lane_turn,
     )
 
     try:
+        # QueueWarden — отдельный разовый сеанс (spawn_id), параллельно диалогу.
+        # Нельзя слать inject в persistent-worker: убил бы фон или ждал 5–10 мин.
+        if source == "queuewarden":
+            await run_notify_lane_turn(
+                chat, thread_id, key, text, allow_silent=allow_silent,
+            )
+            return True, None
         _sid, _cwd, engine_name = get_session(*key)
         if get_persistent_for_engine(*key, engine_name):
             await _handle_persistent_message(

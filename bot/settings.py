@@ -50,6 +50,14 @@ TG_FILE_LIMIT_MB = 50      # Telegram Bot API лимит на sendDocument
 # (cwd, движок, модель) переживает закрытие, контекст сессии — нет.
 SESSION_IDLE_MINUTES = int_env("JARVIS_SESSION_IDLE_MINUTES", 180)
 CONTEXT_WARN_TOKENS = int_env("JARVIS_CONTEXT_WARN_TOKENS", 150_000)
+# Ротация диалогового сеанса по размеру контекста. 0 — выкл. Дефолт 120k:
+# у Тимлида первый ход уже ~40k (system+tools), 100k менял бы сеанс слишком часто.
+CONTEXT_ROTATE_TOKENS = int_env("JARVIS_CONTEXT_ROTATE_TOKENS", 120_000)
+# Сколько последних диалоговых реплик подставить в первый prompt нового сеанса
+# (без LLM-сводки). Уведомления QW в seed не входят.
+SESSION_SEED_MESSAGES = int_env("JARVIS_SESSION_SEED_MESSAGES", 8)
+# Простой отдельного сеанса уведомлений QueueWarden (разовый CLI-процесс).
+NOTIFY_IDLE_MINUTES = int_env("JARVIS_NOTIFY_IDLE_MINUTES", 8)
 DONE_CONFIRM_ON_DONE = bool_env(
     "JARVIS_DONE_CONFIRM_ON_DONE",
     bool_env("JARVIS_AUTOCLOSE_ON_DONE", True),
