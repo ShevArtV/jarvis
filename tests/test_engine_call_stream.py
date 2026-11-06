@@ -189,17 +189,24 @@ class ClaudeCallStreamTest(_Base):
         self.assertEqual(h.cmd[-2:], ["--resume", "sid-1"])
         self.assertEqual(self.cleared, ["sid-1"])
 
-    def test_spawn_never_resumes(self) -> None:
+    def test_spawn_resumes_existing_session(self) -> None:
         h = _Harness(claude_engine, [
             {"type": "assistant", "message": {"model": "m2", "content": [{"type": "text", "text": "x"}]}},
             {"type": "result", "result": "ok"},
         ])
         res = h.run(self.engine(exists=True), "sid-1", self.cwd, spawn_id="s1")
         self.assertEqual(res, (True, "ok", "sid-1", "m2"))
-        self.assertEqual(h.cmd[-2:], ["--session-id", "sid-1"])
-        self.assertEqual(self.cleared, [])
+        self.assertEqual(h.cmd[-2:], ["--resume", "sid-1"])
+        self.assertEqual(self.cleared, ["sid-1"])
         self.assertEqual(h.registered[0][1], {(1, 2, "s1"): h.proc})
         self.assert_unregistered(h)
+
+    def test_spawn_fresh_id_is_new_session(self) -> None:
+        h = _Harness(claude_engine, [{"type": "result", "result": "ok"}])
+        res = h.run(self.engine(exists=False), "sid-new", self.cwd, spawn_id="s1")
+        self.assertEqual(res, (True, "ok", "sid-new", None))
+        self.assertEqual(h.cmd[-2:], ["--session-id", "sid-new"])
+        self.assertEqual(self.cleared, [])
 
     def test_error_rc(self) -> None:
         h = _Harness(claude_engine, [], rc=1, stderr="boom")
@@ -290,16 +297,25 @@ class CodexCallStreamTest(_Base):
         self.assertIn("--model", h.cmd)
         self.assertFalse(h.stdin.startswith("[SYSTEM: x]"))
 
-    def test_spawn_keeps_session_id(self) -> None:
+    def test_spawn_resumes_existing_session(self) -> None:
         h = _Harness(codex_engine, [
-            {"type": "thread.started", "thread_id": "th-new"},
             {"type": "item.completed", "item": {"type": "agent_message", "text": "ок"}},
         ])
         res = h.run(self.engine(exists=True), "th-old", self.cwd, spawn_id="s1")
         self.assertEqual(res, (True, "ок", "th-old", None))
+        self.assertEqual(h.cmd[:3], [codex_engine.CODEX_BIN, "exec", "resume"])
+        self.assertNotIn("--ephemeral", h.cmd)
+        self.assert_unregistered(h)
+
+    def test_spawn_fresh_id_is_ephemeral(self) -> None:
+        h = _Harness(codex_engine, [
+            {"type": "thread.started", "thread_id": "th-new"},
+            {"type": "item.completed", "item": {"type": "agent_message", "text": "ок"}},
+        ])
+        res = h.run(self.engine(exists=False), "placeholder-1", self.cwd, spawn_id="s1")
+        self.assertEqual(res, (True, "ок", "placeholder-1", None))
         self.assertIn("--ephemeral", h.cmd)
         self.assertNotIn("resume", h.cmd)
-        self.assert_unregistered(h)
 
     def test_stream_errors(self) -> None:
         h = _Harness(codex_engine, [
@@ -400,14 +416,22 @@ class OpenCodeCallStreamTest(_Base):
         ])
         self.assertEqual(h.run(self.engine(), "ses_old", self.cwd), (True, "ab", "ses_old", None))
 
-    def test_spawn(self) -> None:
+    def test_spawn_resumes_existing_session(self) -> None:
         h = _Harness(opencode_engine, [
-            {"type": "text", "sessionID": "ses_new", "text": "ок"},
+            {"type": "text", "sessionID": "ses_old", "text": "ок"},
         ])
         res = h.run(self.engine(), "ses_old", self.cwd, spawn_id="s1")
         self.assertEqual(res, (True, "ок", "ses_old", None))
-        self.assertNotIn("--session", h.cmd)
+        self.assertEqual(h.cmd[-2:], ["--session", "ses_old"])
         self.assert_unregistered(h)
+
+    def test_spawn_fresh_id_returns_real_session(self) -> None:
+        h = _Harness(opencode_engine, [
+            {"type": "text", "sessionID": "ses_new", "text": "ок"},
+        ])
+        res = h.run(self.engine(), "placeholder-1", self.cwd, spawn_id="s1")
+        self.assertEqual(res, (True, "ок", "ses_new", None))
+        self.assertNotIn("--session", h.cmd)
 
     def test_errors(self) -> None:
         h = _Harness(opencode_engine, [
@@ -489,12 +513,18 @@ class CursorCallStreamTest(_Base):
         self.assertEqual(h.cmd[-4:], ["--resume", "s1", "--model", "gpt-5.2"])
         self.assertTrue(h.stdin.startswith("[SYSTEM NOTE FOR CURSOR]"))
 
-    def test_spawn_is_always_new(self) -> None:
+    def test_spawn_resumes_existing_session(self) -> None:
         h = _Harness(cursor_engine, [{"type": "result", "result": "ок"}])
         with patch.object(cursor_engine.CursorEngine, "session_exists", lambda *a: True):
             h.run(self.engine(), "s2", self.cwd, spawn_id="sp", system_prefix="[SYSTEM: x]")
-        self.assertTrue(h.stdin.startswith("[SYSTEM: x]"))
+        self.assertTrue(h.stdin.startswith("[SYSTEM NOTE FOR CURSOR]"))
         self.assert_unregistered(h)
+
+    def test_spawn_fresh_id_includes_system_prefix(self) -> None:
+        h = _Harness(cursor_engine, [{"type": "result", "result": "ок"}])
+        with patch.object(cursor_engine.CursorEngine, "session_exists", lambda *a: False):
+            h.run(self.engine(), "s2", self.cwd, spawn_id="sp", system_prefix="[SYSTEM: x]")
+        self.assertTrue(h.stdin.startswith("[SYSTEM: x]"))
 
     def test_errors(self) -> None:
         h = _Harness(cursor_engine, [], rc=1, stderr="Cannot use this model: x")

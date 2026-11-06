@@ -240,8 +240,7 @@ class KimiEngine(BaseEngine):
     ) -> tuple[bool, str, str | None, str | None]:
         effective_cwd = resolve_cwd(cwd)
         resume_mode = (
-            spawn_id is None
-            and not is_placeholder(session_id)
+            not is_placeholder(session_id)
             and self.session_exists(session_id, effective_cwd)
         )
         full_prompt = _kimi_prompt(prompt, system_prefix, resume_mode)

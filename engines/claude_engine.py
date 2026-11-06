@@ -145,11 +145,11 @@ class ClaudeEngine(BaseEngine):
                 except OSError:
                     logger.warning("cannot remove stale session lock %s", p, exc_info=True)
 
-    def _session_flags(self, session_id: str, cwd: str, is_spawn: bool) -> tuple[bool, list[str]]:
-        """(resume_mode, флаги сессии). Spawn — всегда новая сессия; перед
-        --resume снимаем stale pidfile."""
-        if is_spawn:
-            return False, ["--session-id", session_id]
+    def _session_flags(self, session_id: str, cwd: str) -> tuple[bool, list[str]]:
+        """(resume_mode, флаги сессии). Транскрипт уже есть — ``--resume``
+        (перед этим снимаем stale pidfile), иначе ``--session-id``.
+        Spawn с новым id транскрипта не имеет и остаётся новой сессией;
+        повтор полосы notify попадает в уже записанный jsonl и резюмируется."""
         if self.session_exists(session_id, cwd):
             self.clear_stale_session_pidfile(session_id)
             return True, ["--resume", session_id]
@@ -174,9 +174,7 @@ class ClaudeEngine(BaseEngine):
         # cwd берётся из аргумента (если None — caller должен подставить default).
         effective_cwd = resolve_cwd(cwd)
 
-        resume_mode, session_flags = self._session_flags(
-            session_id, effective_cwd, spawn_id is not None,
-        )
+        resume_mode, session_flags = self._session_flags(session_id, effective_cwd)
         model = CURRENT_MODEL.get() or os.environ.get("CLAUDE_MODEL")
         cmd = _claude_command(session_flags, model, system_prefix, mcp_playwright, mcp_topic_role)
 

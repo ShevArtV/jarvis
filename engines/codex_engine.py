@@ -224,9 +224,9 @@ def _codex_command(
     mcp_flags, mcp_cleanup_paths = _mcp_config_overrides(mcp_playwright, mcp_topic_role)
     global_flags, command_mcp_flags = _split_codex_global_flags(mcp_flags)
     shared_flags.extend(command_mcp_flags)
-    if is_spawn:
-        # Одноразовая параллельная сессия: не хотим, чтобы codex её сохранял
-        # и потом мешался в списке recent-sessions.
+    if is_spawn and not resume_mode:
+        # Свежий spawn (задача) не сохраняем: иначе он мешается в recent-sessions.
+        # Resume полосы notify сессию уже имеет — --ephemeral её бы выкинул.
         shared_flags.append("--ephemeral")
 
     model_flags = ["--model", model] if model else []
@@ -407,8 +407,7 @@ class CodexEngine(BaseEngine):
 
         # Решаем: новая сессия или resume.
         resume_mode = (
-            not is_spawn
-            and not is_placeholder(session_id)
+            not is_placeholder(session_id)
             and self.session_exists(session_id, effective_cwd)
         )
         full_prompt = _codex_prompt(prompt, system_prefix, resume_mode)
