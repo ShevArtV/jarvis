@@ -23,6 +23,7 @@ from bot.topic_account import get_account
 from bot.topics import active_procs, resolve_topic_role, spawn_procs
 from engines import Engine, ensure_engine_tools
 from engines.accounts import engine_account_scope
+from engines.process_control import SPAWN_ENV
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +31,7 @@ def build_system_prefix(
     effective_cwd: str,
     mcp_playwright: bool = False,
     key: tuple[int, int] | None = None,
+    digest: bool = False,
 ) -> str:
     """Постоянный [SYSTEM:]-блок для движка.
 
@@ -68,7 +70,13 @@ def build_system_prefix(
             "Если нужно работать с браузером, используй Playwright MCP browser_* tools, "
             "когда они доступны; если MCP недоступен, скажи об этом и выбери рабочий fallback."
         )
-    if key is not None:
+    if digest:
+        lines.append(
+            "Это фоновый дайджест, не диалог. Оператор ход не видит и на него не "
+            "ответит. ask_user не вызывай: инструмент сразу вернёт отказ. Напиши "
+            "дайджест и закончи ход."
+        )
+    elif key is not None:
         lines.append(
             "Пользователь НЕ видит этот ход в реальном времени и не может тебя "
             "перебить — единственный способ что-то у него спросить и дождаться "
@@ -97,6 +105,7 @@ async def call_llm_stream(
     cwd: str | None,
     on_intermediate,
     spawn_id: str | None = None,
+    digest: bool = False,
 ) -> tuple[bool, str, str | None]:
     """Обёртка над engine.call_stream. Обновляет session_id в БД, если движок
     вернул изменённый id (актуально для codex/opencode — они сами назначают
@@ -118,22 +127,29 @@ async def call_llm_stream(
     mcp_playwright = get_mcp_playwright(*key)
     mcp_topic_role = resolve_topic_role(key)
     effective_cwd = cwd or CLAUDE_CWD
-    system_prefix = build_system_prefix(effective_cwd, mcp_playwright, key=key)
+    system_prefix = build_system_prefix(
+        effective_cwd, mcp_playwright, key=key, digest=digest,
+    )
 
-    with engine_account_scope(engine.name, get_account(*key)):
-        ok, final_text, sid_after, actual_model = await engine.call_stream(
-            session_id=session_id,
-            prompt=prompt,
-            key=key,
-            cwd=cwd,
-            on_intermediate=on_intermediate,
-            active_procs=active_procs,
-            spawn_procs=spawn_procs,
-            spawn_id=spawn_id,
-            system_prefix=system_prefix,
-            mcp_playwright=mcp_playwright,
-            mcp_topic_role=mcp_topic_role,
-        )
+    spawn_env = SPAWN_ENV.set({"JARVIS_DIGEST_TURN": "1"}) if digest else None
+    try:
+        with engine_account_scope(engine.name, get_account(*key)):
+            ok, final_text, sid_after, actual_model = await engine.call_stream(
+                session_id=session_id,
+                prompt=prompt,
+                key=key,
+                cwd=cwd,
+                on_intermediate=on_intermediate,
+                active_procs=active_procs,
+                spawn_procs=spawn_procs,
+                spawn_id=spawn_id,
+                system_prefix=system_prefix,
+                mcp_playwright=mcp_playwright,
+                mcp_topic_role=mcp_topic_role,
+            )
+    finally:
+        if spawn_env is not None:
+            SPAWN_ENV.reset(spawn_env)
     # Recovery: иногда opencode/codex на resume могут вернуть rc=0, но пустой
     # текст. Для постоянной сессии делаем один автоповтор в новой сессии.
     if (
@@ -233,11 +249,15 @@ def _build_reply_context_prefix(
             extras = {k: v for k, v in ctx.items() if k not in ("type", "_created_at")}
             if extras:
                 parts.append(f"метаданные: {json.dumps(extras, ensure_ascii=False)}")
+    digest_reply = bool(
+        ctx and (ctx.get("lane") == "notify" or ctx.get("source") == "queuewarden")
+    )
+    text_limit = 8000 if digest_reply else _REPLY_TEXT_LIMIT
     if quote_text and quote_text.strip():
         parts.append(f"цитата: {_clip_reply_text(quote_text)}")
     if replied_text and replied_text.strip():
         # Не дублируем, если цитата уже покрывает весь видимый фрагмент.
-        clipped = _clip_reply_text(replied_text)
+        clipped = _clip_reply_text(replied_text, text_limit)
         if not quote_text or clipped != _clip_reply_text(quote_text):
             parts.append(f"текст: {clipped}")
     return "[Пользователь отвечает на:] " + "; ".join(parts)

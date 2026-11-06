@@ -14,7 +14,7 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 
@@ -127,19 +127,16 @@ class ParseTest(unittest.TestCase):
                      "projectId: 7"):
             self.assertIn(part, text)
 
-    def test_batch_prompt_numbers_events_and_allows_silence(self) -> None:
+    def test_batch_prompt_is_a_digest(self) -> None:
         prompt = qw.build_batch_prompt(["событие А", "событие Б"])
         self.assertIn("2 шт.", prompt)
         self.assertLess(prompt.index("--- 1 ---\nсобытие А"),
                         prompt.index("--- 2 ---\nсобытие Б"))
-        for part in ("queuewarden_task_get", "не подтверждай gate", "ask_user",
-                     "AGENTS.md твоего рабочего каталога", "`**[<установка>] <номер задачи>",
-                     "6) новая задача (task.created) — докладывай ВСЕГДА",
-                     "участие уже проверено", "<тег>",
-                     "докладывай только одним сообщением с human gate на плане",
-                     "pending gate на плане нет", "План → В работе без pending approval"):
+        for part in ("дайджест", "ask_user не вызывай", "[[SILENT]] не пиши",
+                     "queuewarden_task_get", "не подтверждай gate",
+                     "Роль оператора:", "[[FILE:"):
             self.assertIn(part, prompt)
-        self.assertTrue(prompt.endswith("ответь ровно [[SILENT]]"))
+        self.assertNotIn("ответь ровно [[SILENT]]", prompt)
 
     def test_notice_topic_env_override(self) -> None:
         with patch.dict(os.environ, ENV):
@@ -494,6 +491,85 @@ class WorkerDisabledTest(unittest.TestCase):
             "JARVIS_QW_NOTICE_CHAT_ID": None, "JARVIS_QW_NOTICE_THREAD_ID": None,
         })
         self.assertEqual(server.gets, 0)
+
+
+class DigestContractTest(unittest.TestCase):
+    def test_window_is_fifteen_minutes_and_not_silent(self) -> None:
+        from plugins.queuewarden.plugin import PLUGIN
+
+        spec = PLUGIN.trigger_sources["queuewarden"]
+        self.assertFalse(spec.allow_silent)
+        if "JARVIS_QW_COALESCE_SECONDS" not in os.environ:
+            self.assertEqual(spec.coalesce_seconds, 900)
+
+    def test_digest_prefix_forbids_waiting(self) -> None:
+        from bot.llm import build_system_prefix
+
+        text = build_system_prefix("/tmp", key=(-1, 1), digest=True)
+        self.assertIn("ask_user не вызывай", text)
+        self.assertNotIn("Обязательно спрашивай", text)
+
+
+class DigestLaneTest(unittest.IsolatedAsyncioTestCase):
+    async def test_fresh_session_posts_the_digest(self) -> None:
+        from bot.handlers import messages as messages_mod
+
+        engine = MagicMock()
+        engine.name = "claude"
+        engine.new_session_id.return_value = "fresh-id"
+        seen: dict = {}
+
+        async def fake_call(*args, **kwargs):
+            seen["sid"] = args[1]
+            seen["spawn_id"] = kwargs["spawn_id"]
+            seen["digest"] = kwargs["digest"]
+            return True, "  [[SILENT]]\nитог  ", "other-id"
+
+        finish = AsyncMock()
+        journal = AsyncMock()
+        with patch.object(messages_mod, "get_session", return_value=("dialog", "/tmp", "claude")), \
+                patch.object(messages_mod, "get_engine_by_name", return_value=engine), \
+                patch.object(messages_mod, "get_model", return_value=None), \
+                patch.object(messages_mod, "call_llm_stream", side_effect=fake_call), \
+                patch.object(messages_mod, "ProgressJournal", return_value=journal) as journal_cls, \
+                patch.object(messages_mod, "_finish_turn_reply", finish):
+            await messages_mod.run_notify_lane_turn(
+                object(), 7, (-1, 7), "пачка", allow_silent=True,
+            )
+
+        self.assertEqual(seen["sid"], "fresh-id")
+        self.assertTrue(seen["digest"])
+        self.assertTrue(seen["spawn_id"].startswith("n"))
+        self.assertEqual(journal_cls.call_args.kwargs["quiet"], True)
+        self.assertEqual(finish.await_args.args[4], "итог")
+        self.assertFalse(finish.await_args.kwargs["allow_silent"])
+        self.assertEqual(finish.await_args.kwargs["reply_meta"]["lane"], "notify")
+
+    async def test_digest_call_marks_child_env(self) -> None:
+        from bot import llm
+        from engines.process_control import SPAWN_ENV
+
+        engine = MagicMock()
+        engine.name = "claude"
+        seen: dict = {}
+
+        async def call_stream(**kwargs):
+            seen["env"] = SPAWN_ENV.get()
+            return True, "текст", "sid", None
+
+        engine.call_stream = call_stream
+        with patch.object(llm, "ensure_engine_tools", return_value=(True, "")), \
+                patch.object(llm, "get_mcp_playwright", return_value=False), \
+                patch.object(llm, "resolve_topic_role", return_value=None), \
+                patch.object(llm, "get_account", return_value=None):
+            ok, text, _sid = await llm.call_llm_stream(
+                engine, "s", "p", (-1, 1), "/tmp", None,
+                spawn_id="n1", digest=True,
+            )
+        self.assertTrue(ok)
+        self.assertEqual(text, "текст")
+        self.assertEqual(seen["env"], {"JARVIS_DIGEST_TURN": "1"})
+        self.assertIsNone(SPAWN_ENV.get())
 
 
 if __name__ == "__main__":

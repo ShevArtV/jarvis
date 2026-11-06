@@ -40,16 +40,13 @@ from bot.llm import (
 from bot.rich_message import get_rich_message, rich_message_files, rich_message_to_markdown
 from bot.session_lanes import (
     build_dialog_seed,
-    build_notify_reply_seed,
     dialog_busy_reasons,
-    ensure_notify_session,
     extract_task_markers,
     get_rotate_pending,
     notify_session_is_open,
     plan_dialog_rotate,
     set_rotate_pending,
     touch_notify_session,
-    update_notify_session_id,
 )
 from bot.sessions import (
     pop_instructions_note,
@@ -543,22 +540,6 @@ async def _process_prompt(
             extra_lines.append(f"[Прикреплён файл: {p}]")
     meta_block = "\n".join(extra_lines)
 
-    # Reply на доклад QW: полоса notify (тот же сеанс, если ещё открыт; иначе новый).
-    if reply is not None and _is_notify_report_ctx(reply_ctx):
-        report = (replied_text or "").strip() or "(текст доклада недоступен)"
-        seed = None
-        if not notify_session_is_open(*key):
-            seed = build_notify_reply_seed(
-                report, user_text, extract_task_markers(report),
-            )
-        prompt = user_text if seed is None else seed
-        if meta_block and seed is None:
-            prompt = meta_block + "\n\n---\n\nСообщение пользователя:\n" + user_text
-        await run_notify_lane_turn(
-            chat, thread_id, key, prompt, allow_silent=False,
-        )
-        return
-
     # Живой процесс (/persistent on) — своя ветка, без topic-lock:
     # сообщение, пришедшее пока агент работает, дописывается ему на лету.
     _peek_sid, _peek_cwd, peek_engine_name = get_session(*key)
@@ -569,60 +550,45 @@ async def _process_prompt(
     await _process_prompt_locked(chat, thread_id, key, user_text, meta_block)
 
 
-def _is_notify_report_ctx(ctx: dict | None) -> bool:
-    if not ctx:
-        return False
-    if ctx.get("lane") == "notify":
-        return True
-    return ctx.get("source") == "queuewarden"
-
-
 async def run_notify_lane_turn(
     chat, thread_id: int, key: tuple[int, int], prompt_text: str,
     allow_silent: bool = False,
 ) -> None:
-    """Разовый CLI-процесс на notify_session_id — параллельно диалоговому worker.
+    """Разовый CLI на свежем session id — параллельно диалоговому worker.
 
-    ``spawn_id`` кладёт процесс в ``spawn_procs``, не в ``active_procs[key]``,
-    поэтому диалог не трогаем.
+    Пачка QueueWarden не продолжает прошлый дайджест и не пишет баннер сеанса.
+    ``spawn_id`` кладёт процесс в ``spawn_procs``, не в ``active_procs[key]``.
+    ``allow_silent`` оставлен в сигнатуре: дайджест в топик уходит всегда.
     """
-    session_id, cwd, engine_name, opened_new = ensure_notify_session(*key)
+    del allow_silent
+    _dialog_sid, cwd, engine_name = get_session(*key)
     engine = get_engine_by_name(engine_name)
+    session_id = engine.new_session_id()
     model = get_model(*key)
     spawn_id = f"n{secrets.token_hex(2)}"
+    prompt = "---\n\n" + prompt_text
 
-    prompt_parts: list[str] = []
-    if opened_new:
-        try:
-            await send_to_topic(
-                chat, thread_id,
-                f"🆕 Сеанс уведомлений ({engine_name}).",
-            )
-        except Exception:
-            logger.exception("failed to send notify-session notice key=%s", key)
-    prompt_parts.append("---\n\n" + prompt_text)
-    prompt = "\n\n".join(prompt_parts)
-
-    journal = ProgressJournal(chat, thread_id, quiet=allow_silent)
+    journal = ProgressJournal(chat, thread_id, quiet=True)
     await journal.start()
     sid_after = session_id
     try:
         with engine_model_scope(engine.name, model):
             ok, final_text, sid_after = await call_llm_stream(
                 engine, session_id, prompt, key, cwd, journal.append,
-                spawn_id=spawn_id,
+                spawn_id=spawn_id, digest=True,
             )
     except Exception as exc:
         logger.exception("notify lane crashed: key=%s engine=%s", key, engine.name)
         ok, final_text = False, f"Внутренняя ошибка: {exc}"
 
-    if sid_after and sid_after != session_id:
-        update_notify_session_id(key[0], key[1], engine_name, sid_after)
-    touch_notify_session(*key)
+    if ok:
+        final_text = final_text.replace(SILENT_MARKER, "").strip()
+        if not final_text:
+            final_text = "Дайджест пуст: модель не написала текст."
 
     await _finish_turn_reply(
         chat, thread_id, journal, ok, final_text, engine_name, key,
-        allow_silent=allow_silent,
+        allow_silent=False,
         reply_meta={"lane": "notify", "source": "queuewarden"},
     )
     logger.info(

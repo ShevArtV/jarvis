@@ -17,12 +17,17 @@ import shutil
 import signal
 import subprocess
 import sys
+from contextvars import ContextVar
 
 from engines.accounts import account_env
 
 logger = logging.getLogger(__name__)
 
 IS_WINDOWS = sys.platform == "win32"
+
+# Дополнительный env только для CLI, запущенного в этом контексте. Дочерний
+# MCP наследует его вместе с процессом. Диалоговый ход переменную не видит.
+SPAWN_ENV: ContextVar[dict[str, str] | None] = ContextVar("spawn_env", default=None)
 
 # Строка запуска в обёртке npm cmd-shim: "%dp0%\node_modules\pkg\bin\cli.js" %*
 _CMD_SHIM_SCRIPT_RE = re.compile(r'"%~?dp0%?\\([^"]+?\.[cm]?js)"', re.IGNORECASE)
@@ -72,7 +77,7 @@ async def spawn(cmd: list[str], *, cwd: str | None = None, stdin: int | None = N
     resolve_command, stdout/stderr — в пайпы, лимит строки 10 МБ (stream-json).
     Каталог конфигов аккаунта хода (engines.accounts) подмешивается в env."""
     argv = [*resolve_command(cmd[0]), *cmd[1:]]
-    extra_env = account_env()
+    extra_env = {**(account_env() or {}), **(SPAWN_ENV.get() or {})}
     if extra_env:
         kwargs["env"] = {**(kwargs.get("env") or os.environ), **extra_env}
     return await asyncio.create_subprocess_exec(
