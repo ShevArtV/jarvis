@@ -8,18 +8,19 @@ from __future__ import annotations
 import asyncio
 import tempfile
 import unittest
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from bot import db as bot_db
 from bot import queues
 from bot.handlers import messages
-from bot.timeutil import utcnow
 
 TOPIC = (-1001, 77)
 OTHER = (-1001, 88)
 QW = {"queuewarden": 60}
+# 12:20:30 UTC, слот в 60 с начинается в 12:20:00.
+NOW = datetime(2026, 11, 6, 12, 20, 30)
 
 
 class ClaimCoalesceTest(unittest.TestCase):
@@ -27,17 +28,20 @@ class ClaimCoalesceTest(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.db_path = str(Path(self._tmp.name) / "bot_state.db")
         self._db_patch = patch.object(bot_db, "DB_PATH", self.db_path)
+        self._now_patch = patch.object(queues, "utcnow", return_value=NOW)
         self._db_patch.start()
+        self._now_patch.start()
         bot_db.init_db()
 
     def tearDown(self) -> None:
+        self._now_patch.stop()
         self._db_patch.stop()
         self._tmp.cleanup()
 
     def add(self, text: str, source: str = "queuewarden", topic=TOPIC,
             age: float = 120) -> int:
         tid = queues.enqueue_agent_trigger(*topic, text, source)
-        created = (utcnow() - timedelta(seconds=age)).isoformat()
+        created = (NOW - timedelta(seconds=age)).isoformat()
         with bot_db.connect(self.db_path) as conn:
             conn.execute("UPDATE agent_triggers SET created_at = ? WHERE id = ?",
                          (created, tid))
@@ -48,24 +52,32 @@ class ClaimCoalesceTest(unittest.TestCase):
             return conn.execute("SELECT status FROM agent_triggers WHERE id = ?",
                                 (tid,)).fetchone()[0]
 
-    def test_young_series_waits(self) -> None:
+    def test_current_slot_waits(self) -> None:
         self.add("a", age=10)
         self.assertIsNone(queues.claim_next_agent_trigger(coalesce=QW))
 
-    def test_aged_series_claimed_together_in_order(self) -> None:
+    def test_closed_slot_claimed_together_current_stays(self) -> None:
         a = self.add("a", age=120)
-        b = self.add("b", age=30)
-        c = self.add("c", age=1)
+        b = self.add("b", age=50)
+        fresh = self.add("c", age=10)
         other = self.add("x", topic=OTHER, age=100)
         mxb = self.add("m", source="tracker", age=110)
         trig = queues.claim_next_agent_trigger(coalesce=QW)
-        self.assertEqual(trig["ids"], [a, b, c])
-        self.assertEqual(trig["texts"], ["a", "b", "c"])
+        self.assertEqual(trig["ids"], [a, b])
+        self.assertEqual(trig["texts"], ["a", "b"])
         self.assertEqual(trig["id"], a)
-        for tid in (a, b, c):
+        for tid in (a, b):
             self.assertEqual(self.status(tid), "in_progress")
-        for tid in (other, mxb):
+        for tid in (fresh, other, mxb):
             self.assertEqual(self.status(tid), "pending")
+
+    def test_quarter_hour_slot(self) -> None:
+        # 12:20:30, слот 900 с открылся в 12:15:00.
+        early = self.add("рано", age=400)
+        late = self.add("поздно", age=60)
+        trig = queues.claim_next_agent_trigger(coalesce={"queuewarden": 900})
+        self.assertEqual(trig["ids"], [early])
+        self.assertEqual(self.status(late), "pending")
 
     def test_other_sources_not_delayed_or_merged(self) -> None:
         a = self.add("m1", source="tracker", age=1)
