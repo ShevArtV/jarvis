@@ -145,7 +145,9 @@ class ParseTest(unittest.TestCase):
                         prompt.index("--- 2 ---\nсобытие Б"))
         for part in ("дайджест", "ask_user не вызывай", "[[SILENT]] не пиши",
                      "queuewarden_task_get", "не подтверждай gate",
-                     "Роль оператора:", "[[FILE:", "Сайт:", "Миниапп:"):
+                     "Роль оператора:", "[[FILE:", "Сайт:", "Миниапп:",
+                     "Мнение Тимлида", "принять план", "не норм",
+                     "bin/task-queue.py"):
             self.assertIn(part, prompt)
         self.assertNotIn("ответь ровно [[SILENT]]", prompt)
 
