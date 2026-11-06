@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 
 from bot.db import _db
 from bot.timeutil import utcnow
@@ -86,6 +86,21 @@ def finish_job(
         )
 
 
+def _coalesce_slot_start(now_dt: datetime, seconds: float) -> str | None:
+    """Начало текущего слота, naive UTC ISO.
+
+    Сетка с шагом ``seconds`` от эпохи. Для 900 с это :00, :15, :30, :45.
+    Уведомление, пришедшее раньше этой границы, уже пора отдавать; пришедшее
+    в текущем слоте ждёт следующей границы. ``seconds <= 0`` — не держать.
+    """
+    period = int(seconds)
+    if period <= 0:
+        return None
+    ts = int(now_dt.replace(tzinfo=UTC).timestamp())
+    start = (ts // period) * period
+    return datetime.fromtimestamp(start, UTC).replace(tzinfo=None).isoformat()
+
+
 def claim_next_agent_trigger(
     exclude_keys: frozenset[tuple[int, int]] | None = None,
     coalesce: dict[str, float] | None = None,
@@ -96,11 +111,11 @@ def claim_next_agent_trigger(
     init_db): run a normal LLM turn in the topic, but do not create/finish a
     Jarvis job and do not emit job safety notices.
 
-    ``coalesce`` — ``{source: seconds}``: триггер такого источника ждёт, пока
-    самому старому из них не исполнится ``seconds``, и забирается вместе со
-    всеми ожидающими триггерами того же источника в этом топике — серия
-    событий уходит агенту одним ходом. ``ids``/``texts`` в ответе — все
-    забранные строки по порядку.
+    ``coalesce`` — ``{source: seconds}``: слот по часам с таким шагом. К
+    границе слота забираются все ожидающие триггеры источника в этом топике,
+    которые пришли до границы. Внутри слота серия ждёт, даже если она уже
+    длинная. Пустой слот ничего не отдаёт. ``ids``/``texts`` — забранные
+    строки по порядку.
     """
     coalesce = coalesce or {}
     now_dt = utcnow()
@@ -113,9 +128,14 @@ def claim_next_agent_trigger(
     for chat_id, thread_id in (exclude_keys or ()):
         sql += " AND NOT (chat_id = ? AND thread_id = ?)"
         params.extend([chat_id, thread_id])
+    cutoffs: dict[str, str] = {}
     for source, seconds in coalesce.items():
-        sql += " AND NOT (source = ? AND created_at > ?)"
-        params.extend([source, (now_dt - timedelta(seconds=seconds)).isoformat()])
+        cutoff = _coalesce_slot_start(now_dt, seconds)
+        if cutoff is None:
+            continue
+        cutoffs[source] = cutoff
+        sql += " AND NOT (source = ? AND created_at >= ?)"
+        params.extend([source, cutoff])
     sql += " ORDER BY created_at ASC, id ASC LIMIT 1"
     with _db() as conn:
         row = conn.execute(sql, params).fetchone()
@@ -123,12 +143,17 @@ def claim_next_agent_trigger(
             return None
         rows = [row]
         if row[4] in coalesce:
-            rows = conn.execute(
+            batch_sql = (
                 "SELECT id, chat_id, thread_id, text, source FROM agent_triggers "
                 "WHERE status = 'pending' AND chat_id = ? AND thread_id = ? "
-                "AND source = ? ORDER BY created_at ASC, id ASC",
-                (row[1], row[2], row[4]),
-            ).fetchall()
+                "AND source = ?"
+            )
+            batch_params: list[int | str] = [row[1], row[2], row[4]]
+            if row[4] in cutoffs:
+                batch_sql += " AND created_at < ?"
+                batch_params.append(cutoffs[row[4]])
+            batch_sql += " ORDER BY created_at ASC, id ASC"
+            rows = conn.execute(batch_sql, batch_params).fetchall()
         claimed = []
         for r in rows:
             cur = conn.execute(

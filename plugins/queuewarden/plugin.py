@@ -39,8 +39,8 @@ PLUGIN = Plugin(
     name="queuewarden",
     workers=(queuewarden_notifications_worker, attachments_cleanup_worker),
     commands=(Command("board", cmd_board, "открыть доску QueueWarden (миниапп)"),),
-    # Пачка — всё, что накопилось за JARVIS_QW_COALESCE_SECONDS (15 минут)
-    # с самого старого необработанного. Дайджест уходит в топик всегда.
+    # Слот JARVIS_QW_COALESCE_SECONDS (15 минут) по часам: :00, :15, :30, :45.
+    # К границе уходит всё, что пришло раньше. Пустой слот молчит.
     trigger_sources={
         "queuewarden": TriggerSource(
             build_prompt=build_batch_prompt,
