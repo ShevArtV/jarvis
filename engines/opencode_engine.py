@@ -425,9 +425,7 @@ class OpenCodeEngine(BaseEngine):
         mcp_topic_role: str | None = None,
     ) -> tuple[bool, str, str | None, str | None]:
         effective_cwd = resolve_cwd(cwd)
-        is_spawn = spawn_id is not None
-
-        resume_mode = (not is_spawn) and self.session_exists(session_id, effective_cwd)
+        resume_mode = self.session_exists(session_id, effective_cwd)
         full_prompt = _opencode_prompt(prompt, system_prefix, resume_mode)
 
         # opencode run не умеет per-invocation MCP, поэтому клонируем глобальный
@@ -474,7 +472,7 @@ class OpenCodeEngine(BaseEngine):
         stderr_text = await read_stderr(proc)
         return self._finish(
             proc, stream, stderr_text,
-            cmd=cmd, cwd=effective_cwd, key=key, session_id=session_id, is_spawn=is_spawn,
+            cmd=cmd, cwd=effective_cwd, key=key, session_id=session_id,
         )
 
     def _finish(
@@ -487,7 +485,6 @@ class OpenCodeEngine(BaseEngine):
         cwd: str,
         key: tuple[int, int],
         session_id: str,
-        is_spawn: bool,
     ) -> tuple[bool, str, str | None, str | None]:
         """Итог вызова по коду выхода, собранному тексту и ошибкам stream."""
         final_text = stream.collected_text()
@@ -519,8 +516,11 @@ class OpenCodeEngine(BaseEngine):
                 + (f"\n{stderr_text[:500]}" if stderr_text else "")
             ), (real_session_id or session_id), actual_model
 
+        # Реальный id нужен и spawn-полосе notify: иначе в БД остаётся placeholder
+        # и следующий ход окна не резюмируется. Диалоговый session_id spawn не
+        # перезаписывает — это делает call_llm_stream только без spawn_id.
         effective_out_id = session_id
-        if not is_spawn and real_session_id and real_session_id != session_id:
+        if real_session_id and real_session_id != session_id:
             effective_out_id = real_session_id
 
         return True, final_text, effective_out_id, actual_model

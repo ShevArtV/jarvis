@@ -221,7 +221,7 @@ class CursorEngine(BaseEngine):
         mcp_topic_role: str | None = None,
     ) -> tuple[bool, str, str | None, str | None]:
         effective_cwd = resolve_cwd(cwd)
-        resume_mode = spawn_id is None and self.session_exists(session_id, effective_cwd)
+        resume_mode = self.session_exists(session_id, effective_cwd)
         full_prompt = _cursor_prompt(prompt, system_prefix, resume_mode)
         model = CURRENT_MODEL.get() or os.environ.get("CURSOR_MODEL")
         cmd = _cursor_command(session_id, effective_cwd, model)
