@@ -208,6 +208,36 @@ class ClaudeCallStreamTest(_Base):
         self.assertEqual(h.cmd[-2:], ["--session-id", "sid-new"])
         self.assertEqual(self.cleared, [])
 
+    def test_persistent_start_does_not_pass_is_spawn(self) -> None:
+        from engines import persistent_claude
+
+        captured: dict = {}
+
+        class _Proc:
+            def __init__(self) -> None:
+                self.stdout = _FakeStdout([], hang=False)
+                self.stderr = None
+                self.stdin = None
+
+        async def fake_spawn(cmd, **kwargs):
+            captured["cmd"] = cmd
+            return _Proc()
+
+        async def go() -> None:
+            worker = await persistent_claude.start_persistent(
+                (1, 2), "sid-1", self.cwd, None, None, False,
+            )
+            await asyncio.sleep(0.05)
+            if worker.reader_task is not None:
+                worker.reader_task.cancel()
+
+        with patch.object(claude_engine.ClaudeEngine, "session_exists", lambda *a: True), \
+                patch.object(claude_engine.ClaudeEngine, "clear_stale_session_pidfile", lambda *a: None), \
+                patch.object(persistent_claude, "spawn", side_effect=fake_spawn):
+            asyncio.run(go())
+        self.assertEqual(captured["cmd"][-2:], ["--resume", "sid-1"])
+        self.assertIn("stream-json", captured["cmd"])
+
     def test_error_rc(self) -> None:
         h = _Harness(claude_engine, [], rc=1, stderr="boom")
         self.assertEqual(h.run(self.engine(), "sid", self.cwd),

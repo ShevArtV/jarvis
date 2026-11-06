@@ -182,7 +182,7 @@ async def start_persistent(
     как в разовом вызове (``--resume``/``--session-id``), но выставляются
     ОДИН раз при старте процесса: все следующие реплики уходят в его stdin,
     без пересоздания."""
-    resume_mode, session_flags = ClaudeEngine()._session_flags(session_id, cwd, is_spawn=False)
+    resume_mode, session_flags = ClaudeEngine()._session_flags(session_id, cwd)
     cmd = _claude_command(
         session_flags, model, system_prefix, mcp_playwright, mcp_topic_role,
         input_format="stream-json",
