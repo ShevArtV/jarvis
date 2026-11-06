@@ -75,6 +75,18 @@ class ReplyContextPrefixTest(unittest.TestCase):
         self.assertIn("цитата: коротко", text)
         self.assertNotIn("текст:", text)
 
+    def test_digest_reply_keeps_the_text(self) -> None:
+        long = ("дайджест " + ("абзац " * 200)).strip()
+        self.assertGreater(len(long), 500)
+        text = _build_reply_context_prefix(
+            message_id=9,
+            replied_text=long,
+            ctx={"type": "claude_response", "lane": "notify", "source": "queuewarden"},
+        )
+        self.assertIn(long, text)
+        short = _build_reply_context_prefix(message_id=9, replied_text="x" * 600)
+        self.assertLess(len(short), 700)
+
     def test_clip_long_text(self) -> None:
         long = "x" * 600
         clipped = _clip_reply_text(long, limit=50)
