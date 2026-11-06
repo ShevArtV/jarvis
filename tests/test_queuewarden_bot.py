@@ -127,6 +127,17 @@ class ParseTest(unittest.TestCase):
                      "projectId: 7"):
             self.assertIn(part, text)
 
+    def test_miniapp_link_rewrites_tasks_path(self) -> None:
+        site = "https://tako.queuewarden.ru/tasks/92ece5f6"
+        self.assertEqual(
+            qw.miniapp_task_url(site),
+            "https://tako.queuewarden.ru/miniapp/tasks/92ece5f6",
+        )
+        self.assertIsNone(qw.miniapp_task_url("https://qw.example/task/501"))
+        text = qw.build_trigger_text({**_item(1), "url": site}, INST)
+        self.assertIn(f"Ссылка: {site}", text)
+        self.assertIn("Миниапп: https://tako.queuewarden.ru/miniapp/tasks/92ece5f6", text)
+
     def test_batch_prompt_is_a_digest(self) -> None:
         prompt = qw.build_batch_prompt(["событие А", "событие Б"])
         self.assertIn("2 шт.", prompt)
@@ -134,7 +145,7 @@ class ParseTest(unittest.TestCase):
                         prompt.index("--- 2 ---\nсобытие Б"))
         for part in ("дайджест", "ask_user не вызывай", "[[SILENT]] не пиши",
                      "queuewarden_task_get", "не подтверждай gate",
-                     "Роль оператора:", "[[FILE:"):
+                     "Роль оператора:", "[[FILE:", "Сайт:", "Миниапп:"):
             self.assertIn(part, prompt)
         self.assertNotIn("ответь ровно [[SILENT]]", prompt)
 

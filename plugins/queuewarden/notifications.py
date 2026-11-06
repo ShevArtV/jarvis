@@ -261,6 +261,19 @@ def prune_attachments(ttl_days: int) -> int:
     return removed
 
 
+def miniapp_task_url(url: str) -> str | None:
+    """Сайт ``https://host/tasks/<id>`` → миниапп ``https://host/miniapp/tasks/<id>``.
+
+    Другой путь не переписываем: выдуманная ссылка хуже её отсутствия."""
+    if not url.startswith("https://") or "/miniapp/" in url:
+        return None
+    marker = "/tasks/"
+    at = url.find(marker)
+    if at < 0:
+        return None
+    return url[:at] + "/miniapp" + url[at:]
+
+
 def build_trigger_text(item: dict, inst: Installation,
                        extra: dict | None = None) -> str:
     """Одно уведомление — текст строки триггера. Инструкцию агенту к серии
@@ -276,6 +289,9 @@ def build_trigger_text(item: dict, inst: Installation,
         lines.append(f"Текст: {body}")
     if item.get("url"):
         lines.append(f"Ссылка: {item['url']}")
+        mini = miniapp_task_url(item["url"])
+        if mini:
+            lines.append(f"Миниапп: {mini}")
     lines.append(
         f"taskId: {item.get('taskId') or '—'}, projectId: {item.get('projectId') or '—'}"
     )
@@ -312,7 +328,9 @@ def build_batch_prompt(events: list[str]) -> str:
         "Форма:\n"
         "- первая строка: сколько уведомлений и за какой промежуток по времени событий;\n"
         "- задача, которой нужно решение оператора (gate, отклонённая постановка, "
-        "незакрытый вопрос): что случилось и что решить;\n"
+        "незакрытый вопрос): что случилось и что решить; затем две отдельные строки "
+        "«Сайт: <url из строки Ссылка>» и «Миниапп: <url из строки Миниапп>». "
+        "Адреса не выдумывай: нет строки — нет ссылки;\n"
         "- новая задача (task.created) — короткой карточкой: название, проект, роль "
         "оператора из строки «Роль оператора:», дедлайн если есть, ссылка, тег; "
         "маркеры [[FILE: …]] из уведомления — в начале карточки, каждый на своей строке;\n"
