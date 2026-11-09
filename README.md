@@ -1012,6 +1012,7 @@ Print и ACP делят сессии в `~/.kimi-code/sessions/`. Playwright и 
 ```bash
 mkdir -p ~/.config/systemd/user
 cp systemd/jarvis-bot.service ~/.config/systemd/user/
+cp -r systemd/jarvis-bot.service.d ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user enable --now jarvis-bot.service
 
