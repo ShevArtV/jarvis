@@ -20,6 +20,8 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
+from bot import db_backends
+
 logger = logging.getLogger("jarvis-mcp")
 
 # Filled in main(); module-level so tool functions can close over it without
@@ -51,6 +53,10 @@ class _ClosingConnection(sqlite3.Connection):
 
 
 def _connect() -> sqlite3.Connection:
+    # JARVIS_DB_BACKEND=libsql — удалённый sqld вместо локального файла; второй
+    # процесс (бот) ходит в ту же БД. См. bot/db_backends.py.
+    if db_backends.is_remote():
+        return db_backends.connect()
     if _DB_PATH is None:
         raise RuntimeError("MCP server is not initialised (no --db)")
     conn = sqlite3.connect(_DB_PATH, isolation_level=None, factory=_ClosingConnection)

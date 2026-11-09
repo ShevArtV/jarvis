@@ -17,6 +17,7 @@ import os
 import shutil
 import sqlite3
 
+from bot import db_backends
 from bot.plugins import load_plugins
 from bot.settings import DB_PATH
 from bot.timeutil import utcnow
@@ -36,7 +37,14 @@ class _ClosingConnection(sqlite3.Connection):
 
 
 def connect(path: str, **kwargs) -> sqlite3.Connection:
-    """``sqlite3.connect``, соединение которого закрывается на выходе из ``with``."""
+    """``sqlite3.connect``, соединение которого закрывается на выходе из ``with``.
+
+    При ``JARVIS_DB_BACKEND=libsql`` возвращает удалённое соединение с sqld,
+    совместимое по интерфейсу (``path``/``kwargs`` тогда не используются) —
+    см. ``bot/db_backends.py``. Дефолт — локальный sqlite3.
+    """
+    if db_backends.is_remote():
+        return db_backends.connect()
     return sqlite3.connect(path, factory=_ClosingConnection, **kwargs)
 
 
