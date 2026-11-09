@@ -506,3 +506,58 @@ async def agent_triggers_worker(app: Application) -> None:
                 sem.release()
             logger.exception("agent_triggers_worker dispatcher crashed; sleeping 5s")
             await asyncio.sleep(5.0)
+
+
+async def polling_watchdog(app: Application) -> None:
+    """Сторож опроса Telegram.
+
+    Одиночные обрывы сети бот переживает сам (PTB ретраит). Проблема — когда
+    соединение залипает намертво: процесс остаётся ``active``, но апдейты не
+    приходят, и без ручного рестарта это не лечится. Здесь раз в
+    ``JARVIS_POLL_WATCHDOG_INTERVAL`` секунд дёргаем ``get_me``; после
+    ``JARVIS_POLL_WATCHDOG_FAILS`` провалов подряд завершаем процесс, чтобы
+    systemd (Linux) или Планировщик/NSSM (Windows) подняли его заново.
+
+    Отключается ``JARVIS_POLL_WATCHDOG=0``.
+    """
+    if os.environ.get("JARVIS_POLL_WATCHDOG", "1").strip().lower() in (
+        "0", "false", "off", "no", "",
+    ):
+        logger.info("polling_watchdog disabled (JARVIS_POLL_WATCHDOG)")
+        return
+
+    interval = _env_int("JARVIS_POLL_WATCHDOG_INTERVAL", 20)
+    max_fails = _env_int("JARVIS_POLL_WATCHDOG_FAILS", 3)
+    probe_timeout = _env_int("JARVIS_POLL_WATCHDOG_TIMEOUT", 15)
+    logger.info(
+        "polling_watchdog started (interval=%ds fails=%d timeout=%ds)",
+        interval, max_fails, probe_timeout,
+    )
+    # Дать приложению стартовать, прежде чем считать провалы.
+    await asyncio.sleep(interval * 2)
+    fails = 0
+    while True:
+        try:
+            await asyncio.wait_for(app.bot.get_me(), timeout=probe_timeout)
+            if fails:
+                logger.info("polling_watchdog: связь с Telegram восстановилась")
+            fails = 0
+        except asyncio.CancelledError:
+            logger.info("polling_watchdog cancelled")
+            raise
+        except Exception as exc:  # noqa: BLE001 — любой сбой связи считается провалом
+            fails += 1
+            logger.warning(
+                "polling_watchdog: getMe не прошёл (%d/%d): %s", fails, max_fails, exc
+            )
+            if fails >= max_fails:
+                logger.error(
+                    "polling_watchdog: Telegram недоступен %d проверок подряд — "
+                    "завершаю процесс для перезапуска службой", fails,
+                )
+                os._exit(1)
+        try:
+            await asyncio.sleep(interval)
+        except asyncio.CancelledError:
+            logger.info("polling_watchdog cancelled")
+            raise

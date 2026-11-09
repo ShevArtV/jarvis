@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
+import httpx
 from telegram import (
     BotCommand,
     BotCommandScopeAllGroupChats,
@@ -28,6 +29,7 @@ from telegram.ext import (
     TypeHandler,
     filters,
 )
+from telegram.request import HTTPXRequest
 
 from bot.asks import on_ask_answer
 from bot.handlers.account import on_account_select
@@ -77,6 +79,7 @@ from bot.workers import (
     jobs_worker,
     notify_idle_reaper,
     persistent_reaper,
+    polling_watchdog,
 )
 from config import ALLOWED_USER_IDS, TELEGRAM_TOKEN
 from engines import prewarm_models
@@ -174,12 +177,59 @@ async def _post_init(application: Application) -> None:
     health_task = asyncio.create_task(health_worker(application))
     application.bot_data["health_worker_task"] = health_task
 
+    # Сторож опроса Telegram: если API подряд недоступен (VPN лёг, пул забит),
+    # процесс завершается, и systemd/Restart поднимает бота заново — иначе он
+    # висит «active», но фактически не получает апдейты.
+    application.bot_data["polling_watchdog_task"] = asyncio.create_task(
+        polling_watchdog(application)
+    )
+
     # Фоновые задачи включённых плагинов (JARVIS_PLUGINS).
     for plugin in load_plugins():
         for worker in plugin.workers:
             application.bot_data[f"plugin_{plugin.name}_{worker.__name__}"] = (
                 asyncio.create_task(worker(application))
             )
+
+
+def _build_http_requests() -> tuple[HTTPXRequest, HTTPXRequest]:
+    """HTTP-клиенты PTB с явными таймаутами и рециклом keep-alive.
+
+    Штатный getUpdates-клиент у PTB — ``connection_pool_size=1``. Когда VPN
+    рвёт соединение (флапающий сервер, прокси), единственный сокет залипает и
+    опрос встаёт насмерть, хотя остальные вызовы живут. Поэтому: несколько
+    соединений на пул, ограниченные таймауты и ``keepalive_expiry``, чтобы
+    мёртвые keep-alive сокеты уходили сами.
+    """
+    request = HTTPXRequest(
+        connection_pool_size=64,
+        connect_timeout=10.0,
+        read_timeout=20.0,
+        write_timeout=20.0,
+        pool_timeout=10.0,
+        httpx_kwargs={
+            "limits": httpx.Limits(
+                max_connections=64,
+                max_keepalive_connections=16,
+                keepalive_expiry=30.0,
+            )
+        },
+    )
+    get_updates_request = HTTPXRequest(
+        connection_pool_size=4,
+        connect_timeout=10.0,
+        read_timeout=15.0,
+        write_timeout=20.0,
+        pool_timeout=10.0,
+        httpx_kwargs={
+            "limits": httpx.Limits(
+                max_connections=4,
+                max_keepalive_connections=2,
+                keepalive_expiry=30.0,
+            )
+        },
+    )
+    return request, get_updates_request
 
 
 def build_application(
@@ -199,11 +249,14 @@ def build_application(
     # минуту) и отвечает RetryAfter. Без лимитера PTB просто пробрасывал ошибку
     # наверх — и ответ агента терялся молча. AIORateLimiter выдерживает паузы
     # сам и повторяет запрос, а не роняет его.
+    request, get_updates_request = _build_http_requests()
     app = (
         Application.builder()
         .token(token if token is not None else TELEGRAM_TOKEN)
         .concurrent_updates(True)
         .rate_limiter(AIORateLimiter(max_retries=3))
+        .request(request)
+        .get_updates_request(get_updates_request)
         .post_init(_post_init)
         .build()
     )
