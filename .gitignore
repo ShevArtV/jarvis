@@ -10,6 +10,7 @@ __pycache__/
 *.egg-info/
 .venv/
 venv/
+venv.bak*/
 
 # IDE
 .idea/
