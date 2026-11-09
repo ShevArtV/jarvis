@@ -4,3 +4,7 @@ httpx>=0.27
 mcp>=1.27,<2
 starlette>=0.27
 uvicorn[standard]>=0.23
+# Удалённый бэкенд bot_state.db (JARVIS_DB_BACKEND=libsql): клиент libSQL/sqld.
+# Чистый Python DB-API 2.0 — ставится на 3.14 без Rust, в отличие от нативного
+# libsql. Нужен только для libsql-бэкенда; дефолтный sqlite его не требует.
+turso_serverless>=0.1.0,<0.2
