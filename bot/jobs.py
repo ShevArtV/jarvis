@@ -31,6 +31,7 @@ from bot.delivery import (
 from bot.formatting import _html_escape
 from bot.llm import call_llm_stream
 from bot.plugins import trigger_source
+from bot.queues import enqueue_agent_trigger
 from bot.sessions import (
     clear_pending_summary,
     ensure_active_session,
@@ -488,9 +489,15 @@ async def _process_agent_trigger(app: Application, trigger: dict) -> tuple[bool,
         # QueueWarden — отдельный разовый сеанс (spawn_id), параллельно диалогу.
         # Нельзя слать inject в persistent-worker: убил бы фон или ждал 5–10 мин.
         if source == "queuewarden":
-            await run_notify_lane_turn(
+            digest = await run_notify_lane_turn(
                 chat, thread_id, key, text, allow_silent=allow_silent,
             )
+            if digest and spec is not None and spec.handoff_source:
+                # Дайджест — в основной диалог: Тимлид знает, что ушло оператору.
+                # Роль не 'executor' — иначе гард закроет ему ask_user.
+                enqueue_agent_trigger(
+                    chat_id, thread_id, digest, spec.handoff_source, role="manager",
+                )
             return True, None
         _sid, _cwd, engine_name = get_session(*key)
         if get_persistent_for_engine(*key, engine_name):

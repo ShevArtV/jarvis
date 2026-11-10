@@ -559,6 +559,69 @@ class DigestLaneTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(finish.await_args.kwargs["allow_silent"])
         self.assertEqual(finish.await_args.kwargs["reply_meta"]["lane"], "notify")
 
+    async def test_lane_returns_digest_or_none(self) -> None:
+        from bot.handlers import messages as messages_mod
+
+        engine = MagicMock()
+        engine.name = "claude"
+        engine.new_session_id.return_value = "fresh-id"
+
+        async def run(reply):
+            async def fake_call(*args, **kwargs):
+                return reply
+            with patch.object(messages_mod, "get_session", return_value=("d", "/tmp", "claude")), \
+                    patch.object(messages_mod, "get_engine_by_name", return_value=engine), \
+                    patch.object(messages_mod, "get_model", return_value=None), \
+                    patch.object(messages_mod, "call_llm_stream", side_effect=fake_call), \
+                    patch.object(messages_mod, "ProgressJournal", return_value=AsyncMock()), \
+                    patch.object(messages_mod, "_finish_turn_reply", AsyncMock()):
+                return await messages_mod.run_notify_lane_turn(object(), 7, (-1, 7), "пачка")
+
+        self.assertEqual(await run((True, " итог ", "s")), "итог")
+        self.assertIsNone(await run((True, "[[SILENT]]", "s")))
+        self.assertIsNone(await run((False, "ошибка", "s")))
+
+
+class DigestHandoffTest(unittest.IsolatedAsyncioTestCase):
+    def test_handoff_source_contract(self) -> None:
+        from plugins.queuewarden.handoff import HANDOFF_SOURCE, build_handoff_prompt
+        from plugins.queuewarden.plugin import PLUGIN
+
+        self.assertEqual(PLUGIN.trigger_sources["queuewarden"].handoff_source, HANDOFF_SOURCE)
+        spec = PLUGIN.trigger_sources[HANDOFF_SOURCE]
+        self.assertTrue(spec.allow_silent)
+        self.assertIsNone(spec.coalesce_seconds)
+        prompt = build_handoff_prompt(["дайджест A"])
+        self.assertIn("дайджест A", prompt)
+        self.assertIn("[[SILENT]]", prompt)
+
+    async def _run_trigger(self, digest):
+        from bot import jobs as jobs_mod
+        from bot.handlers import messages as messages_mod
+
+        app = MagicMock()
+        app.bot.get_chat = AsyncMock(return_value=object())
+        trigger = {"id": 1, "chat_id": -1, "thread_id": 7, "text": "пачка",
+                   "source": "queuewarden", "texts": ["пачка"]}
+        enqueue = MagicMock()
+        with patch.object(jobs_mod, "log_message"), \
+                patch.object(jobs_mod, "enqueue_agent_trigger", enqueue), \
+                patch.object(messages_mod, "run_notify_lane_turn",
+                             AsyncMock(return_value=digest)):
+            ok, _err = await jobs_mod._process_agent_trigger(app, trigger)
+        self.assertTrue(ok)
+        return enqueue
+
+    async def test_digest_goes_to_dialog(self) -> None:
+        from plugins.queuewarden.handoff import HANDOFF_SOURCE
+
+        enqueue = await self._run_trigger("итог")
+        enqueue.assert_called_once_with(-1, 7, "итог", HANDOFF_SOURCE, role="manager")
+
+    async def test_no_digest_no_handoff(self) -> None:
+        enqueue = await self._run_trigger(None)
+        enqueue.assert_not_called()
+
     async def test_digest_call_marks_child_env(self) -> None:
         from bot import llm
         from engines.process_control import SPAWN_ENV
