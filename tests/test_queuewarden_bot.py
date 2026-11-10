@@ -147,6 +147,7 @@ class ParseTest(unittest.TestCase):
                      "queuewarden_task_get", "не подтверждай gate",
                      "Роль оператора:", "[[FILE:", "Сайт:", "Миниапп:",
                      "Мнение Тимлида", "принять план", "не норм",
+                     'sortBy: "focus"', "focus_position",
                      "bin/task-queue.py"):
             self.assertIn(part, prompt)
         self.assertNotIn("ответь ровно [[SILENT]]", prompt)
