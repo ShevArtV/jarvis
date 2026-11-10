@@ -556,8 +556,10 @@ async def _process_prompt(
 async def run_notify_lane_turn(
     chat, thread_id: int, key: tuple[int, int], prompt_text: str,
     allow_silent: bool = False,
-) -> None:
+) -> str | None:
     """Разовый CLI на свежем session id — параллельно диалоговому worker.
+
+    Возвращает текст дайджеста, если модель его написала, иначе None.
 
     Пачка QueueWarden не продолжает прошлый дайджест и не пишет баннер сеанса.
     ``spawn_id`` кладёт процесс в ``spawn_procs``, не в ``active_procs[key]``.
@@ -584,8 +586,10 @@ async def run_notify_lane_turn(
         logger.exception("notify lane crashed: key=%s engine=%s", key, engine.name)
         ok, final_text = False, f"Внутренняя ошибка: {exc}"
 
+    digest_text: str | None = None
     if ok:
         final_text = final_text.replace(SILENT_MARKER, "").strip()
+        digest_text = final_text or None
         if not final_text:
             final_text = "Дайджест пуст: модель не написала текст."
 
@@ -598,6 +602,7 @@ async def run_notify_lane_turn(
         "notify turn done: key=%s engine=%s ok=%s session=%s",
         key, engine_name, ok, sid_after or session_id,
     )
+    return digest_text
 
 
 async def _process_prompt_locked(

@@ -11,6 +11,7 @@ from bot.plugins import Command, Plugin, TriggerSource
 from bot.queues import _log_ttl_days
 from bot.workers import _env_int
 from plugins.queuewarden.board import cmd_board
+from plugins.queuewarden.handoff import HANDOFF_SOURCE, build_handoff_prompt
 from plugins.queuewarden.notifications import (
     build_batch_prompt,
     prune_attachments,
@@ -46,6 +47,12 @@ PLUGIN = Plugin(
             build_prompt=build_batch_prompt,
             coalesce_seconds=_env_int("JARVIS_QW_COALESCE_SECONDS", 900, 0),
             allow_silent=False,
+            handoff_source=HANDOFF_SOURCE,
+        ),
+        # Готовый дайджест → основной диалог Тимлида, сразу, можно промолчать.
+        HANDOFF_SOURCE: TriggerSource(
+            build_prompt=build_handoff_prompt,
+            allow_silent=True,
         ),
     },
 )
