@@ -193,5 +193,7 @@ async def start_persistent(
     )
     proc = await spawn(cmd, cwd=cwd, stdin=asyncio.subprocess.PIPE)
     worker = PersistentClaudeWorker(key, proc, session_id, cwd)
+    # Транскрипт остался у прежнего аккаунта — сеанс новый, контекст подставит бот.
+    worker.fresh = not resume_mode and ClaudeEngine().session_in_other_account(session_id, cwd)
     worker.reader_task = asyncio.create_task(worker._read_loop())
     return worker

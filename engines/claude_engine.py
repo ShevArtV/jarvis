@@ -21,7 +21,7 @@ from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
 
-from engines.accounts import configured
+from engines.accounts import configured, current_dir
 from engines.base import BaseEngine
 from engines.claude_cli import (
     CLAUDE_BIN,
@@ -50,12 +50,20 @@ logger = logging.getLogger(__name__)
 CURRENT_MODEL: ContextVar[str | None] = ContextVar("claude_model", default=None)
 
 
-def _sessions_dir_for(cwd: str) -> Path:
-    """~/.claude/projects/<encoded-cwd>/. Claude CLI заменяет каждый символ, кроме
-    латинских букв и цифр, на '-': /home/user/visa-center.ru → -home-user-visa-center-ru,
-    C:\\Users\\me\\proj → C--Users-me-proj."""
+def _config_dirs() -> list[Path]:
+    """Каталоги конфигов всех аккаунтов claude, ~/.claude первым."""
+    return [Path.home() / ".claude", *configured().get("claude", {}).values()]
+
+
+def _sessions_dir_for(cwd: str, config_dir: Path | None = None) -> Path:
+    """<config>/projects/<encoded-cwd>/, где <config> — каталог аккаунта текущего
+    хода (иначе ~/.claude): у аккаунта без общей ``projects`` чужих транскриптов
+    нет, и ``--resume`` по ним падает пустым ходом. Claude CLI заменяет каждый
+    символ, кроме латинских букв и цифр, на '-': /home/user/visa-center.ru →
+    -home-user-visa-center-ru, C:\\Users\\me\\proj → C--Users-me-proj."""
     encoded = re.sub(r"[^A-Za-z0-9]", "-", cwd)
-    return Path.home() / ".claude" / "projects" / encoded
+    root = config_dir or current_dir("claude") or Path.home() / ".claude"
+    return root / "projects" / encoded
 
 
 class _ClaudeStream:
@@ -114,12 +122,20 @@ class ClaudeEngine(BaseEngine):
     def session_exists(self, session_id: str, cwd: str) -> bool:
         return (_sessions_dir_for(cwd) / f"{session_id}.jsonl").exists()
 
+    def session_in_other_account(self, session_id: str, cwd: str) -> bool:
+        """Транскрипт есть у другого аккаунта, а текущему не виден."""
+        if self.session_exists(session_id, cwd):
+            return False
+        return any(
+            (_sessions_dir_for(cwd, d) / f"{session_id}.jsonl").exists()
+            for d in _config_dirs()
+        )
+
     def clear_stale_session_pidfile(self, session_id: str) -> None:
         """Claude CLI хранит лок-файлы в ~/.claude/sessions/<pid>.json с полем sessionId.
         Если процесс мёртв — удаляем файл, чтобы --resume не упёрся в 'session in use'.
         У каждого аккаунта свой sessions/, транскрипты общие — смотрим все."""
-        config_dirs = [Path.home() / ".claude", *configured().get(self.name, {}).values()]
-        for config_dir in config_dirs:
+        for config_dir in _config_dirs():
             self._clear_stale_pidfiles(config_dir / "sessions", session_id)
 
     def _clear_stale_pidfiles(self, sessions_dir: Path, session_id: str) -> None:

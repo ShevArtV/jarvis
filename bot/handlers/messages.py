@@ -325,11 +325,14 @@ async def _get_or_start_persistent_worker(chat, thread_id: int, key: tuple[int, 
         if worker.session_id and worker.session_id != session_id:
             update_session_id(key[0], key[1], engine_name, worker.session_id)
         if getattr(worker, "fresh", False) and not opened_new:
+            # Прежний сеанс этому процессу не виден (другой аккаунт claude,
+            # другой режим cursor) — как при новом сеансе, подставляем реплики.
+            _queue_dialog_seed(key)
             try:
                 await send_to_topic(
                     chat, thread_id,
-                    f"🆕 Новый сеанс ({engine_name}): живой и разовый режимы cursor "
-                    "хранят сеансы раздельно, контекст прежнего не перенесён.",
+                    f"🆕 Новый сеанс ({engine_name}): прежний сеанс этому аккаунту "
+                    "или режиму не виден. Подставлю последние реплики диалога.",
                 )
             except Exception:
                 logger.exception("failed to send fresh-session notice key=%s", key)
