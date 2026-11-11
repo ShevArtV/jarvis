@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import re
 import sqlite3
 import time
@@ -121,11 +120,6 @@ async def ask_user(
     question = (question or "").strip()
     if not question:
         return {"status": "error", "error": "question is empty"}
-    if os.environ.get("JARVIS_DIGEST_TURN") == "1":
-        return {
-            "status": "blocked",
-            "error": "Этот ход — дайджест. Вопрос не задаётся: напиши текст и закончи ход.",
-        }
     if timeout_seconds <= 0:
         timeout_seconds = 1800
     elif timeout_seconds > 3600:

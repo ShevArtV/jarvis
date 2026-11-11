@@ -33,13 +33,13 @@ class TriggerSource:
     ``build_prompt`` получает тексты серии и собирает промпт хода.
     ``allow_silent`` разрешает агенту ответить ``[[SILENT]]`` — тогда в топик
     ничего не уходит.
-    ``handoff_source`` — после разового хода (дайджест QW) его текст ставится
-    триггером с этим source в обычный диалог топика."""
+    ``exclusive`` — только отдельным ходом живого процесса, не довеском к
+    идущему (молчаливый триггер так идёт всегда)."""
 
     build_prompt: Callable[[list[str]], str]
     coalesce_seconds: float | None = None
     allow_silent: bool = False
-    handoff_source: str | None = None
+    exclusive: bool = False
 
 
 @dataclass(frozen=True)

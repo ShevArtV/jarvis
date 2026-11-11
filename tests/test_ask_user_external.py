@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -95,17 +94,6 @@ class AskUserExternalGuardTest(unittest.TestCase):
         self.assertEqual(result["task"], "#482")
         self.assertEqual(result["source"], "tracker")
         self.assertIn("#482", result["error"])
-        api.assert_not_called()
-
-    def test_digest_turn_does_not_wait(self) -> None:
-        with patch.dict(os.environ, {"JARVIS_DIGEST_TURN": "1"}):
-            with patch.object(common, "_telegram_api") as api:
-                result = asyncio.run(asks.ask_user(
-                    question="Подтвердить план?",
-                    thread_id=77,
-                    chat_id=-100,
-                ))
-        self.assertEqual(result["status"], "blocked")
         api.assert_not_called()
 
     def test_manager_and_finished_triggers_do_not_block(self) -> None:
