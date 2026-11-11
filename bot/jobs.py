@@ -35,11 +35,11 @@ from bot.queues import enqueue_agent_trigger
 from bot.sessions import (
     clear_pending_summary,
     ensure_active_session,
-    pop_instructions_note,
     get_model,
     get_pending_summary,
     get_persistent_for_engine,
     get_session,
+    pop_instructions_note,
 )
 from bot.settings import CLAUDE_CWD
 from bot.topics import (
@@ -131,12 +131,13 @@ async def _run_job_turn_persistent(
     job остался бы без результата и нотиса инициатору. Поэтому ждём, пока
     текущий ход закончится."""
     from bot.handlers.messages import _get_or_start_persistent_worker
+    from engines.persistent import describe_error
 
     try:
         worker, _spawned = await _get_or_start_persistent_worker(chat, thread_id, key)
     except Exception as exc:
         logger.exception("persistent worker spawn failed for job key=%s", key)
-        return False, f"Не удалось поднять живой процесс: {exc}"
+        return False, f"Не удалось поднять живой процесс: {describe_error(exc)}"
     if worker is None:
         return False, "persistent для движка топика не действует — повтори задачу."
     while True:

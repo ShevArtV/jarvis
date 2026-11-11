@@ -82,7 +82,7 @@ from bot.topics import (
 from engines import engine_model_scope, get_engine_by_name
 from engines.accounts import engine_account_scope
 from engines.background_work import capture_baseline
-from engines.persistent import persistent_timeout, start_persistent
+from engines.persistent import describe_error, persistent_timeout, start_persistent
 
 logger = logging.getLogger(__name__)
 
@@ -361,7 +361,7 @@ async def _handle_persistent_message(
         logger.exception("persistent worker spawn failed key=%s", key)
         await send_to_topic(
             chat, thread_id,
-            f"⚠️ Не удалось поднять живой процесс {get_session(*key)[2]}: {exc}",
+            f"⚠️ Не удалось поднять живой процесс {get_session(*key)[2]}: {describe_error(exc)}",
         )
         return
     if worker is None:
