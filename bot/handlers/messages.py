@@ -11,7 +11,6 @@ import asyncio
 import json
 import logging
 import os
-import secrets
 import uuid
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -347,7 +346,7 @@ async def _get_or_start_persistent_worker(chat, thread_id: int, key: tuple[int, 
 
 async def _handle_persistent_message(
     chat, thread_id: int, key: tuple[int, int], user_text: str, meta_block: str,
-    allow_silent: bool = False,
+    allow_silent: bool = False, exclusive: bool = False,
 ) -> None:
     """Путь для топиков с /persistent on: без topic-lock и без «в очереди».
 
@@ -394,12 +393,14 @@ async def _handle_persistent_message(
     # довеском к чужому ходу он потерял бы [[SILENT]] и попал в ответ
     # пользователю. И наоборот: в его ход сообщение пользователя не дописываем,
     # иначе оно пропадёт вместе с молчаливым ответом. Ждём конца хода.
+    # ``exclusive`` — так же отдельным ходом (раунд gate QW), но не молча.
+    exclusive = exclusive or allow_silent
     notified_wait = False
     while True:
-        is_new, fut = await worker.submit(prompt, exclusive=allow_silent)
+        is_new, fut = await worker.submit(prompt, exclusive=exclusive)
         if fut is not None:
             break
-        if not allow_silent and not notified_wait:
+        if not exclusive and not notified_wait:
             notified_wait = True
             try:
                 await send_to_topic(
@@ -551,58 +552,6 @@ async def _process_prompt(
         return
 
     await _process_prompt_locked(chat, thread_id, key, user_text, meta_block)
-
-
-async def run_notify_lane_turn(
-    chat, thread_id: int, key: tuple[int, int], prompt_text: str,
-    allow_silent: bool = False,
-) -> str | None:
-    """Разовый CLI на свежем session id — параллельно диалоговому worker.
-
-    Возвращает текст дайджеста, если модель его написала, иначе None.
-
-    Пачка QueueWarden не продолжает прошлый дайджест и не пишет баннер сеанса.
-    ``spawn_id`` кладёт процесс в ``spawn_procs``, не в ``active_procs[key]``.
-    ``allow_silent`` оставлен в сигнатуре: дайджест в топик уходит всегда.
-    """
-    del allow_silent
-    _dialog_sid, cwd, engine_name = get_session(*key)
-    engine = get_engine_by_name(engine_name)
-    session_id = engine.new_session_id()
-    model = get_model(*key)
-    spawn_id = f"n{secrets.token_hex(2)}"
-    prompt = "---\n\n" + prompt_text
-
-    journal = ProgressJournal(chat, thread_id, quiet=True)
-    await journal.start()
-    sid_after = session_id
-    try:
-        with engine_model_scope(engine.name, model):
-            ok, final_text, sid_after = await call_llm_stream(
-                engine, session_id, prompt, key, cwd, journal.append,
-                spawn_id=spawn_id, digest=True,
-            )
-    except Exception as exc:
-        logger.exception("notify lane crashed: key=%s engine=%s", key, engine.name)
-        ok, final_text = False, f"Внутренняя ошибка: {exc}"
-
-    digest_text: str | None = None
-    if ok:
-        final_text = final_text.replace(SILENT_MARKER, "").strip()
-        digest_text = final_text or None
-        if not final_text:
-            final_text = "Дайджест пуст: модель не написала текст."
-
-    await _finish_turn_reply(
-        chat, thread_id, journal, ok, final_text, engine_name, key,
-        allow_silent=False,
-        reply_meta={"lane": "notify", "source": "queuewarden"},
-    )
-    logger.info(
-        "notify turn done: key=%s engine=%s ok=%s session=%s",
-        key, engine_name, ok, sid_after or session_id,
-    )
-    return digest_text
 
 
 async def _process_prompt_locked(
