@@ -19,6 +19,7 @@ import subprocess
 import sys
 from contextvars import ContextVar
 
+from engines import cli_scope
 from engines.accounts import account_env
 
 logger = logging.getLogger(__name__)
@@ -75,8 +76,9 @@ async def spawn(cmd: list[str], *, cwd: str | None = None, stdin: int | None = N
                 stderr: int = asyncio.subprocess.PIPE, **kwargs) -> asyncio.subprocess.Process:
     """``create_subprocess_exec`` для CLI движка: argv[0] разворачивается через
     resolve_command, stdout/stderr — в пайпы, лимит строки 10 МБ (stream-json).
-    Каталог конфигов аккаунта хода (engines.accounts) подмешивается в env."""
-    argv = [*resolve_command(cmd[0]), *cmd[1:]]
+    Каталог конфигов аккаунта хода (engines.accounts) подмешивается в env.
+    На Linux под user-сервисом CLI идёт в свой scope systemd (engines.cli_scope)."""
+    argv = cli_scope.wrap([*resolve_command(cmd[0]), *cmd[1:]])
     extra_env = {**(account_env() or {}), **(SPAWN_ENV.get() or {})}
     if extra_env:
         kwargs["env"] = {**(kwargs.get("env") or os.environ), **extra_env}
