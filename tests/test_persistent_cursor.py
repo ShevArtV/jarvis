@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -174,6 +175,22 @@ class PersistentCursorTest(unittest.IsolatedAsyncioTestCase):
         await worker._handle_update(chunk("старое"))
         self.assertEqual(worker._text, "")
         self.assertEqual(published, [])
+
+    async def test_authenticate_skipped_when_cli_logged_in(self) -> None:
+        for token, calls in (("tok", []), (None, ["authenticate"])):
+            worker, _, _ = make_worker()
+            sent: list[str] = []
+
+            async def fake_call(m, params, timeout=0, _sent=sent):
+                _sent.append(m)
+                return {}
+
+            env = {k: v for k, v in os.environ.items() if k != "CURSOR_API_KEY"}
+            with patch.dict("os.environ", env, clear=True), \
+                 patch.object(persistent_cursor, "_cursor_token", return_value=(token, None)), \
+                 patch.object(worker, "_call", side_effect=fake_call):
+                await worker.authenticate()
+            self.assertEqual(sent, calls)
 
 
 if __name__ == "__main__":

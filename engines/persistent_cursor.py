@@ -23,6 +23,7 @@ from engines.cursor_engine import (
     CursorEngine,
     _config_dir,
 )
+from engines.limits import _cursor_token
 from engines.process_control import spawn, terminate_process_tree
 from engines.topic_mcp import acp_mcp_servers
 
@@ -64,8 +65,11 @@ class PersistentCursorWorker(AcpWorker):
 
     async def authenticate(self) -> None:
         # Ключ API CLI берёт из env сам, а cursor_login при ключе уводит во вход через браузер.
-        if not os.environ.get("CURSOR_API_KEY"):
-            await self._call("authenticate", {"methodId": "cursor_login"})
+        # Токен уже в auth.json — CLI подхватит его сам; cursor_login же ходит
+        # на сервер и временами молчит дольше CALL_TIMEOUT, роняя подъём процесса.
+        if os.environ.get("CURSOR_API_KEY") or _cursor_token()[0]:
+            return
+        await self._call("authenticate", {"methodId": "cursor_login"})
 
     def session_on_disk(self, session_id: str) -> bool:
         return acp_session_exists(session_id)
