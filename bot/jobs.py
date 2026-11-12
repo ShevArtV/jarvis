@@ -31,6 +31,7 @@ from bot.delivery import (
 from bot.formatting import _html_escape
 from bot.llm import call_llm_stream
 from bot.plugins import trigger_source
+from bot.turn_retry import retry_network_errors
 from bot.sessions import (
     clear_pending_summary,
     ensure_active_session,
@@ -348,6 +349,9 @@ async def _run_manager_job(app: Application, job: dict) -> tuple[bool, int | Non
             if use_persistent:
                 ok, final_text = await _run_job_turn_persistent(
                     chat, thread_id, key, prompt, on_intermediate,
+                )
+                ok, final_text = await retry_network_errors(
+                    chat, thread_id, key, ok, final_text, on_intermediate,
                 )
             else:
                 with engine_model_scope(engine.name, model):

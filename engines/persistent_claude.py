@@ -8,6 +8,7 @@ import logging
 import time
 from collections.abc import Awaitable, Callable
 
+from engines.api_errors import is_network_api_error
 from engines.claude_cli import _accumulate_assistant_event, _claude_command
 from engines.claude_engine import ClaudeEngine
 from engines.common import (
@@ -147,7 +148,10 @@ class PersistentClaudeWorker:
                 elif etype == "result":
                     await self._flush(force=True)
                     r = ev.get("result")
-                    self._resolve(True, r if isinstance(r, str) else "")
+                    text = r if isinstance(r, str) else ""
+                    # Ошибку API CLI отдаёт тем же result — это не ответ модели.
+                    failed = bool(ev.get("is_error")) or is_network_api_error(text)
+                    self._resolve(not failed, text)
         except Exception:
             logger.exception("persistent worker: read loop crashed key=%s", self.key)
         finally:

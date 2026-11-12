@@ -81,6 +81,7 @@ from bot.topics import (
 from engines import engine_model_scope, get_engine_by_name
 from engines.accounts import engine_account_scope
 from engines.background_work import capture_baseline
+from bot.turn_retry import retry_network_errors
 from engines.persistent import describe_error, persistent_timeout, start_persistent
 
 logger = logging.getLogger(__name__)
@@ -447,6 +448,9 @@ async def _handle_persistent_message(
     finally:
         if worker is not None:
             worker.on_intermediate = None
+    ok, final_text = await retry_network_errors(
+        chat, thread_id, key, ok, final_text, journal.append,
+    )
 
     if ok and pending_summary_delivered:
         clear_pending_summary(*key)
