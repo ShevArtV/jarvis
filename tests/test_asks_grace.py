@@ -155,3 +155,12 @@ class AsksGraceTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EscapeWithLinksTest(unittest.TestCase):
+    def test_hides_url_under_word(self) -> None:
+        from bot.html_links import escape_with_links
+
+        html = escape_with_links("a<b [миниапп](https://t.me/b/qw?startapp=t_1) [x](http://no)")
+        self.assertEqual(html, 'a&lt;b <a href="https://t.me/b/qw?startapp=t_1">миниапп</a> '
+                               "[x](http://no)")

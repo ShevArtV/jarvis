@@ -46,6 +46,7 @@ import httpx
 from bot.queues import enqueue_agent_trigger
 from bot.settings import MEDIA_DIR
 from bot.topics import TopicKey, _resolve_topic_from_env, resolve_teamlead_topic
+from plugins.queuewarden.links import miniapp_task_url, set_bot_username
 
 logger = logging.getLogger(__name__)
 
@@ -261,19 +262,6 @@ def prune_attachments(ttl_days: int) -> int:
     return removed
 
 
-def miniapp_task_url(url: str) -> str | None:
-    """Сайт ``https://host/tasks/<id>`` → миниапп ``https://host/miniapp/tasks/<id>``.
-
-    Другой путь не переписываем: выдуманная ссылка хуже её отсутствия."""
-    if not url.startswith("https://") or "/miniapp/" in url:
-        return None
-    marker = "/tasks/"
-    at = url.find(marker)
-    if at < 0:
-        return None
-    return url[:at] + "/miniapp" + url[at:]
-
-
 def build_trigger_text(item: dict, inst: Installation,
                        extra: dict | None = None) -> str:
     """Одно уведомление — текст строки триггера. Инструкцию агенту к серии
@@ -289,7 +277,7 @@ def build_trigger_text(item: dict, inst: Installation,
         lines.append(f"Текст: {body}")
     if item.get("url"):
         lines.append(f"Ссылка: {item['url']}")
-        mini = miniapp_task_url(item["url"])
+        mini = miniapp_task_url(item["url"], item.get("taskId"), inst.url)
         if mini:
             lines.append(f"Миниапп: {mini}")
     lines.append(
@@ -446,6 +434,7 @@ async def queuewarden_notifications_worker(app: Any) -> None:
         logger.info("queuewarden_notifications_worker: no installations "
                     "(QUEUEWARDEN_INSTALLATIONS or QUEUEWARDEN_MCP_TOKEN) — off")
         return
+    set_bot_username(getattr(getattr(app, "bot", None), "username", None))
     topic = resolve_notice_topic()
     if topic is None:
         logger.warning("queuewarden_notifications_worker: no Teamlead/Secretary topic "
