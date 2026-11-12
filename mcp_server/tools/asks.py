@@ -10,6 +10,7 @@ import sqlite3
 import time
 from typing import Any
 
+from bot.html_links import escape_with_links
 from bot.timeutil import utcnow
 from mcp_server import common
 from mcp_server.common import mcp
@@ -166,7 +167,7 @@ async def ask_user(
         )
         ask_id = cur.lastrowid
 
-    body = f"❓ {question}\n\n"
+    body = f"❓ {escape_with_links(question)}\n\n"
     body += (
         "Выбери вариант или ответь сообщением."
         if options else "Ответь сообщением в этот топик."
@@ -175,6 +176,7 @@ async def ask_user(
         "chat_id": target_chat_id,
         "text": body,
         "message_thread_id": thread_id,
+        "parse_mode": "HTML",
     }
     if options:
         params["reply_markup"] = _ask_keyboard(ask_id, options)
@@ -248,7 +250,7 @@ async def ask_user(
                 "chat_id": target_chat_id,
                 "message_id": tg_msg_id,
                 "text": (
-                    f"❓ {question}\n\n⌛ Вопрос истёк — ответа не было. "
+                    f"❓ {escape_with_links(question)}\n\n⌛ Вопрос истёк — ответа не было. "
                     "Можешь всё равно ответить сообщением: передам агенту "
                     "в ближайшие 15 минут."
                 ),

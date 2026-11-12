@@ -138,6 +138,27 @@ class ParseTest(unittest.TestCase):
         self.assertIn(f"Ссылка: {site}", text)
         self.assertIn("Миниапп: https://tako.queuewarden.ru/miniapp/tasks/92ece5f6", text)
 
+    def test_miniapp_link_is_telegram_startapp(self) -> None:
+        from plugins.queuewarden import links
+
+        boards = [("tako", "https://tako.queuewarden.ru/miniapp", "qwtako")]
+        site = "https://tako.queuewarden.ru/tasks/4eb532a4-7ed3-4cd5-97ef-cc8a80746a9f"
+        tid = "4eb532a4-7ed3-4cd5-97ef-cc8a80746a9f"
+        with patch.object(links, "BOARD_MINIAPPS", boards):
+            links.set_bot_username("@jarvisbot")
+            try:
+                self.assertEqual(
+                    links.miniapp_task_url(site, tid, "https://tako.queuewarden.ru"),
+                    f"https://t.me/jarvisbot/qwtako?startapp=t_{tid}",
+                )
+                # Чужая установка без short_name — прежняя ссылка /miniapp/.
+                self.assertEqual(
+                    links.miniapp_task_url(site, tid, "https://other.example"),
+                    site.replace("/tasks/", "/miniapp/tasks/"),
+                )
+            finally:
+                links.set_bot_username(None)
+
     def test_round_prompt_gates_then_digest(self) -> None:
         from plugins.queuewarden.round import build_round_prompt
 
@@ -150,7 +171,7 @@ class ParseTest(unittest.TestCase):
                      "queuewarden_decide_approval", "queuewarden_postpone_approval",
                      "postponed_at", "субагенту", "ждут решения", "[[SILENT]] не пиши",
                      "queuewarden_task_get", "Роль оператора:", "[[FILE:",
-                     "Сайт:", "Миниапп:", "мнение Тимлида",
+                     "[миниапп](", "[браузер](", "без голых", "мнение Тимлида",
                      'sortBy: "focus"', "focus_position", "bin/task-queue.py"):
             self.assertIn(part, prompt)
         self.assertNotIn("ask_user не вызывай", prompt)

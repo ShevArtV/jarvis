@@ -20,6 +20,7 @@ from telegram.ext import ContextTypes
 
 from bot.db import _db
 from bot.formatting import _html_escape
+from bot.html_links import escape_with_links
 from bot.timeutil import utcnow
 
 logger = logging.getLogger(__name__)
@@ -118,7 +119,7 @@ async def _mark_ask_answered(chat, ask: dict, answer: str) -> None:
     if not tg_msg_id:
         return
     body = (
-        f"❓ {_html_escape(ask['question'])}\n\n"
+        f"❓ {escape_with_links(ask['question'])}\n\n"
         f"✅ <b>Ответ:</b> {_html_escape(answer)}"
     )
     try:
@@ -178,7 +179,7 @@ async def on_ask_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         logger.debug("ask #%s: failed to answer callback query", ask_id, exc_info=True)
     try:
         await query.edit_message_text(
-            f"❓ {_html_escape(ask['question'])}\n\n"
+            f"❓ {escape_with_links(ask['question'])}\n\n"
             f"✅ <b>Ответ:</b> {_html_escape(answer)}",
             parse_mode=ParseMode.HTML, reply_markup=None,
         )
