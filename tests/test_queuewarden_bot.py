@@ -166,13 +166,15 @@ class ParseTest(unittest.TestCase):
         self.assertIn("2 шт.", prompt)
         self.assertLess(prompt.index("--- 1 ---\nсобытие А"),
                         prompt.index("--- 2 ---\nсобытие Б"))
-        self.assertLess(prompt.index("Шаг 1 — gate"), prompt.index("Шаг 2 — дайджест"))
+        self.assertLess(prompt.index("Шаг 1 — gate"), prompt.index("Шаг 1а — слоты"))
+        self.assertLess(prompt.index("Шаг 1а — слоты"), prompt.index("Шаг 2 — дайджест"))
         for part in ("ask_user", "timeout_seconds=1200", "«Отложить решение»",
                      "queuewarden_decide_approval", "queuewarden_postpone_approval",
                      "postponed_at", "субагенту", "ждут решения", "[[SILENT]] не пиши",
                      "queuewarden_task_get", "Роль оператора:", "[[FILE:",
                      "[миниапп](", "[браузер](", "без голых", "мнение Тимлида",
-                     'sortBy: "focus"', "focus_position", "bin/task-queue.py"):
+                     'sortBy: "focus"', "focus_position", "bin/task-queue.py", "slot_runner_id",
+                     "queuewarden_dequeue", "queuewarden_requeue_task"):
             self.assertIn(part, prompt)
         self.assertNotIn("ask_user не вызывай", prompt)
 
