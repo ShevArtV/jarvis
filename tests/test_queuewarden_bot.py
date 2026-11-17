@@ -173,10 +173,12 @@ class ParseTest(unittest.TestCase):
                      "postponed_at", "субагенту", "ждут решения", "[[SILENT]] не пиши",
                      "queuewarden_task_get", "Роль оператора:", "[[FILE:",
                      "[миниапп](", "[браузер](", "без голых", "мнение Тимлида",
-                     'sortBy: "focus"', "focus_position", "bin/task-queue.py", "slot_runner_id",
+                     'sortBy: "focus"', "focus_position", "needsHuman: true", "holdsSlot: true",
                      "queuewarden_dequeue", "queuewarden_requeue_task"):
             self.assertIn(part, prompt)
         self.assertNotIn("ask_user не вызывай", prompt)
+        self.assertNotIn("slot_runner_id", prompt)
+        self.assertNotIn("task-queue.py", prompt)
 
     def test_notice_topic_env_override(self) -> None:
         with patch.dict(os.environ, ENV):
