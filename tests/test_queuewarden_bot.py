@@ -174,7 +174,8 @@ class ParseTest(unittest.TestCase):
                      "queuewarden_task_get", "Роль оператора:", "[[FILE:",
                      "[миниапп](", "[браузер](", "без голых", "мнение Тимлида",
                      'sortBy: "focus"', "focus_position", "bin/task-queue.py", "slot_runner_id",
-                     "queuewarden_dequeue", "queuewarden_requeue_task"):
+                     "queuewarden_dequeue", "queuewarden_requeue_task", "stageKeys",
+                     "ожидающих работы"):
             self.assertIn(part, prompt)
         self.assertNotIn("ask_user не вызывай", prompt)
 
